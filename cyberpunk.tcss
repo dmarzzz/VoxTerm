@@ -1,0 +1,30 @@
+Screen {
+    background: #0a0e14;
+    overflow: hidden;
+}
+
+#main-container {
+    width: 1fr;
+    height: 1fr;
+}
+
+#footer-bar {
+    dock: bottom;
+    height: 1;
+    background: #0a0e14;
+    border-top: heavy #003344;
+    color: #607080;
+    padding: 0 1;
+}
+
+#telemetry {
+    height: 3;
+    border: heavy #00e5ff;
+    border-title-color: #00ffcc;
+    border-title-style: bold;
+    border-title-align: left;
+    background: #0a0e14;
+    margin: 0 1;
+    padding: 0 1;
+    color: #607080;
+}
