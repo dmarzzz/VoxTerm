@@ -213,6 +213,60 @@ class LanguageSelectScreen(ModalScreen):
         self.dismiss(None)
 
 
+class HelpScreen(ModalScreen):
+    """Modal showing all keyboard shortcuts."""
+
+    DEFAULT_CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+    #help-dialog {
+        width: 48;
+        height: auto;
+        max-height: 20;
+        border: heavy #00e5ff;
+        border-title-color: #00ffcc;
+        border-title-style: bold;
+        background: #0a0e14;
+        padding: 1 2;
+    }
+    #help-content {
+        height: auto;
+        color: #c0c0c0;
+    }
+    #help-hint {
+        height: 1;
+        color: #607080;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("question_mark", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog") as dialog:
+            dialog.border_title = "KEYBOARD SHORTCUTS"
+            yield Static(
+                "[bold #00e5ff]R[/]  [#c0c0c0]Start / stop recording[/]\n"
+                "[bold #00e5ff]M[/]  [#c0c0c0]Switch transcription model[/]\n"
+                "[bold #00e5ff]L[/]  [#c0c0c0]Switch language[/]\n"
+                "[bold #00e5ff]S[/]  [#c0c0c0]Export transcript (file / clipboard)[/]\n"
+                "[bold #00e5ff]C[/]  [#c0c0c0]Clear transcript[/]\n"
+                "[bold #00e5ff]D[/]  [#c0c0c0]Toggle debug mode[/]\n"
+                "[bold #00e5ff]Q[/]  [#c0c0c0]Quit[/]",
+                id="help-content",
+                markup=True,
+            )
+            yield Static(
+                " [#607080]ESC[/] or [#607080]?[/] to close",
+                id="help-hint",
+                markup=True,
+            )
+
+
 class ExportScreen(ModalScreen):
     """Modal for exporting transcript to a destination."""
 
@@ -285,6 +339,7 @@ class VoxTerm(App):
         Binding("s", "export_transcript", "Export"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
+        Binding("question_mark", "show_help", "Help"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -326,11 +381,7 @@ class VoxTerm(App):
             )
         yield Static(
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
-            "[bold #00e5ff]\\[M][/][#607080] Model  [/]"
-            "[bold #00e5ff]\\[L][/][#607080] Lang  [/]"
-            "[bold #00e5ff]\\[S][/][#607080] Export  [/]"
-            "[bold #00e5ff]\\[C][/][#607080] Clear  [/]"
-            "[bold #00e5ff]\\[Q][/][#607080] Quit[/]",
+            "[bold #00e5ff]\\[?][/][#607080] Help[/]",
             id="footer-bar",
             markup=True,
         )
@@ -854,6 +905,9 @@ class VoxTerm(App):
         self._session_start = datetime.now()
         self._live_file = None
         self._live_header_written = False
+
+    def action_show_help(self):
+        self.push_screen(HelpScreen())
 
     def action_toggle_debug(self):
         self._debug = not self._debug
