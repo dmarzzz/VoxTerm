@@ -440,11 +440,13 @@ class VoxTerm(App):
 
     def _start_audio_timer(self):
         self.set_interval(1.0 / WAVEFORM_FPS, self._process_audio, name="audio_timer")
-        self.set_interval(5.0, self._refresh_telemetry, name="telemetry_timer")
+        self.set_interval(1.0, self._refresh_telemetry, name="telemetry_timer")
         self.set_interval(60.0, self._periodic_gc, name="gc_timer")
 
     def _refresh_telemetry(self):
-        """Periodic refresh so the 'saved: Xs ago' counter stays current."""
+        """Periodic refresh for saved counter and recording timer."""
+        if self._recording:
+            self.query_one(CyberHeader).refresh()
         if self._last_saved_at is not None:
             self._update_telemetry()
 
@@ -739,22 +741,26 @@ class VoxTerm(App):
             return
 
         waveform = self.query_one(WaveformWidget)
+        header = self.query_one(CyberHeader)
         transcript = self.query_one(TranscriptPanel)
         if self._recording:
             self._recording = False
             self.audio_capture.stop()
             self.system_capture.stop()
             waveform.set_recording(False)
+            header.set_recording(False)
             transcript.system_message("recording paused")
         else:
             self._recording = True
             try:
                 self.audio_capture.start()
                 waveform.set_recording(True)
+                header.set_recording(True)
                 transcript.system_message("recording started")
             except Exception as e:
                 self._recording = False
                 waveform.set_recording(False)
+                header.set_recording(False)
                 transcript.system_message(
                     f"microphone error: {e} — grant Terminal mic access in System Settings > Privacy"
                 )
