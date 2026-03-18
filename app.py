@@ -243,7 +243,7 @@ class HelpScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
-        Binding("question_mark", "dismiss", "Close"),
+        Binding("?", "dismiss", "Close", key_display="?"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -339,7 +339,7 @@ class VoxTerm(App):
         Binding("s", "export_transcript", "Export"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
-        Binding("question_mark", "show_help", "Help"),
+        Binding("?", "show_help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
     ]
 
