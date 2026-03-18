@@ -18,11 +18,7 @@ Screen {
 }
 
 #telemetry {
-    height: 3;
-    border: heavy #00e5ff;
-    border-title-color: #00ffcc;
-    border-title-style: bold;
-    border-title-align: left;
+    height: 1;
     background: #0a0e14;
     margin: 0 1;
     padding: 0 1;

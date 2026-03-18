@@ -319,13 +319,11 @@ class VoxTerm(App):
         with Vertical(id="main-container"):
             yield WaveformWidget()
             yield TranscriptPanel()
-            telemetry = Static(
-                "  status: [bold #607080]IDLE[/]    model: [#00ffcc]loading...[/]    audio: [#607080]inactive[/]",
+            yield Static(
+                "  [bold #607080]● IDLE[/]    [#00ffcc]loading...[/]",
                 id="telemetry",
                 markup=True,
             )
-            telemetry.border_title = "TELEMETRY"
-            yield telemetry
         yield Static(
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
             "[bold #00e5ff]\\[M][/][#607080] Model  [/]"
@@ -355,42 +353,39 @@ class VoxTerm(App):
         return CHUNK_SIZE / SAMPLE_RATE
 
     def _update_telemetry(self):
-        status = "RECORDING" if self._recording else "PAUSED" if self._model_loaded else "IDLE"
-        status_color = "#00ff88" if self._recording else "#ff6600" if status == "PAUSED" else "#607080"
+        # Status dot
+        if self._recording:
+            status = "[bold #00ff88]● REC[/]"
+        elif self._model_loaded:
+            status = "[bold #607080]● IDLE[/]"
+        else:
+            status = "[bold #607080]● LOADING[/]"
+
         model_text = self._model_name if self._model_loaded else "loading..."
-        audio_text = "active" if self._recording else "inactive"
-        audio_color = "#00ff88" if self._recording else "#607080"
-        engine_text = "qwen3-asr" if self._is_qwen3 else "whisper"
-        engine_color = "#aa88ff" if self._is_qwen3 else "#607080"
         lang_text = AVAILABLE_LANGUAGES.get(self._language, self._language) if self._language else "auto"
+
         spk_count = self.diarizer.num_speakers if self._diarizer_loaded else 0
-        spk_text = f"    speakers: [#aa88ff]{spk_count}[/]" if spk_count > 0 else ""
+        spk_text = f"    [#aa88ff]{spk_count} speakers[/]" if spk_count > 0 else ""
 
         # Auto-save indicator
         if self._last_saved_at is not None:
             ago = int(time.time() - self._last_saved_at)
             if ago < 60:
-                saved_text = f"    last saved: [#00ff88]{ago}s ago[/]"
+                saved_text = f"    [#00ff88]saved {ago}s ago[/]"
             elif ago < 3600:
-                saved_text = f"    last saved: [#ffaa00]{ago // 60}m ago[/]"
+                saved_text = f"    [#ffaa00]saved {ago // 60}m ago[/]"
             else:
-                saved_text = f"    last saved: [#ff6600]{ago // 3600}h ago[/]"
+                saved_text = f"    [#ff6600]saved {ago // 3600}h ago[/]"
         else:
             saved_text = ""
 
-        telemetry = self.query_one("#telemetry", Static)
-        telemetry.update(
-            f"  status: [bold {status_color}]{status}[/]"
-            f"    model: [#00ffcc]{model_text}[/]"
-            f"    audio: [{audio_color}]{audio_text}[/]"
-            f"    engine: [{engine_color}]{engine_text}[/]"
-            f"    lang: [#ffaa66]{lang_text}[/]"
+        self.query_one("#telemetry", Static).update(
+            f"  {status}"
+            f"    [#00ffcc]{model_text}[/]"
+            f"    [#ffaa66]{lang_text}[/]"
             f"{spk_text}"
             f"{saved_text}"
         )
-
-        header = self.query_one(CyberHeader)
-        header.update_status(status=status, audio=audio_text)
 
     def _start_audio_timer(self):
         self.set_interval(1.0 / WAVEFORM_FPS, self._process_audio, name="audio_timer")
