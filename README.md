@@ -7,7 +7,7 @@ Local real-time voice transcription TUI with speaker diarization. Runs entirely 
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USER/voxterm.git
+git clone https://github.com/dmarzzz/VoxTerm.git
 cd voxterm
 python3 -m venv .venv
 source .venv/bin/activate

@@ -1,12 +1,21 @@
 import math
 import numpy as np
 from collections import deque
+from functools import lru_cache
 from textual.widget import Widget
 from textual.strip import Strip
 from rich.segment import Segment
 from rich.style import Style
 
 _SR = 16000
+
+
+@lru_cache(maxsize=512)
+def _make_style(fr, fg, fb, br, bg, bb):
+    """Cached Style constructor — bounded LRU prevents unbounded memory growth."""
+    fh = f"#{(fr<<2):02x}{(fg<<2):02x}{(fb<<2):02x}"
+    bh = f"#{(br<<2):02x}{(bg<<2):02x}{(bb<<2):02x}"
+    return Style(color=fh, bgcolor=bh)
 
 
 class WaveformWidget(Widget):
@@ -51,7 +60,6 @@ class WaveformWidget(Widget):
         self._samples: deque = deque(maxlen=capacity)
         self._signal_age = 999
 
-        self._style_cache: dict[tuple, Style] = {}
         self._bg = np.array([6, 8, 16], dtype=np.float32)
 
         # pitch → edge-colour gradient  (9-stop cyberpunk neon)
@@ -86,15 +94,9 @@ class WaveformWidget(Widget):
 
     # ── style cache ───────────────────────────────────────────
 
-    def _cached_style(self, fr, fg, fb, br, bg, bb):
-        key = (fr >> 2, fg >> 2, fb >> 2, br >> 2, bg >> 2, bb >> 2)
-        s = self._style_cache.get(key)
-        if s is None:
-            fh = f"#{(key[0]<<2):02x}{(key[1]<<2):02x}{(key[2]<<2):02x}"
-            bh = f"#{(key[3]<<2):02x}{(key[4]<<2):02x}{(key[5]<<2):02x}"
-            s = Style(color=fh, bgcolor=bh)
-            self._style_cache[key] = s
-        return s
+    @staticmethod
+    def _cached_style(fr, fg, fb, br, bg, bb):
+        return _make_style(fr >> 2, fg >> 2, fb >> 2, br >> 2, bg >> 2, bb >> 2)
 
     # ── frame builder ─────────────────────────────────────────
 

@@ -55,6 +55,20 @@ class DiarizationEngine:
         except ImportError:
             pass
 
+        # Fix huggingface_hub compat: newer versions removed 'use_auth_token'
+        # and newer speechbrain looks for 'custom.py' which old model repos lack
+        import huggingface_hub
+        from huggingface_hub.utils import EntryNotFoundError
+        _orig_download = huggingface_hub.hf_hub_download
+        def _patched_download(*args, **kwargs):
+            kwargs.pop("use_auth_token", None)
+            try:
+                return _orig_download(*args, **kwargs)
+            except EntryNotFoundError:
+                # Model repo lacks custom.py — that's fine, return None
+                return None
+        huggingface_hub.hf_hub_download = _patched_download
+
         try:
             from speechbrain.inference.speaker import EncoderClassifier
         except ImportError:
@@ -62,12 +76,17 @@ class DiarizationEngine:
                 "speechbrain is required for speaker diarization. "
                 "Install it with:  pip install speechbrain"
             )
+
+        cache_dir = __import__("pathlib").Path.home() / ".cache" / "speechbrain" / "spkrec-ecapa-voxceleb"
+        # Use local cache as source if available (avoids HF download issues)
+        if (cache_dir / "hyperparams.yaml").exists():
+            source = str(cache_dir)
+        else:
+            source = "speechbrain/spkrec-ecapa-voxceleb"
+
         self._model = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=str(
-                __import__("pathlib").Path.home()
-                / ".cache" / "speechbrain" / "spkrec-ecapa-voxceleb"
-            ),
+            source=source,
+            savedir=str(cache_dir),
             run_opts={"device": "cpu"},
         )
         # Warm up to ensure model is fully initialized

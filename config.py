@@ -40,10 +40,16 @@ AVAILABLE_LANGUAGES = {
     "tr": "Turkish",
     "nl": "Dutch",
 }
-MAX_BUFFER_SECONDS = 5.0
-MIN_BUFFER_SECONDS = 1.5
-SILENCE_THRESHOLD = 0.015
-SILENCE_TRIGGER_SECONDS = 1.0
+MAX_BUFFER_SECONDS = 15.0
+MIN_BUFFER_SECONDS = 1.0
+SILENCE_THRESHOLD = 0.012
+SILENCE_TRIGGER_SECONDS = 1.5
+
+# Session persistence
+LIVE_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".live"
+
+# System audio capture — compiled Swift helper cached here
+BIN_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".bin"
 
 # Waveform
 WAVEFORM_FPS = 15

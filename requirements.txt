@@ -1,5 +1,6 @@
 textual>=8.0.0
 mlx-whisper>=0.4.0
+mlx-qwen3-asr>=0.1.0
 sounddevice>=0.5.0
 numpy>=2.0.0
 speechbrain>=1.0.0
