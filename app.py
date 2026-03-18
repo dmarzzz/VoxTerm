@@ -9,6 +9,7 @@ import sys
 import os
 import subprocess
 import json
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -300,7 +301,7 @@ class VoxTerm(App):
         self._recording = False
         self._had_speech = False
         self._silence_chunks = 0
-        self._is_transcribing = False
+        self._transcribing = threading.Event()  # set = busy, clear = idle
         self._transcribe_started: float = 0.0
         self._debug = False
         self._last_dbg: float = 0.0
@@ -444,7 +445,7 @@ class VoxTerm(App):
                 f"",
                 f"-- runtime state --",
                 f"recording:        {self._recording}",
-                f"is_transcribing:  {self._is_transcribing}",
+                f"is_transcribing:  {self._transcribing.is_set()}",
                 f"transcribe_count: {self._transcribe_count}",
                 f"model:            {self._model_name}",
                 f"model_loaded:     {self._model_loaded}",
@@ -520,11 +521,11 @@ class VoxTerm(App):
         silence_duration = self._silence_chunks * self._chunk_duration
         buffer_duration = self.audio_buffer.duration
 
-        if self._is_transcribing:
+        if self._transcribing.is_set():
             # Watchdog: force-reset if stuck for >10s
             elapsed = time.time() - self._transcribe_started if self._transcribe_started else 0
             if elapsed > 10:
-                self._is_transcribing = False
+                self._transcribing.clear()
                 if self._debug:
                     self.query_one(TranscriptPanel).system_message(
                         f"[watchdog] reset after {elapsed:.0f}s"
@@ -547,12 +548,12 @@ class VoxTerm(App):
 
     def _trigger_transcription(self):
         """Send accumulated audio to transcription worker."""
-        self._is_transcribing = True
+        self._transcribing.set()
         self._transcribe_started = time.time()
         self._silence_chunks = 0
         audio = self.audio_buffer.get_and_clear()
         if len(audio) < int(SAMPLE_RATE * MIN_BUFFER_SECONDS):
-            self._is_transcribing = False
+            self._transcribing.clear()
             return
 
         self._had_speech = False
@@ -599,7 +600,7 @@ class VoxTerm(App):
             )
         finally:
             # ALWAYS unblock — even if worker is cancelled or crashes
-            self._is_transcribing = False
+            self._transcribing.clear()
 
     def _on_transcription(self, text: str, speaker: str = "", speaker_id: int = 0):
         self.query_one(TranscriptPanel).add_transcript(text, speaker, speaker_id)
@@ -722,7 +723,7 @@ class VoxTerm(App):
         self._update_telemetry()
 
     def action_switch_model(self):
-        if self._is_transcribing:
+        if self._transcribing.is_set():
             self.query_one(TranscriptPanel).system_message("wait for transcription to finish...")
             return
         was_recording = self._recording
@@ -849,7 +850,6 @@ class VoxTerm(App):
         """Clear transcript and reset for a new session."""
         transcript = self.query_one(TranscriptPanel)
         transcript.clear()
-        transcript._entries.clear()
         self.audio_buffer.clear()
         self._had_speech = False
         self._silence_chunks = 0
@@ -868,7 +868,6 @@ class VoxTerm(App):
     def action_clear_transcript(self):
         """Clear display only — live file stays on disk as the record."""
         self.query_one(TranscriptPanel).clear()
-        self.query_one(TranscriptPanel)._entries.clear()
         self.audio_buffer.clear()
         self._had_speech = False
         self._silence_chunks = 0
@@ -882,7 +881,6 @@ class VoxTerm(App):
 
         # Let Textual restore the terminal, then hard-exit before
         # Python's GC triggers C extension segfaults
-        import threading
         threading.Timer(0.5, os._exit, args=[0]).start()
         self.exit()
 
@@ -954,7 +952,6 @@ if __name__ == "__main__":
         _orig_excepthook(exc_type, exc_value, exc_tb)
     sys.excepthook = _crash_excepthook
 
-    import threading
     _orig_thread_excepthook = getattr(threading, "excepthook", None)
     def _thread_crash_hook(args):
         app._write_crash_dump(f"thread:{args.thread.name if args.thread else 'unknown'}", args.exc_value)

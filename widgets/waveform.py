@@ -6,8 +6,7 @@ from textual.widget import Widget
 from textual.strip import Strip
 from rich.segment import Segment
 from rich.style import Style
-
-_SR = 16000
+from config import SAMPLE_RATE
 
 
 @lru_cache(maxsize=512)
@@ -56,7 +55,7 @@ class WaveformWidget(Widget):
         self._ready_glow = 0.0          # animates 0→1 when recording starts
         self._frame: list[Strip] = []
 
-        capacity = int(_SR * self.DISPLAY_SECONDS * 1.5)
+        capacity = int(SAMPLE_RATE * self.DISPLAY_SECONDS * 1.5)
         self._samples: deque = deque(maxlen=capacity)
         self._signal_age = 999
 
@@ -122,7 +121,7 @@ class WaveformWidget(Widget):
         if has_signal and len(self._samples) > 0:
             buf = np.array(self._samples, dtype=np.float32)
             n = len(buf)
-            spw = max(1, int(_SR * self.DISPLAY_SECONDS) // W)
+            spw = max(1, int(SAMPLE_RATE * self.DISPLAY_SECONDS) // W)
             need = spw * W
 
             if n >= need:

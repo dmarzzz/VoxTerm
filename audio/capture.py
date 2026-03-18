@@ -8,11 +8,18 @@ class AudioCapture:
     """Manages microphone input via sounddevice InputStream."""
 
     def __init__(self):
-        self.queue: queue.Queue[np.ndarray] = queue.Queue()
+        self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=500)
         self._stream = None
 
     def _callback(self, indata, frames, time_info, status):
-        self.queue.put(indata[:, 0].copy())
+        try:
+            self.queue.put_nowait(indata[:, 0].copy())
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.queue.put_nowait(indata[:, 0].copy())
 
     def start(self):
         self._stream = sd.InputStream(

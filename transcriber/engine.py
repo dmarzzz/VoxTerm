@@ -39,6 +39,58 @@ class _DeduplicatorMixin:
         return False
 
 
+def _is_hallucination(text: str, expected_language: str | None = "en") -> bool:
+    """Detect common ASR hallucination patterns (shared by all transcribers)."""
+    if not text:
+        return False
+    if len(text) < 2:
+        return True
+
+    # Reject non-Latin script when expecting a Latin-script language
+    if expected_language and expected_language in (
+        "en", "fr", "de", "es", "it", "pt", "nl", "tr",
+    ):
+        if re.search(r'[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\u0400-\u04ff\u0600-\u06ff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text):
+            return True
+
+    words = text.lower().split()
+    if len(words) > 80:
+        return True
+
+    if len(words) >= 8:
+        from collections import Counter
+        for n in range(2, min(11, len(words) // 2 + 1)):
+            if len(words) < n * 2:
+                continue
+            ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
+            counts = Counter(ngrams)
+            top_count = counts.most_common(1)[0][1]
+            if top_count >= 3 and top_count > len(ngrams) * 0.25:
+                return True
+
+    hallucination_patterns = [
+        r"^\.+$",
+        r"^(thanks? (for )?watching)",
+        r"^(subscribe)",
+        r"^(please subscribe)",
+        r"^(music|applause|\[music\])",
+        r"^(you)$",
+        r"^(so)$",
+        r"^(oh)$",
+        r"^(bye\.?)$",
+        r"^(thank you\.?)$",
+        r"^so,?\s+let'?s\s+go\.?$",
+        r"^let'?s\s+go\.?$",
+        r"^one,?\s+two,?\s+three,?\s+four\.?$",
+        r"^i'?m\s+going\s+to\s+go\s+ahead",
+    ]
+    text_lower = text.lower().strip()
+    for pattern in hallucination_patterns:
+        if re.match(pattern, text_lower):
+            return True
+    return False
+
+
 class Qwen3Transcriber(_DeduplicatorMixin):
     """Qwen3-ASR transcriber."""
 
@@ -77,64 +129,13 @@ class Qwen3Transcriber(_DeduplicatorMixin):
 
         text = str(result.text).strip() if hasattr(result, 'text') else ""
 
-        if self._is_hallucination(text, self._language):
+        if _is_hallucination(text, self._language):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         if self._is_duplicate(text):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         return {"text": text, "speaker": "", "speaker_id": 0}
-
-    @staticmethod
-    def _is_hallucination(text: str, expected_language: str | None = "en") -> bool:
-        if not text:
-            return False
-        if len(text) < 2:
-            return True
-
-        # Reject non-Latin script when expecting a Latin-script language
-        if expected_language and expected_language in (
-            "en", "fr", "de", "es", "it", "pt", "nl", "tr",
-        ):
-            if re.search(r'[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\u0400-\u04ff\u0600-\u06ff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text):
-                return True
-
-        words = text.lower().split()
-        if len(words) > 80:
-            return True
-
-        if len(words) >= 8:
-            from collections import Counter
-            for n in range(2, min(11, len(words) // 2 + 1)):
-                if len(words) < n * 2:
-                    continue
-                ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
-                counts = Counter(ngrams)
-                top_count = counts.most_common(1)[0][1]
-                if top_count >= 3 and top_count > len(ngrams) * 0.25:
-                    return True
-
-        hallucination_patterns = [
-            r"^\.+$",
-            r"^(thanks? (for )?watching)",
-            r"^(subscribe)",
-            r"^(please subscribe)",
-            r"^(music|applause|\[music\])",
-            r"^(you)$",
-            r"^(so)$",
-            r"^(oh)$",
-            r"^(bye\.?)$",
-            r"^(thank you\.?)$",
-            r"^so,?\s+let'?s\s+go\.?$",
-            r"^let'?s\s+go\.?$",
-            r"^one,?\s+two,?\s+three,?\s+four\.?$",
-            r"^i'?m\s+going\s+to\s+go\s+ahead",
-        ]
-        text_lower = text.lower().strip()
-        for pattern in hallucination_patterns:
-            if re.match(pattern, text_lower):
-                return True
-        return False
 
     @property
     def is_loaded(self) -> bool:
@@ -172,7 +173,7 @@ class WhisperTranscriber(_DeduplicatorMixin):
         )
 
         text = result.get("text", "").strip()
-        if Qwen3Transcriber._is_hallucination(text):
+        if _is_hallucination(text):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         if self._is_duplicate(text):

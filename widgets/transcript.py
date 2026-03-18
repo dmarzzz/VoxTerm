@@ -59,6 +59,11 @@ class TranscriptPanel(RichLog):
         text.append(content, Style(color="#c0c0c0"))
         self.write(text)
 
+    def clear(self):
+        """Clear display and entries."""
+        super().clear()
+        self._entries.clear()
+
     def get_entries(self) -> list[tuple]:
         """Return all transcript entries."""
         return list(self._entries)

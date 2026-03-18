@@ -1,1 +1,1 @@
-from .engine import WhisperTranscriber
+from .engine import Qwen3Transcriber, WhisperTranscriber
