@@ -742,39 +742,6 @@ class VoxTerm(App):
     def _on_diarizer_fallback(self):
         self.query_one(TranscriptPanel).system_message("press [R] to start recording")
 
-    @work(thread=True, group="bt_setup")
-    def _setup_bluetooth_audio(self):
-        """Auto-setup Multi-Output for Bluetooth audio capture.
-
-        If BlackHole isn't installed, tells the user how to install it.
-        If it is installed, creates the multi-output device automatically.
-        """
-        from audio.blackhole import is_blackhole_installed, create_multi_output
-
-        if not is_blackhole_installed():
-            self.call_from_thread(
-                self.query_one(TranscriptPanel).system_message,
-                "system audio requires BlackHole — run: brew install blackhole-2ch"
-            )
-            return
-
-        self.call_from_thread(
-            self.query_one(TranscriptPanel).system_message,
-            "setting up multi-output device..."
-        )
-        ok, msg, _uid = create_multi_output()
-        if ok:
-            self.system_capture._bt_multi_output_active = True
-            self.call_from_thread(
-                self.query_one(TranscriptPanel).system_message,
-                f"system audio ready — {msg}"
-            )
-        else:
-            self.call_from_thread(
-                self.query_one(TranscriptPanel).system_message,
-                f"multi-output setup failed: {msg}"
-            )
-
     # ── actions ─────────────────────────────────────────────────
 
     def action_toggle_recording(self):
@@ -815,19 +782,13 @@ class VoxTerm(App):
             except Exception:
                 pass
 
-            # If Bluetooth detected, auto-setup BlackHole in background
+            # Show system audio status once per session
             if (
                 not self._system_audio_notified
                 and self.system_capture.status_message
             ):
-                bt_msg = self.system_capture.status_message
-                if "Bluetooth" in bt_msg:
-                    transcript.system_message(bt_msg)
-                    self._system_audio_notified = True
-                    self._setup_bluetooth_audio()
-                else:
-                    transcript.system_message(bt_msg)
-                    self._system_audio_notified = True
+                transcript.system_message(self.system_capture.status_message)
+                self._system_audio_notified = True
         self._update_telemetry()
 
     def action_switch_model(self):

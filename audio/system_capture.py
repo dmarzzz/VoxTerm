@@ -70,11 +70,14 @@ class SystemCapture:
         self._active = True
         self._status_message = ""
 
-        # Bluetooth detection (setup handled by app.py for progress feedback)
+        # Bluetooth detection — system audio capture only works with speakers
         try:
             dev_info = get_output_device_info()
             if dev_info.get("is_bluetooth"):
-                self._status_message = f"Bluetooth output detected ({dev_info['name']})"
+                self._status_message = (
+                    "system audio capture unavailable with Bluetooth output — "
+                    "mic recording will continue normally"
+                )
         except Exception:
             pass
 
