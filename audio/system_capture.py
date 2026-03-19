@@ -36,6 +36,7 @@ class SystemCapture:
         self._active = False
         self._unavailable = False
         self._status_message = ""
+        self._bt_multi_output_active = False  # True if we created a multi-output device
 
     # ── public API (matches AudioCapture) ────────────────────
 
@@ -69,14 +70,17 @@ class SystemCapture:
         self._active = True
         self._status_message = ""
 
-        # Check for Bluetooth output device and suggest BlackHole if needed (non-fatal)
+        # Auto-setup Bluetooth routing via BlackHole (non-fatal)
         try:
             dev_info = get_output_device_info()
             if dev_info.get("is_bluetooth"):
-                from audio.blackhole import get_short_status
-                self._status_message = get_short_status(
-                    bt_device_name=dev_info.get("name", "unknown"),
-                )
+                from audio.blackhole import auto_setup_bluetooth
+                ok, msg = auto_setup_bluetooth()
+                if ok:
+                    self._bt_multi_output_active = True
+                    self._status_message = f"Bluetooth detected — {msg}"
+                else:
+                    self._status_message = f"system audio limited — {msg}"
         except Exception:
             pass
 
@@ -115,6 +119,15 @@ class SystemCapture:
 
         self._proc = None
         self._active = False
+
+        # Teardown multi-output device if we created one
+        if self._bt_multi_output_active:
+            try:
+                from audio.blackhole import destroy_multi_output
+                destroy_multi_output()
+            except Exception:
+                pass
+            self._bt_multi_output_active = False
 
         # Drain remaining items from queue
         while not self.queue.empty():

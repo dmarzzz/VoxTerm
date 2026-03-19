@@ -1,4 +1,4 @@
-"""BlackHole virtual audio device detection and setup guidance.
+"""BlackHole virtual audio device detection and auto-setup.
 
 BlackHole is a macOS virtual audio loopback driver that allows applications
 to capture system audio by routing it through a virtual device. When a user
@@ -7,9 +7,11 @@ provides an alternative path: create a Multi-Output Device that sends audio
 to both the headphones AND the BlackHole virtual device, then capture from
 BlackHole.
 
-This module provides detection (is it installed? is a Multi-Output Device
-configured?) and user-facing setup instructions. It does NOT attempt to
-programmatically create audio devices — that requires Audio MIDI Setup.
+This module handles:
+- Detection (is BlackHole installed? is a Multi-Output Device configured?)
+- Auto-install via Homebrew
+- Auto-creation of Multi-Output Device via CoreAudio aggregate device API
+- Teardown (destroy aggregate device and restore original output on exit)
 
 References:
     https://github.com/ExistentialAudio/BlackHole
@@ -18,10 +20,17 @@ References:
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 from pathlib import Path
 
 from audio.platform import CURRENT_PLATFORM, Platform
+from config import BIN_DIR
+
+_AGGREGATE_SWIFT = Path(__file__).parent / "_macos_aggregate.swift"
+_AGGREGATE_BINARY = BIN_DIR / "aggregate-helper"
+_AGGREGATE_UID = "com.voxterm.multi-output"
 
 # BlackHole installs its driver here
 _DRIVER_DIRS = [
@@ -232,10 +241,7 @@ def get_setup_instructions(bt_device_name: str = "") -> str:
 
 
 def get_short_status(bt_device_name: str = "") -> str:
-    """Return a one-line status string for the SystemCapture status message.
-
-    This is designed to be shown in the TUI status bar.
-    """
+    """Return a one-line status string for the SystemCapture status message."""
     has_bh = is_blackhole_installed()
     has_mod = has_multi_output_device()
 
@@ -256,3 +262,121 @@ def get_short_status(bt_device_name: str = "") -> str:
             "Install BlackHole (brew install blackhole-2ch) and create a "
             "Multi-Output Device for full system audio capture"
         )
+
+
+# ── Auto-setup ───────────────────────────────────────────────
+
+def _ensure_aggregate_binary() -> Path | None:
+    """Compile the aggregate-helper Swift binary if needed."""
+    if not _AGGREGATE_SWIFT.exists():
+        return None
+
+    if _AGGREGATE_BINARY.exists():
+        src_mtime = _AGGREGATE_SWIFT.stat().st_mtime
+        bin_mtime = _AGGREGATE_BINARY.stat().st_mtime
+        if bin_mtime >= src_mtime:
+            return _AGGREGATE_BINARY
+
+    if not shutil.which("swiftc"):
+        return None
+
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            ["swiftc", "-O", "-framework", "CoreAudio", "-framework", "Foundation",
+             "-o", str(_AGGREGATE_BINARY), str(_AGGREGATE_SWIFT)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            return None
+    except Exception:
+        return None
+
+    return _AGGREGATE_BINARY
+
+
+def install_blackhole() -> tuple[bool, str]:
+    """Install BlackHole 2ch via Homebrew. Returns (success, message)."""
+    if is_blackhole_installed():
+        return True, "BlackHole already installed"
+
+    if not shutil.which("brew"):
+        return False, "Homebrew not found — install BlackHole manually: https://existential.audio/blackhole/"
+
+    try:
+        result = subprocess.run(
+            ["brew", "install", "blackhole-2ch"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            return True, "BlackHole installed successfully"
+        return False, f"brew install failed: {result.stderr.strip()[:100]}"
+    except subprocess.TimeoutExpired:
+        return False, "BlackHole install timed out"
+    except Exception as e:
+        return False, f"install error: {e}"
+
+
+def create_multi_output() -> tuple[bool, str, str]:
+    """Create a Multi-Output Device (BT + BlackHole) and set as default.
+
+    Returns (success, message, original_output_uid).
+    """
+    binary = _ensure_aggregate_binary()
+    if binary is None:
+        return False, "could not compile aggregate-helper", ""
+
+    try:
+        result = subprocess.run(
+            [str(binary), "create"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip()
+            return False, f"multi-output creation failed: {err}", ""
+
+        data = json.loads(result.stdout)
+        original_uid = data.get("original_output_uid", "")
+        status = data.get("status", "")
+        if status == "created":
+            return True, "multi-output device created and set as default", original_uid
+        elif status == "exists":
+            return True, "multi-output device already exists", original_uid
+        return False, f"unexpected status: {status}", ""
+    except Exception as e:
+        return False, f"multi-output error: {e}", ""
+
+
+def destroy_multi_output() -> bool:
+    """Destroy the VoxTerm multi-output device and restore original output."""
+    binary = _ensure_aggregate_binary()
+    if binary is None:
+        return False
+
+    try:
+        result = subprocess.run(
+            [str(binary), "destroy", _AGGREGATE_UID],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def auto_setup_bluetooth() -> tuple[bool, str]:
+    """Full auto-setup: install BlackHole if needed, create multi-output device.
+
+    Returns (success, status_message).
+    """
+    if CURRENT_PLATFORM != Platform.MACOS:
+        return False, "only supported on macOS"
+
+    # Step 1: Install BlackHole if needed
+    if not is_blackhole_installed():
+        ok, msg = install_blackhole()
+        if not ok:
+            return False, msg
+
+    # Step 2: Create multi-output device
+    ok, msg, _original_uid = create_multi_output()
+    return ok, msg
