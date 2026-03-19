@@ -14,127 +14,36 @@ import CoreMedia
 
 class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let stdout = FileHandle.standardOutput
-    private var converter: AVAudioConverter?
-    private var inputFormat: AVAudioFormat?
-    private let outputFormat: AVAudioFormat
     private let lock = NSLock()
-
-    override init() {
-        outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
-        super.init()
-    }
+    private var loggedFirst = false
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
         guard type == .audio else { return }
         guard CMSampleBufferIsValid(sampleBuffer) else { return }
-        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee else { return }
 
         lock.lock()
         defer { lock.unlock() }
 
-        // Lazily create converter on first buffer (now we know the actual input format)
-        if converter == nil {
-            FileHandle.standardError.write("sck: first audio buffer — \(asbd.mSampleRate)Hz, \(asbd.mChannelsPerFrame)ch\n".data(using: .utf8)!)
-            guard let inFmt = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: asbd.mSampleRate,
-                channels: AVAudioChannelCount(asbd.mChannelsPerFrame),
-                interleaved: false
-            ) else { return }
-            inputFormat = inFmt
-            converter = AVAudioConverter(from: inFmt, to: outputFormat)
-            if converter == nil {
-                FileHandle.standardError.write("error: failed to create audio converter\n".data(using: .utf8)!)
-                return
+        if !loggedFirst {
+            if let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+                FileHandle.standardError.write("sck: audio — \(asbd.mSampleRate)Hz, \(asbd.mChannelsPerFrame)ch\n".data(using: .utf8)!)
             }
+            loggedFirst = true
         }
 
-        guard let converter = converter, let inputFormat = inputFormat else { return }
+        // Extract raw PCM from the sample buffer and write to stdout
+        guard let blockBuf = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let length = CMBlockBufferGetDataLength(blockBuf)
+        guard length > 0 else { return }
 
-        let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
-        guard numSamples > 0 else { return }
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        var lengthAtOffset: Int = 0
+        let status = CMBlockBufferGetDataPointer(blockBuf, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: nil, dataPointerOut: &dataPointer)
+        guard status == noErr, let ptr = dataPointer else { return }
 
-        // Extract audio buffer list from CMSampleBuffer
-        var blockBuffer: CMBlockBuffer?
-        let ablSize = MemoryLayout<AudioBufferList>.size
-        var abl = AudioBufferList()
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer, bufferListSizeNeededOut: nil,
-            bufferListOut: &abl, bufferListSize: ablSize,
-            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
-            flags: 0, blockBufferOut: &blockBuffer
-        )
-        guard status == noErr else { return }
-
-        // Create input PCM buffer
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat,
-                                                  frameCapacity: AVAudioFrameCount(numSamples)) else { return }
-        inputBuffer.frameLength = AVAudioFrameCount(numSamples)
-
-        // Copy audio data into input buffer
-        let channelCount = Int(inputFormat.channelCount)
-        if inputFormat.isInterleaved {
-            let src = abl.mBuffers.mData
-            let dst = inputBuffer.audioBufferList.pointee.mBuffers.mData
-            if let src = src, let dst = dst {
-                memcpy(dst, src, Int(abl.mBuffers.mDataByteSize))
-            }
-        } else {
-            // Non-interleaved: copy each channel
-            let bufferListPtr = UnsafeMutableAudioBufferListPointer(inputBuffer.mutableAudioBufferList)
-            let srcData = abl.mBuffers.mData
-            let bytesPerFrame = Int(asbd.mBytesPerFrame)
-            let totalBytes = numSamples * bytesPerFrame
-
-            if channelCount == 1 {
-                if let src = srcData, let dst = bufferListPtr[0].mData {
-                    memcpy(dst, src, min(totalBytes, Int(bufferListPtr[0].mDataByteSize)))
-                }
-            } else {
-                // For interleaved source → non-interleaved destination, deinterleave
-                if let src = srcData {
-                    let srcPtr = src.assumingMemoryBound(to: Float.self)
-                    for ch in 0..<min(channelCount, bufferListPtr.count) {
-                        if let dst = bufferListPtr[ch].mData?.assumingMemoryBound(to: Float.self) {
-                            for frame in 0..<numSamples {
-                                dst[frame] = srcPtr[frame * channelCount + ch]
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Resample to 16kHz mono
-        let ratio = outputFormat.sampleRate / inputFormat.sampleRate
-        let outputFrameCapacity = AVAudioFrameCount(Double(numSamples) * ratio + 1)
-        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat,
-                                                   frameCapacity: outputFrameCapacity) else { return }
-
-        var error: NSError?
-        converter.convert(to: outputBuffer, error: &error) { packetCount, statusPtr in
-            statusPtr.pointee = .haveData
-            return inputBuffer
-        }
-        if let error = error {
-            FileHandle.standardError.write("convert error: \(error.localizedDescription)\n".data(using: .utf8)!)
-            return
-        }
-
-        guard outputBuffer.frameLength > 0,
-              let channelData = outputBuffer.floatChannelData?[0] else { return }
-
-        // Write raw float32 PCM to stdout
-        let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Float>.size
-        let data = Data(bytes: channelData, count: byteCount)
-        stdout.write(data)
+        stdout.write(Data(bytes: ptr, count: lengthAtOffset))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -199,24 +108,19 @@ func run() {
     let config = SCStreamConfiguration()
     config.capturesAudio = true
     config.excludesCurrentProcessAudio = true
-    config.channelCount = 2
-    config.sampleRate = 48000
+    config.channelCount = 1
+    config.sampleRate = 16000
     // Minimal video (SCK requires non-zero dimensions)
     config.width = 2
     config.height = 2
     config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 FPS minimum
     config.showsCursor = false
 
-    // Filter: capture all system audio except our own process.
-    // Using excludingApplications is more inclusive than including — it captures
-    // audio from all sources including Chrome helper/renderer processes.
-    let ownPID = ProcessInfo.processInfo.processIdentifier
-    let selfApp = content.applications.filter { $0.processID == ownPID }
-    let filter = SCContentFilter(display: display, excludingApplications: selfApp, exceptingWindows: [])
-
-    // Log captured app count for diagnostics
-    let appCount = content.applications.count - selfApp.count
-    FileHandle.standardError.write("sck: capturing audio from \(appCount) apps\n".data(using: .utf8)!)
+    // Filter: capture entire display audio.
+    // With BlackHole multi-output device as default, audio flows through
+    // a non-Bluetooth path that SCK can tap.
+    let filter = SCContentFilter(display: display, excludingWindows: [])
+    FileHandle.standardError.write("sck: display filter active\n".data(using: .utf8)!)
 
     let handler = AudioOutputHandler()
 
