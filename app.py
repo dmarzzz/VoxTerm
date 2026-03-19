@@ -744,25 +744,19 @@ class VoxTerm(App):
 
     @work(thread=True, group="bt_setup")
     def _setup_bluetooth_audio(self):
-        """Auto-setup BlackHole + Multi-Output for Bluetooth audio capture."""
-        from audio.blackhole import is_blackhole_installed, install_blackhole, create_multi_output
+        """Auto-setup Multi-Output for Bluetooth audio capture.
+
+        If BlackHole isn't installed, tells the user how to install it.
+        If it is installed, creates the multi-output device automatically.
+        """
+        from audio.blackhole import is_blackhole_installed, create_multi_output
 
         if not is_blackhole_installed():
             self.call_from_thread(
                 self.query_one(TranscriptPanel).system_message,
-                "installing BlackHole for system audio capture..."
+                "system audio requires BlackHole — run: brew install blackhole-2ch"
             )
-            ok, msg = install_blackhole()
-            if not ok:
-                self.call_from_thread(
-                    self.query_one(TranscriptPanel).system_message,
-                    f"BlackHole install failed: {msg}"
-                )
-                return
-            self.call_from_thread(
-                self.query_one(TranscriptPanel).system_message,
-                "BlackHole installed"
-            )
+            return
 
         self.call_from_thread(
             self.query_one(TranscriptPanel).system_message,
