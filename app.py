@@ -22,12 +22,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Suppress leaked-semaphore warning from multiprocessing resource tracker
-# on hard exit (os._exit). The semaphore is from SpeechBrain/PyTorch and is
-# harmless — the OS reclaims it immediately.
-import multiprocessing.resource_tracker as _rt
-_rt._resource_tracker._exitcode = 0  # noqa: mark as already stopped
+# on hard exit (os._exit). SpeechBrain/PyTorch create semaphores that aren't
+# cleaned up before our forced exit — harmless, OS reclaims them immediately.
 import warnings
-warnings.filterwarnings("ignore", message="resource_tracker:.*leaked", category=UserWarning)
+warnings.filterwarnings("ignore", message="resource_tracker", category=UserWarning)
 
 import numpy as np
 from textual.app import App, ComposeResult
@@ -320,6 +318,7 @@ class ExportScreen(ModalScreen):
             yield OptionList(
                 Option("  Save to file", id="file"),
                 Option("  Copy to clipboard", id="clipboard"),
+                Option("  Discard transcript", id="discard"),
                 id="export-list",
             )
             yield Static(
@@ -873,6 +872,8 @@ class VoxTerm(App):
                 self._export_to_file()
             elif destination == "clipboard":
                 self._export_to_clipboard()
+            elif destination == "discard":
+                self._discard_transcript()
 
         self.push_screen(ExportScreen(), on_export_selected)
 
@@ -907,6 +908,17 @@ class VoxTerm(App):
             transcript.system_message(f"copied {entry_count} entries to clipboard")
         except Exception:
             transcript.system_message("clipboard copy failed")
+
+    def _discard_transcript(self):
+        """Discard transcript and delete the live file."""
+        entry_count = len(self.query_one(TranscriptPanel).get_entries())
+        # Delete the live auto-save file
+        if self._live_file and self._live_file.exists():
+            self._live_file.unlink()
+        self._start_new_session()
+        self.query_one(TranscriptPanel).system_message(
+            f"discarded {entry_count} entries"
+        )
 
     def _start_new_session(self):
         """Clear transcript and reset for a new session."""
@@ -945,8 +957,15 @@ class VoxTerm(App):
         self.system_capture.stop()
 
         # Let Textual restore the terminal, then hard-exit before
-        # Python's GC triggers C extension segfaults
-        threading.Timer(0.5, os._exit, args=[0]).start()
+        # Python's GC triggers C extension segfaults.
+        # Silence stderr to suppress resource_tracker leaked semaphore warning.
+        def _silent_exit():
+            try:
+                sys.stderr.close()
+            except Exception:
+                pass
+            os._exit(0)
+        threading.Timer(0.5, _silent_exit).start()
         self.exit()
 
 
@@ -1027,4 +1046,8 @@ if __name__ == "__main__":
     try:
         app.run()
     finally:
+        try:
+            sys.stderr.close()
+        except Exception:
+            pass
         os._exit(0)
