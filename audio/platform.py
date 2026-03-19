@@ -48,19 +48,25 @@ def get_output_device_info() -> dict:
     except Exception:
         return fallback
 
-    # Parse SPAudioDataType for the default output device name
+    # Parse SPAudioDataType — device names are section headers,
+    # "Default Output Device: Yes" appears indented beneath them.
+    # Also look for "Transport: Bluetooth" in the same section.
     device_name = ""
-    in_output_section = False
+    transport = ""
+    current_section = ""
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith("Default Output Device:"):
-            device_name = stripped.split(":", 1)[1].strip()
-            break
-        # Fallback: look for output section in detailed listing
-        if "Output" in stripped and ":" in stripped and not device_name:
-            in_output_section = True
-        if in_output_section and stripped.startswith("Default Output Device:"):
-            device_name = stripped.split(":", 1)[1].strip()
+
+        # Section headers end with ":" and are indented exactly 8 spaces
+        if line.startswith("        ") and stripped.endswith(":") and not stripped.startswith(("Default", "Transport", "Manufacturer", "Input", "Output", "Current")):
+            current_section = stripped.rstrip(":")
+            transport = ""
+
+        if stripped.startswith("Transport:"):
+            transport = stripped.split(":", 1)[1].strip().lower()
+
+        if stripped == "Default Output Device: Yes":
+            device_name = current_section
             break
 
     if not device_name:
@@ -76,18 +82,13 @@ def get_output_device_info() -> dict:
     if not device_name:
         return fallback
 
-    # Check if the device name suggests Bluetooth
-    name_lower = device_name.lower()
-    is_bt = any(kw in name_lower for kw in _BT_KEYWORDS)
+    # Check Bluetooth via transport type from system_profiler
+    is_bt = transport == "bluetooth"
 
-    # Also check if the device appears in the Bluetooth section of system_profiler output
-    if not is_bt and "SPBluetoothDataType" in output:
-        try:
-            bt_section = output.split("Bluetooth:")[1] if "Bluetooth:" in output else ""
-            if device_name in bt_section:
-                is_bt = True
-        except Exception:
-            pass
+    # Also check by device name keywords
+    if not is_bt:
+        name_lower = device_name.lower()
+        is_bt = any(kw in name_lower for kw in _BT_KEYWORDS)
 
     return {"name": device_name, "is_bluetooth": is_bt}
 
