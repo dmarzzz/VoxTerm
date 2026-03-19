@@ -206,8 +206,13 @@ func run() {
     config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 FPS minimum
     config.showsCursor = false
 
-    // Filter: capture entire display audio
-    let filter = SCContentFilter(display: display, excludingWindows: [])
+    // Filter: capture all applications on the display.
+    // Using includingApplications captures audio at the app level rather than
+    // the display output level, so it works regardless of output device
+    // (AirPods, external speakers, etc.)
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    let apps = content.applications.filter { $0.processID != ownPID }
+    let filter = SCContentFilter(display: display, includingApplications: apps, exceptingWindows: [])
 
     let handler = AudioOutputHandler()
 
