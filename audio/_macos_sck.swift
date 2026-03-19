@@ -41,6 +41,7 @@ class AudioOutputHandler: NSObject, SCStreamOutput, SCStreamDelegate {
 
         // Lazily create converter on first buffer (now we know the actual input format)
         if converter == nil {
+            FileHandle.standardError.write("sck: first audio buffer — \(asbd.mSampleRate)Hz, \(asbd.mChannelsPerFrame)ch\n".data(using: .utf8)!)
             guard let inFmt = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: asbd.mSampleRate,
@@ -206,13 +207,16 @@ func run() {
     config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 FPS minimum
     config.showsCursor = false
 
-    // Filter: capture all applications on the display.
-    // Using includingApplications captures audio at the app level rather than
-    // the display output level, so it works regardless of output device
-    // (AirPods, external speakers, etc.)
+    // Filter: capture all system audio except our own process.
+    // Using excludingApplications is more inclusive than including — it captures
+    // audio from all sources including Chrome helper/renderer processes.
     let ownPID = ProcessInfo.processInfo.processIdentifier
-    let apps = content.applications.filter { $0.processID != ownPID }
-    let filter = SCContentFilter(display: display, including: apps, exceptingWindows: [])
+    let selfApp = content.applications.filter { $0.processID == ownPID }
+    let filter = SCContentFilter(display: display, excludingApplications: selfApp, exceptingWindows: [])
+
+    // Log captured app count for diagnostics
+    let appCount = content.applications.count - selfApp.count
+    FileHandle.standardError.write("sck: capturing audio from \(appCount) apps\n".data(using: .utf8)!)
 
     let handler = AudioOutputHandler()
 
