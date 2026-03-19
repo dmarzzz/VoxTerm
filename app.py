@@ -258,15 +258,14 @@ class HelpScreen(ModalScreen):
         with Vertical(id="help-dialog") as dialog:
             dialog.border_title = "KEYBOARD SHORTCUTS"
             yield Static(
-                "[bold #00e5ff]R[/]      [#c0c0c0]Start / stop recording[/]\n"
-                "[bold #00e5ff]Ctrl+S[/]  [#c0c0c0]Save transcript to file[/]\n"
-                "[bold #00e5ff]Y[/]      [#c0c0c0]Copy transcript to clipboard[/]\n"
-                "[bold #00e5ff]S[/]      [#c0c0c0]Export (file / clipboard chooser)[/]\n"
-                "[bold #00e5ff]M[/]      [#c0c0c0]Switch transcription model[/]\n"
-                "[bold #00e5ff]L[/]      [#c0c0c0]Switch language[/]\n"
-                "[bold #00e5ff]C[/]      [#c0c0c0]Clear transcript[/]\n"
-                "[bold #00e5ff]D[/]      [#c0c0c0]Toggle debug mode[/]\n"
-                "[bold #00e5ff]Q[/]      [#c0c0c0]Quit[/]",
+                "[bold #00e5ff]R[/]       [#c0c0c0]Start / stop recording[/]\n"
+                "[bold #00e5ff]Ctrl+S[/]  [#c0c0c0]Save / copy transcript[/]\n"
+                "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
+                "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
+                "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
+                "[bold #00e5ff]C[/]       [#c0c0c0]Clear transcript[/]\n"
+                "[bold #00e5ff]D[/]       [#c0c0c0]Toggle debug mode[/]\n"
+                "[bold #00e5ff]Q[/]       [#c0c0c0]Quit[/]",
                 id="help-content",
                 markup=True,
             )
@@ -346,8 +345,7 @@ class VoxTerm(App):
         Binding("r", "toggle_recording", "Record/Pause"),
         Binding("m", "switch_model", "Model"),
         Binding("l", "switch_language", "Language"),
-        Binding("ctrl+s", "save_transcript", "Save"),
-        Binding("y", "copy_transcript", "Copy"),
+        Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
@@ -860,22 +858,6 @@ class VoxTerm(App):
         self.query_one(TranscriptPanel).system_message(msg)
         self._model_loaded = True
         self._update_telemetry()
-
-    def action_save_transcript(self):
-        """Save transcript to file (Ctrl+S)."""
-        transcript = self.query_one(TranscriptPanel)
-        if not transcript.get_entries():
-            transcript.system_message("nothing to save")
-            return
-        self._export_to_file()
-
-    def action_copy_transcript(self):
-        """Copy transcript to clipboard (Y)."""
-        transcript = self.query_one(TranscriptPanel)
-        if not transcript.get_entries():
-            transcript.system_message("nothing to copy")
-            return
-        self._export_to_clipboard()
 
     def action_export_transcript(self):
         """Open export modal to choose destination."""
