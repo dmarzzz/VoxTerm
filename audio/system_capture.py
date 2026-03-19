@@ -70,14 +70,25 @@ class SystemCapture:
         self._active = True
         self._status_message = ""
 
-        # Bluetooth detection — system audio capture only works with speakers
+        # Bluetooth detected — route audio through BlackHole if available
         try:
             dev_info = get_output_device_info()
             if dev_info.get("is_bluetooth"):
-                self._status_message = (
-                    "system audio capture unavailable with Bluetooth output — "
-                    "mic recording will continue normally"
-                )
+                from audio.blackhole import is_blackhole_installed, create_multi_output
+                if is_blackhole_installed():
+                    ok, msg, _ = create_multi_output()
+                    if ok:
+                        self._bt_multi_output_active = True
+                    else:
+                        self._status_message = (
+                            "system audio limited with Bluetooth — "
+                            "mic recording will continue normally"
+                        )
+                else:
+                    self._status_message = (
+                        "system audio limited with Bluetooth — "
+                        "mic recording will continue normally"
+                    )
         except Exception:
             pass
 
