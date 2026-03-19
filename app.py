@@ -1031,7 +1031,14 @@ if __name__ == "__main__":
             print("Installing BlackHole for system audio capture...\n")
             result = subprocess.run(["brew", "install", "blackhole-2ch"])
             if result.returncode == 0:
-                print("\nBlackHole installed. You may need to reboot for it to take effect.\n")
+                print("\nBlackHole installed. Restarting audio service...")
+                subprocess.run(
+                    ["sudo", "killall", "coreaudiod"],
+                    timeout=15,
+                )
+                import time
+                time.sleep(2)  # Give CoreAudio time to restart and detect BlackHole
+                print("Audio service restarted.\n")
             else:
                 print("\nBlackHole install failed — system audio capture will be limited.\n")
     except Exception:
