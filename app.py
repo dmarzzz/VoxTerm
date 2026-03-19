@@ -781,6 +781,14 @@ class VoxTerm(App):
                 self.system_capture.start()
             except Exception:
                 pass
+
+            # Show Bluetooth warning once per session
+            if (
+                not self._system_audio_notified
+                and self.system_capture.status_message
+            ):
+                transcript.system_message(self.system_capture.status_message)
+                self._system_audio_notified = True
         self._update_telemetry()
 
     def action_switch_model(self):

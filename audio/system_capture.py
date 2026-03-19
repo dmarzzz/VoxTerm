@@ -14,7 +14,7 @@ import threading
 import numpy as np
 from pathlib import Path
 
-from audio.platform import CURRENT_PLATFORM, Platform, has_swiftc
+from audio.platform import CURRENT_PLATFORM, Platform, has_swiftc, get_output_device_info
 from config import SAMPLE_RATE, BIN_DIR
 
 # 1024 samples * 4 bytes/float32 = 4096 bytes per chunk
@@ -68,6 +68,17 @@ class SystemCapture:
 
         self._active = True
         self._status_message = ""
+
+        # Check for Bluetooth output device and suggest BlackHole if needed (non-fatal)
+        try:
+            dev_info = get_output_device_info()
+            if dev_info.get("is_bluetooth"):
+                from audio.blackhole import get_short_status
+                self._status_message = get_short_status(
+                    bt_device_name=dev_info.get("name", "unknown"),
+                )
+        except Exception:
+            pass
 
         # Reader thread: stdout → chunked numpy arrays → queue
         self._reader_thread = threading.Thread(
