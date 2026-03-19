@@ -70,17 +70,11 @@ class SystemCapture:
         self._active = True
         self._status_message = ""
 
-        # Auto-setup Bluetooth routing via BlackHole (non-fatal)
+        # Bluetooth detection (setup handled by app.py for progress feedback)
         try:
             dev_info = get_output_device_info()
             if dev_info.get("is_bluetooth"):
-                from audio.blackhole import auto_setup_bluetooth
-                ok, msg = auto_setup_bluetooth()
-                if ok:
-                    self._bt_multi_output_active = True
-                    self._status_message = f"Bluetooth detected — {msg}"
-                else:
-                    self._status_message = f"system audio limited — {msg}"
+                self._status_message = f"Bluetooth output detected ({dev_info['name']})"
         except Exception:
             pass
 
