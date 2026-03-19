@@ -212,7 +212,7 @@ func run() {
     // (AirPods, external speakers, etc.)
     let ownPID = ProcessInfo.processInfo.processIdentifier
     let apps = content.applications.filter { $0.processID != ownPID }
-    let filter = SCContentFilter(display: display, includingApplications: apps, exceptingWindows: [])
+    let filter = SCContentFilter(display: display, including: apps, exceptingWindows: [])
 
     let handler = AudioOutputHandler()
 
