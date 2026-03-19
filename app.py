@@ -1020,6 +1020,23 @@ if __name__ == "__main__":
     model_name = args.model
     language = args.language
 
+    # Pre-TUI setup: install BlackHole if Bluetooth output detected
+    # Must happen before TUI launches — brew needs the live terminal for sudo
+    try:
+        from audio.platform import get_output_device_info
+        from audio.blackhole import is_blackhole_installed
+        dev_info = get_output_device_info()
+        if dev_info.get("is_bluetooth") and not is_blackhole_installed():
+            print(f"VOXTERM // Bluetooth output detected ({dev_info['name']})")
+            print("Installing BlackHole for system audio capture...\n")
+            result = subprocess.run(["brew", "install", "blackhole-2ch"])
+            if result.returncode == 0:
+                print("\nBlackHole installed. You may need to reboot for it to take effect.\n")
+            else:
+                print("\nBlackHole install failed — system audio capture will be limited.\n")
+    except Exception:
+        pass
+
     print(f"VOXTERM // loading model ({model_name}) lang={language}...")
     print("(first run downloads the model, please wait)\n")
     if model_name in QWEN3_MODELS:
