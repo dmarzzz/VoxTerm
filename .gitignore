@@ -26,3 +26,11 @@ __pycache__/
 .pytest_cache/
 htmlcov/
 !CLAUDE.md
+
+# Large test fixtures (downloaded on demand, see benchmark script)
+tests/fixtures/speakers/ES2014c.wav
+tests/fixtures/speakers/dev01.wav
+tests/fixtures/speakers/tst01.wav
+
+# Generated media
+docs/pipeline.mp4

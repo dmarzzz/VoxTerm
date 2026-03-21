@@ -1,6 +1,6 @@
 """Persistent speaker profile storage backed by SQLite.
 
-Stores ECAPA-TDNN embeddings (192-dim float32) as encrypted BLOBs
+Stores CAM++ embeddings (512-dim float32) as encrypted BLOBs
 (AES-256-CBC with HMAC-SHA256, key in macOS Keychain).  Uses WAL mode
 for safe concurrent access from the worker thread and the Textual event loop.
 """
@@ -23,7 +23,7 @@ from . import crypto
 
 log = logging.getLogger(__name__)
 
-EMBEDDING_DIM = 192
+EMBEDDING_DIM = 512
 EMBEDDING_BYTES = EMBEDDING_DIM * 4  # float32
 
 # Cross-session confidence thresholds
@@ -116,6 +116,7 @@ class SpeakerStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._ensure_schema()
+        self._migrate_embedding_dim()
 
         # Load encryption key from macOS Keychain (auto-creates on first use)
         if crypto.is_available():
@@ -593,6 +594,22 @@ class SpeakerStore:
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
                 (_SCHEMA_VERSION,),
             )
+            self._conn.commit()
+
+    def _migrate_embedding_dim(self) -> None:
+        """Clear profiles from a previous embedding model (dimension mismatch)."""
+        if not self._conn:
+            return
+        row = self._conn.execute(
+            "SELECT centroid FROM speakers LIMIT 1"
+        ).fetchone()
+        if row and row[0] and len(row[0]) != EMBEDDING_BYTES:
+            log.info(
+                "Clearing speaker profiles: embedding dimension changed "
+                "(%d bytes → %d bytes)", len(row[0]), EMBEDDING_BYTES,
+            )
+            self._conn.execute("DELETE FROM speakers")
+            self._conn.execute("DELETE FROM session_speakers")
             self._conn.commit()
 
     def _load_all(self) -> None:

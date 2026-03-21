@@ -12,7 +12,7 @@ class TestEncodeDecodeArray:
 
     def test_encode_decode_array(self):
         rng = np.random.RandomState(42)
-        arr = rng.randn(192).astype(np.float32)
+        arr = rng.randn(512).astype(np.float32)
         encoded = encode_array(arr)
         decoded = decode_array(encoded)
         assert decoded.dtype == np.float32

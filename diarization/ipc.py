@@ -28,6 +28,7 @@ MSG_ERROR = "error"
 
 # Main → subprocess
 MSG_IDENTIFY = "identify"
+MSG_IDENTIFY_MULTI = "identify_multi"
 MSG_SET_NAME = "set_name"
 MSG_GET_STATE = "get_state"
 MSG_GET_EMBEDDINGS = "get_embeddings"

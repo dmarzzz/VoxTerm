@@ -11,6 +11,7 @@ from diarization.ipc import (
     MSG_GET_NAME,
     MSG_GET_STATE,
     MSG_IDENTIFY,
+    MSG_IDENTIFY_MULTI,
     MSG_NUM_SPEAKERS,
     MSG_PING,
     MSG_PONG,
@@ -21,7 +22,7 @@ from diarization.ipc import (
     decode_array,
 )
 
-EMBEDDING_DIM = 192
+EMBEDDING_DIM = 512
 SAMPLE_RATE = 16000
 
 
@@ -151,3 +152,46 @@ class TestDispatch:
         entry = resp["embeddings"][0]
         assert "embedding" in entry
         assert "duration" in entry
+
+    def test_identify_multi_short_audio(self, loaded_mock_engine, sample_audio):
+        """Short audio should fall back to single-segment result."""
+        audio = sample_audio(duration_sec=2.5)
+        resp = _dispatch(loaded_mock_engine, MSG_IDENTIFY_MULTI, {
+            "type": MSG_IDENTIFY_MULTI,
+            "audio": encode_array(audio),
+            "sample_rate": SAMPLE_RATE,
+        })
+        assert resp["type"] == MSG_RESULT
+        assert "segments" in resp
+        assert isinstance(resp["segments"], list)
+        assert len(resp["segments"]) >= 1
+        seg = resp["segments"][0]
+        assert "label" in seg
+        assert "speaker_id" in seg
+        assert "color" in seg
+        assert "start_sample" in seg
+        assert "end_sample" in seg
+
+    def test_identify_multi_long_audio(self, loaded_mock_engine, sample_audio):
+        """Long audio should return segments with valid structure."""
+        audio = sample_audio(duration_sec=5.0)
+        resp = _dispatch(loaded_mock_engine, MSG_IDENTIFY_MULTI, {
+            "type": MSG_IDENTIFY_MULTI,
+            "audio": encode_array(audio),
+            "sample_rate": SAMPLE_RATE,
+        })
+        assert resp["type"] == MSG_RESULT
+        assert "segments" in resp
+        assert "debug_speakers" in resp
+        segments = resp["segments"]
+        assert len(segments) >= 1
+        # First segment starts at 0
+        assert segments[0]["start_sample"] == 0
+        # Last segment ends at audio length
+        assert segments[-1]["end_sample"] == len(audio)
+        # All segments have valid fields
+        for seg in segments:
+            assert seg["speaker_id"] >= 1
+            assert seg["end_sample"] > seg["start_sample"]
+            assert isinstance(seg["color"], str)
+            assert isinstance(seg["label"], str)

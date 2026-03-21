@@ -40,10 +40,11 @@ AVAILABLE_LANGUAGES = {
     "tr": "Turkish",
     "nl": "Dutch",
 }
-MAX_BUFFER_SECONDS = 15.0
+MAX_BUFFER_SECONDS = 3.0
 MIN_BUFFER_SECONDS = 1.0
 SILENCE_THRESHOLD = 0.012
-SILENCE_TRIGGER_SECONDS = 1.5
+SILENCE_TRIGGER_SECONDS = 0.3
+VAD_THRESHOLD = 0.5           # Silero VAD speech probability threshold
 
 # Session persistence
 LIVE_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".live"

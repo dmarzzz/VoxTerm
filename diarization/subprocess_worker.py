@@ -31,9 +31,9 @@ from diarization.engine import DiarizationEngine
 from diarization.ipc import (
     MSG_ACK, MSG_ERROR, MSG_GET_CENTROID, MSG_GET_COLOR,
     MSG_GET_EMBEDDINGS, MSG_GET_NAME, MSG_GET_NAMES, MSG_GET_STATE,
-    MSG_IDENTIFY, MSG_IS_MATCHED, MSG_IS_STABLE, MSG_MARK_MATCHED,
-    MSG_MERGE, MSG_NUM_SPEAKERS, MSG_PING, MSG_PONG, MSG_READY,
-    MSG_RESET, MSG_RESULT, MSG_SET_NAME, MSG_SHUTDOWN,
+    MSG_IDENTIFY, MSG_IDENTIFY_MULTI, MSG_IS_MATCHED, MSG_IS_STABLE,
+    MSG_MARK_MATCHED, MSG_MERGE, MSG_NUM_SPEAKERS, MSG_PING, MSG_PONG,
+    MSG_READY, MSG_RESET, MSG_RESULT, MSG_SET_NAME, MSG_SHUTDOWN,
     decode_array, encode_array, recv_msg, send_msg,
 )
 
@@ -88,6 +88,9 @@ def _dispatch(engine: DiarizationEngine, msg_type: str, msg: dict) -> dict:
     if msg_type == MSG_IDENTIFY:
         audio = decode_array(msg["audio"])
         sample_rate = msg.get("sample_rate", 16000)
+        import numpy as np
+        audio_rms = float(np.sqrt(np.mean(audio ** 2)))
+        audio_len = len(audio)
         label, speaker_id = engine.identify(audio, sample_rate)
         color = engine.get_speaker_color(speaker_id)
         # Return the embedding too — main process needs it for cross-session matching
@@ -98,6 +101,30 @@ def _dispatch(engine: DiarizationEngine, msg_type: str, msg: dict) -> dict:
             "speaker_id": speaker_id,
             "color": color,
             "centroid": encode_array(centroid) if centroid is not None else None,
+            "debug_rms": round(audio_rms, 4),
+            "debug_samples": audio_len,
+            "debug_speakers": engine.num_speakers,
+        }
+
+    elif msg_type == MSG_IDENTIFY_MULTI:
+        audio = decode_array(msg["audio"])
+        sample_rate = msg.get("sample_rate", 16000)
+        # Use overlap-aware multi-speaker identification
+        segments = engine.identify_multi(audio, sample_rate)
+        seg_results = []
+        for label, speaker_id, start, end in segments:
+            color = engine.get_speaker_color(speaker_id)
+            seg_results.append({
+                "label": label,
+                "speaker_id": speaker_id,
+                "color": color,
+                "start_sample": start,
+                "end_sample": end,
+            })
+        return {
+            "type": MSG_RESULT,
+            "segments": seg_results,
+            "debug_speakers": engine.num_speakers,
         }
 
     elif msg_type == MSG_SET_NAME:

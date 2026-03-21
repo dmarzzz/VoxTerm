@@ -52,6 +52,7 @@ from audio.system_capture import SystemCapture
 from transcriber.engine import Qwen3Transcriber, WhisperTranscriber
 from diarization.proxy import DiarizationProxy
 from speakers.store import SpeakerStore
+from audio.vad import SileroVAD
 from config import (
     SAMPLE_RATE, CHUNK_SIZE, WAVEFORM_FPS,
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
@@ -367,6 +368,7 @@ class VoxTerm(App):
         self.audio_capture = AudioCapture()
         self.system_capture = SystemCapture()
         self.audio_buffer = AudioBuffer()
+        self.vad = SileroVAD()
         self.transcriber = transcriber or Qwen3Transcriber()
         self.diarizer = DiarizationProxy()
         self.speaker_store = SpeakerStore()
@@ -576,18 +578,24 @@ class VoxTerm(App):
             return
 
         for chunk in chunks:
-            rms = float(np.sqrt(np.mean(chunk ** 2)))
             waveform.push_samples(chunk)
 
-            if rms < SILENCE_THRESHOLD:
+            # Speech detection: Silero VAD (neural) with RMS fallback
+            if self.vad.is_loaded:
+                is_speech = self.vad.is_speech(chunk)
+            else:
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+                is_speech = rms >= SILENCE_THRESHOLD
+
+            if is_speech:
+                self._silence_chunks = 0
+                self._had_speech = True
+                self.audio_buffer.append(chunk)
+            else:
                 self._silence_chunks += 1
                 # Only buffer silence if we're in an active speech segment
                 if self._had_speech:
                     self.audio_buffer.append(chunk)
-            else:
-                self._silence_chunks = 0
-                self._had_speech = True
-                self.audio_buffer.append(chunk)
 
         waveform.tick()
 
@@ -666,6 +674,7 @@ class VoxTerm(App):
             text = result.get("text", "")
 
             # 2. Speaker ID via subprocess (non-blocking to main thread)
+            #    Use SCD to split audio at speaker changes, diarize each segment
             speaker_label, speaker_id = "", 0
             confidence = ""
             if text and self._diarizer_loaded:
@@ -673,6 +682,17 @@ class VoxTerm(App):
                     speaker_label, speaker_id = self.diarizer.identify(
                         audio.copy()
                     )
+
+                    # Debug: show speaker assignment info
+                    if self._debug:
+                        dbg = getattr(self.diarizer, '_last_debug', {})
+                        n_spk = dbg.get('debug_speakers', '?')
+                        rms = dbg.get('debug_rms', '?')
+                        self.call_from_thread(
+                            self.query_one(TranscriptPanel).system_message,
+                            f"[dbg] → {speaker_label} (id={speaker_id}) "
+                            f"speakers={n_spk} rms={rms}",
+                        )
 
                     # 3. Cross-session matching — if speaker stable and not yet matched
                     if (
@@ -929,6 +949,7 @@ class VoxTerm(App):
             transcript.system_message("recording paused")
         else:
             self._recording = True
+            self.vad.reset()
             try:
                 self.audio_capture.start()
                 waveform.set_recording(True)
@@ -1277,6 +1298,7 @@ class VoxTerm(App):
         self.audio_buffer.clear()
         self._had_speech = False
         self._silence_chunks = 0
+        self.vad.reset()
         if self._diarizer_loaded:
             self.diarizer.reset_session()
         self._speaker_profile_map.clear()
@@ -1317,6 +1339,7 @@ class VoxTerm(App):
         self.audio_buffer.clear()
         self._had_speech = False
         self._silence_chunks = 0
+        self.vad.reset()
         if self._diarizer_loaded:
             self.diarizer.reset_session()
         self._speaker_profile_map.clear()

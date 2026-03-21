@@ -4,7 +4,7 @@
 
 VoxTerm is a local, offline voice transcription TUI for macOS Apple Silicon. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions.
 
-**Stack**: MLX (Qwen3-ASR transcription on Metal GPU) · PyTorch/SpeechBrain (ECAPA-TDNN speaker diarization on CPU) · Textual (TUI) · SQLite (speaker profiles) · sounddevice (mic) · Swift/ScreenCaptureKit (system audio)
+**Stack**: MLX (Qwen3-ASR transcription on Metal GPU) · CAM++ (512-dim speaker embeddings on CPU) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (speaker profiles) · sounddevice (mic) · Swift/ScreenCaptureKit (system audio)
 
 ## Architecture
 
@@ -12,6 +12,7 @@ VoxTerm is a local, offline voice transcription TUI for macOS Apple Silicon. It 
 MAIN PROCESS
 ├─ Main thread (Textual event loop)
 │  ├─ 15fps audio timer: reads mic + system audio queues
+│  ├─ Silero VAD (ONNX, no PyTorch): speech/silence detection per chunk
 │  ├─ UI rendering, keybindings (R/T/P/M/L/S/C/D/Q)
 │  └─ SQLite reads for profile display
 │
@@ -21,8 +22,8 @@ MAIN PROCESS
 │  └─ call_from_thread() → UI updates
 │
 SUBPROCESSES
-├─ Diarizer subprocess (PyTorch/SpeechBrain)
-│  ├─ Loads ECAPA-TDNN model (~20MB)
+├─ Diarizer subprocess (PyTorch/CAM++)
+│  ├─ Loads CAM++ model (~28MB, downloads on first use from ModelScope)
 │  ├─ Receives audio over pipe, returns speaker ID + embedding
 │  ├─ Owns all session state (centroids, names, embeddings)
 │  └─ Auto-restarts on crash; falls back to in-process if repeated failures
@@ -45,13 +46,15 @@ SUBPROCESSES
 | `diagnostics.py` | Crash reporting: faulthandler, signal handlers, crash dumps, log rotation |
 | `audio/capture.py` | Mic input via sounddevice callback → queue |
 | `audio/system_capture.py` | System audio via Swift subprocess + pipe reader threads |
+| `audio/vad.py` | Silero VAD wrapper (ONNX, no PyTorch) — neural speech/silence detection |
 | `audio/buffer.py` | Thread-safe audio accumulator (append/get_and_clear) |
 | `audio/platform.py` | macOS platform detection (Bluetooth, output device info) |
 | `audio/blackhole.py` | BlackHole virtual device integration for Bluetooth routing |
 | `audio/_macos_sck.swift` | ScreenCaptureKit Swift helper source |
 | `audio/_macos_aggregate.swift` | Multi-output device Swift helper source |
 | `transcriber/engine.py` | Qwen3-ASR (primary) + mlx-whisper (fallback), hallucination filter, dedup |
-| `diarization/engine.py` | ECAPA-TDNN online speaker clustering (runs inside subprocess) |
+| `diarization/campplus.py` | CAM++ model architecture (vendored from WeSpeaker, Apache 2.0) |
+| `diarization/engine.py` | CAM++ online speaker clustering (runs inside subprocess) |
 | `diarization/proxy.py` | DiarizationProxy — same API as engine, delegates to subprocess |
 | `diarization/subprocess_worker.py` | Subprocess entry point: loads model, read-process-write loop |
 | `diarization/ipc.py` | Binary IPC protocol for main↔subprocess communication |
@@ -92,7 +95,7 @@ These are the locations to check when debugging. All under the user's home direc
 ### Model caches (managed by frameworks)
 | Path | Contents |
 |------|----------|
-| `~/.cache/speechbrain/spkrec-ecapa-voxceleb/` | ECAPA-TDNN speaker encoder (~20MB) |
+| `~/.cache/wespeaker/campplus_voxceleb/` | CAM++ speaker encoder (~28MB) |
 | `~/.cache/huggingface/` | MLX/Qwen3-ASR model weights (~600MB-1.5GB) |
 
 ## Debugging
@@ -132,8 +135,8 @@ speakers (
     id TEXT PK,              -- UUID
     name TEXT,               -- user-assigned name
     color TEXT,              -- hex color
-    centroid BLOB,           -- 192-dim float32 (768 bytes)
-    exemplars BLOB,          -- up to 20 exemplars (N*768 bytes)
+    centroid BLOB,           -- 512-dim float32 (2048 bytes)
+    exemplars BLOB,          -- up to 20 exemplars (N*2048 bytes)
     exemplar_count INTEGER,
     confirmed_count INTEGER, -- user-confirmed segments
     auto_assigned_count INTEGER,
@@ -162,4 +165,12 @@ session_speakers (
 | Adaptive boost | +0.15 * exp(-samples/10) | Stricter with fewer samples |
 | MEDIUM | 0.35 | Suggest with "?" indicator |
 | Conflict margin | 0.05 | If top-2 within this, treat as ambiguous |
-| In-session similarity | 0.30 | Same speaker within a session |
+| Match threshold | 0.35 | Assign to existing speaker if above |
+| New speaker threshold | 0.30 | Must be below this vs ALL centroids to create new speaker |
+| Continuity bonus | 0.10 | Similarity boost for the most recent speaker |
+| Conflict margin | 0.05 | If top-2 within this, prefer more established speaker |
+| Cluster merge | 0.50 | Periodic pairwise merge threshold |
+| Quality RMS gate | 0.003 | Min RMS energy for centroid updates |
+| SCD change threshold | 0.4 | Cosine distance for speaker change detection |
+| SCD window / hop | 2.0s / 0.5s | Sliding window for embedding-based SCD |
+| HMM loopP | 0.99 | VBx-style self-transition probability (continuity prior) |

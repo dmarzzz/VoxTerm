@@ -22,8 +22,8 @@ from config import DIARIZER_MAX_RESTARTS, DIARIZER_RESTART_WINDOW
 from diarization.ipc import (
     MSG_ERROR, MSG_GET_CENTROID, MSG_GET_COLOR,
     MSG_GET_EMBEDDINGS, MSG_GET_NAME, MSG_GET_NAMES, MSG_GET_STATE,
-    MSG_IDENTIFY, MSG_IS_MATCHED, MSG_IS_STABLE, MSG_MARK_MATCHED,
-    MSG_MERGE, MSG_NUM_SPEAKERS, MSG_READY,
+    MSG_IDENTIFY, MSG_IDENTIFY_MULTI, MSG_IS_MATCHED, MSG_IS_STABLE,
+    MSG_MARK_MATCHED, MSG_MERGE, MSG_NUM_SPEAKERS, MSG_READY,
     MSG_RESET, MSG_SET_NAME, MSG_SHUTDOWN,
     decode_array, encode_array, recv_msg, send_msg,
 )
@@ -51,6 +51,7 @@ class DiarizationProxy:
         # Callback for crash notifications (set by app.py)
         self.on_subprocess_crash: callable | None = None
         self.on_subprocess_ready: callable | None = None
+        self._last_debug: dict = {}  # debug info from last identify() call
 
     # ── lifecycle ─────────────────────────────────────────
 
@@ -128,7 +129,50 @@ class DiarizationProxy:
         })
         if resp is None:
             return "Speaker 1", 1
+        # Stash debug info from subprocess (if present)
+        self._last_debug = {
+            k: resp[k] for k in ("debug_rms", "debug_samples", "debug_speakers")
+            if k in resp
+        }
         return resp.get("label", "Speaker 1"), resp.get("speaker_id", 1)
+
+    def identify_segments(
+        self, audio: np.ndarray, sample_rate: int = 16000,
+    ) -> list[tuple[str, int, int, int]]:
+        """Identify speakers with speaker-change detection.
+
+        Returns list of (label, speaker_id, start_sample, end_sample).
+        """
+        if self._mode == "inprocess":
+            with self._engine_lock:
+                return self._engine.identify_segments(audio, sample_rate)
+
+        resp = self._call({
+            "type": MSG_IDENTIFY_MULTI,
+            "audio": encode_array(audio),
+            "sample_rate": sample_rate,
+        })
+        if resp is None:
+            return [("Speaker 1", 1, 0, len(audio))]
+
+        self._last_debug = {
+            k: resp[k] for k in ("debug_speakers",)
+            if k in resp
+        }
+
+        segments = resp.get("segments", [])
+        if not segments:
+            return [("Speaker 1", 1, 0, len(audio))]
+
+        return [
+            (
+                seg.get("label", "Speaker 1"),
+                seg.get("speaker_id", 1),
+                seg.get("start_sample", 0),
+                seg.get("end_sample", len(audio)),
+            )
+            for seg in segments
+        ]
 
     # ── speaker queries ───────────────────────────────────
 

@@ -5,12 +5,12 @@ import pytest
 
 from speakers.models import SpeakerMeta, SpeakerProfile
 
-EMBEDDING_DIM = 192
+EMBEDDING_DIM = 512
 
 
 @pytest.fixture
 def _random_embedding():
-    """Local helper — returns a factory for normalized 192-dim embeddings."""
+    """Local helper — returns a factory for normalized 512-dim embeddings."""
     def _make(seed=None):
         rng = np.random.RandomState(seed)
         emb = rng.randn(EMBEDDING_DIM).astype(np.float32)

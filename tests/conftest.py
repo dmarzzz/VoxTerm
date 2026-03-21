@@ -15,7 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Enable mock engine for all tests — avoids PyTorch/SpeechBrain model loading
 os.environ["VOXTERM_MOCK_ENGINE"] = "1"
 
-EMBEDDING_DIM = 192
+EMBEDDING_DIM = 512
 SAMPLE_RATE = 16000
 
 
