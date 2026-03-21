@@ -5,3 +5,24 @@ __pycache__/
 .DS_Store
 .state.json
 *.log
+
+# Voice profiles — biometric data, never commit
+*.speakers.db
+*.speakers.db-wal
+*.speakers.db-shm
+
+# Transcripts and live files
+*.md
+!README.md
+!docs/**/*.md
+
+# Session state and crash dumps
+.crashes/
+.live/
+.bin/
+.backups/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+!CLAUDE.md
