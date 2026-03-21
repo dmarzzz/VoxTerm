@@ -51,6 +51,14 @@ LIVE_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".live"
 # System audio capture — compiled Swift helper cached here
 BIN_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".bin"
 
+# Diarizer subprocess
+DIARIZER_TIMEOUT = 5.0        # seconds to wait for subprocess response
+DIARIZER_MAX_RESTARTS = 3     # max restarts before falling back to in-process
+DIARIZER_RESTART_WINDOW = 60  # seconds — restart counter resets after this
+
+# Crash reporting
+CRASH_LOG_MAX_COUNT = 50      # max crash logs to keep (rotated on startup)
+
 # Waveform
 WAVEFORM_FPS = 15
 WAVEFORM_HEIGHT = 11

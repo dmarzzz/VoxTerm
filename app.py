@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import gc
-import resource
 import sys
 import os
 import subprocess
 import json
 import threading
 import time
-import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -20,10 +18,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Internal runtime defaults — prevent known framework conflicts
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# Limit PyTorch internal threads to prevent C++ runtime conflicts with MLX
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 # Suppress leaked-semaphore warning from multiprocessing resource tracker
 # on hard exit (os._exit). SpeechBrain/PyTorch create semaphores that aren't
 # cleaned up before our forced exit — harmless, OS reclaims them immediately.
+import diagnostics
+diagnostics.setup_faulthandler()
+diagnostics.rotate_crash_logs()
+
 import warnings
 warnings.filterwarnings("ignore", message="resource_tracker", category=UserWarning)
 
@@ -39,11 +44,14 @@ from textual import work
 from widgets.header import CyberHeader
 from widgets.waveform import WaveformWidget, _make_style
 from widgets.transcript import TranscriptPanel
+from widgets.tag_screen import SpeakerTagScreen
+from widgets.profile_screen import SpeakerProfileScreen
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
 from transcriber.engine import Qwen3Transcriber, WhisperTranscriber
-from diarization.engine import DiarizationEngine
+from diarization.proxy import DiarizationProxy
+from speakers.store import SpeakerStore
 from config import (
     SAMPLE_RATE, CHUNK_SIZE, WAVEFORM_FPS,
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
@@ -57,8 +65,6 @@ from config import (
 SESSIONS_DIR = Path.home() / "Documents" / "voxterm"
 # Persistent state file (remembers last-used model across launches)
 STATE_FILE = SESSIONS_DIR / ".state.json"
-# Crash logs — always written, not gated by debug mode
-CRASH_DIR = SESSIONS_DIR / ".crashes"
 
 
 def _load_state() -> dict:
@@ -257,6 +263,8 @@ class HelpScreen(ModalScreen):
             dialog.border_title = "KEYBOARD SHORTCUTS"
             yield Static(
                 "[bold #00e5ff]R[/]       [#c0c0c0]Start / stop recording[/]\n"
+                "[bold #00e5ff]T[/]       [#c0c0c0]Tag / name speakers[/]\n"
+                "[bold #00e5ff]P[/]       [#c0c0c0]Speaker profiles[/]\n"
                 "[bold #00e5ff]Ctrl+S[/]  [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
@@ -342,6 +350,8 @@ class VoxTerm(App):
 
     BINDINGS = [
         Binding("r", "toggle_recording", "Record/Pause"),
+        Binding("t", "tag_speakers", "Tag"),
+        Binding("p", "manage_profiles", "Profiles"),
         Binding("m", "switch_model", "Model"),
         Binding("l", "switch_language", "Language"),
         Binding("ctrl+s", "export_transcript", "Save"),
@@ -358,7 +368,8 @@ class VoxTerm(App):
         self.system_capture = SystemCapture()
         self.audio_buffer = AudioBuffer()
         self.transcriber = transcriber or Qwen3Transcriber()
-        self.diarizer = DiarizationEngine()
+        self.diarizer = DiarizationProxy()
+        self.speaker_store = SpeakerStore()
         self._model_name = model_name
         self._language = language
         self._is_qwen3 = model_name in QWEN3_MODELS
@@ -377,6 +388,13 @@ class VoxTerm(App):
         self._session_start = datetime.now()
         self._live_file: Path | None = None
         self._live_header_written = False
+        # Maps session speaker_id → persistent profile_id (set on tagging)
+        self._speaker_profile_map: dict[int, str] = {}
+        # Active learning fatigue prevention
+        self._prompt_times: list[float] = []        # timestamps of recent prompts
+        self._prompt_confirmations: dict[int, int] = {}  # speaker_id → confirm count
+        self._last_prompt_time: float = 0.0
+        self._onboarding_shown = False
 
     def compose(self) -> ComposeResult:
         yield CyberHeader()
@@ -390,12 +408,21 @@ class VoxTerm(App):
             )
         yield Static(
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
+            "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
+            "[bold #00e5ff]\\[P][/][#607080] Profiles  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
             id="footer-bar",
             markup=True,
         )
 
     def on_mount(self) -> None:
+        # Open speaker profile store (fast — just SQLite + cache load)
+        try:
+            self.speaker_store.open()
+            self.speaker_store.backup()
+        except Exception:
+            pass  # graceful degradation — ephemeral mode if DB fails
+
         if self._model_loaded:
             transcript = self.query_one(TranscriptPanel)
             transcript.system_message("VOXTERM engine online")
@@ -425,7 +452,14 @@ class VoxTerm(App):
         lang_text = AVAILABLE_LANGUAGES.get(self._language, self._language) if self._language else "auto"
 
         spk_count = self.diarizer.num_speakers if self._diarizer_loaded else 0
-        spk_text = f"    [#aa88ff]{spk_count} speakers[/]" if spk_count > 0 else ""
+        if spk_count > 0:
+            tagged_count = len(self.diarizer.get_speaker_names())
+            if tagged_count > 0:
+                spk_text = f"    [#aa88ff]{tagged_count}/{spk_count} tagged[/]"
+            else:
+                spk_text = f"    [#aa88ff]{spk_count} speakers[/]"
+        else:
+            spk_text = ""
 
         # Auto-save indicator
         if self._last_saved_at is not None:
@@ -460,68 +494,51 @@ class VoxTerm(App):
             self._update_telemetry()
 
     def _periodic_gc(self):
-        """Prevent memory fragmentation during long sessions."""
+        """Prevent memory fragmentation during long sessions + memory watchdog."""
         gc.collect()
+
+        # Memory watchdog: warn at 4GB, crash-dump at 6GB
+        import resource as _resource
+        rss_bytes = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        rss_mb = rss_bytes / (1024 * 1024)
+        if rss_mb > 6000:
+            self._write_crash_dump(f"memory_watchdog: {rss_mb:.0f}MB")
+            self.query_one(TranscriptPanel).system_message(
+                f"high memory usage ({rss_mb:.0f}MB) — consider saving and restarting"
+            )
+        elif rss_mb > 4000 and self._debug:
+            self.query_one(TranscriptPanel).system_message(
+                f"[dbg] memory: {rss_mb:.0f}MB"
+            )
 
     def _write_crash_dump(self, context: str, exc: BaseException | None = None):
         """Write a diagnostic dump to disk. Always runs, not gated by debug."""
         try:
-            CRASH_DIR.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now()
-            filename = ts.strftime("%Y-%m-%d_%H%M%S") + ".log"
-            uptime = (ts - self._session_start).total_seconds()
-
-            # Memory usage (macOS: ru_maxrss is in bytes)
-            rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            rss_mb = rss_bytes / (1024 * 1024)
-
-            # Style cache stats
             cache = _make_style.cache_info()
-
-            # Transcript entry count
             try:
                 entry_count = len(self.query_one(TranscriptPanel).get_entries())
             except Exception:
                 entry_count = -1
 
-            # Diarizer state
-            spk_count = self.diarizer.num_speakers if self._diarizer_loaded else 0
-
-            lines = [
-                f"VOXTERM CRASH DUMP",
-                f"{'=' * 60}",
-                f"timestamp:        {ts.isoformat()}",
-                f"uptime:           {uptime:.0f}s ({uptime / 60:.1f}m)",
-                f"context:          {context}",
-                f"",
-                f"-- error --",
-                f"type:             {type(exc).__name__ if exc else 'N/A'}",
-                f"message:          {exc}",
-                f"traceback:",
-                traceback.format_exc() if exc else "  N/A",
-                f"",
-                f"-- runtime state --",
-                f"recording:        {self._recording}",
-                f"is_transcribing:  {self._transcribing.is_set()}",
-                f"transcribe_count: {self._transcribe_count}",
-                f"model:            {self._model_name}",
-                f"model_loaded:     {self._model_loaded}",
-                f"diarizer_loaded:  {self._diarizer_loaded}",
-                f"language:         {self._language}",
-                f"had_speech:       {self._had_speech}",
-                f"silence_chunks:   {self._silence_chunks}",
-                f"sys_capture:      active={self.system_capture.is_active} msg={self.system_capture.status_message}",
-                f"",
-                f"-- memory --",
-                f"peak_rss_mb:      {rss_mb:.1f}",
-                f"audio_buf_dur:    {self.audio_buffer.duration:.2f}s",
-                f"style_cache:      hits={cache.hits} misses={cache.misses} size={cache.currsize}/{cache.maxsize}",
-                f"transcript_entries: {entry_count}",
-                f"speakers:         {spk_count}",
-                f"gc_counts:        {gc.get_count()}",
-            ]
-
-            (CRASH_DIR / filename).write_text("\n".join(lines), encoding="utf-8")
+            state = {
+                "uptime_sec": (datetime.now() - self._session_start).total_seconds(),
+                "recording": self._recording,
+                "is_transcribing": self._transcribing.is_set(),
+                "transcribe_count": self._transcribe_count,
+                "model": self._model_name,
+                "model_loaded": self._model_loaded,
+                "diarizer_loaded": self._diarizer_loaded,
+                "language": self._language,
+                "had_speech": self._had_speech,
+                "silence_chunks": self._silence_chunks,
+                "sys_capture": f"active={self.system_capture.is_active} msg={self.system_capture.status_message}",
+                "audio_buf_dur": f"{self.audio_buffer.duration:.2f}s",
+                "style_cache": f"hits={cache.hits} misses={cache.misses} size={cache.currsize}/{cache.maxsize}",
+                "transcript_entries": entry_count,
+                "speakers": self.diarizer.num_speakers if self._diarizer_loaded else 0,
+                "gc_counts": str(gc.get_count()),
+            }
+            diagnostics.write_crash_dump(context, exc, state)
         except Exception:
             pass  # crash dump must never itself crash the app
 
@@ -579,14 +596,25 @@ class VoxTerm(App):
         buffer_duration = self.audio_buffer.duration
 
         if self._transcribing.is_set():
-            # Watchdog: force-reset if stuck for >10s
+            # Graduated watchdog: warn → force-reset → disable
             elapsed = time.time() - self._transcribe_started if self._transcribe_started else 0
-            if elapsed > 10:
+            if elapsed > 30:
+                # Critical: transcriber appears hung — force-reset and warn
                 self._transcribing.clear()
-                if self._debug:
-                    self.query_one(TranscriptPanel).system_message(
-                        f"[watchdog] reset after {elapsed:.0f}s"
-                    )
+                self._write_crash_dump(f"transcription_hung_{elapsed:.0f}s")
+                self.query_one(TranscriptPanel).system_message(
+                    f"transcription timed out ({elapsed:.0f}s) — try a smaller model [M]"
+                )
+            elif elapsed > 15:
+                # Force-reset and log
+                self._transcribing.clear()
+                self.query_one(TranscriptPanel).system_message(
+                    f"[watchdog] reset after {elapsed:.0f}s"
+                )
+            elif elapsed > 8 and self._debug:
+                self.query_one(TranscriptPanel).system_message(
+                    f"[dbg] transcription slow: {elapsed:.0f}s"
+                )
             return
 
         if self._debug:
@@ -626,28 +654,82 @@ class VoxTerm(App):
                     f"[dbg] transcribing {duration:.1f}s audio..."
                 )
             # 1. Transcribe (Qwen3: ~100ms, Whisper: ~2-4s)
+            # MLX runs in main process; PyTorch diarizer runs in subprocess.
+            # No lock needed — they're in separate processes.
             result = self.transcriber.transcribe(audio)
 
-            # Periodic GC to prevent MLX/PyTorch memory buildup
+            # Periodic GC to prevent MLX memory buildup
             self._transcribe_count += 1
             if self._transcribe_count % 20 == 0:
                 gc.collect()
 
             text = result.get("text", "")
 
-            # 2. Speaker ID AFTER transcription (non-blocking)
+            # 2. Speaker ID via subprocess (non-blocking to main thread)
             speaker_label, speaker_id = "", 0
+            confidence = ""
             if text and self._diarizer_loaded:
                 try:
                     speaker_label, speaker_id = self.diarizer.identify(
                         audio.copy()
                     )
+
+                    # 3. Cross-session matching — if speaker stable and not yet matched
+                    if (
+                        speaker_id > 0
+                        and self.speaker_store.is_open
+                        and not self.diarizer.is_matched(speaker_id)
+                        and speaker_id not in self._speaker_profile_map
+                        and self.diarizer.is_speaker_stable(speaker_id)
+                    ):
+                        centroid = self.diarizer.get_session_centroid(speaker_id)
+                        if centroid is not None:
+                            match = self.speaker_store.classify_match(centroid)
+
+                            if match.tier == "high":
+                                # Auto-assign: name this speaker
+                                speaker_label = match.name
+                                confidence = "high"
+                                self.diarizer.set_speaker_name(speaker_id, match.name)
+                                self.diarizer.mark_matched(speaker_id)
+                                self._speaker_profile_map[speaker_id] = match.profile_id
+
+                                # Update profile if mature enough
+                                if self.speaker_store.is_profile_mature(match.profile_id):
+                                    seg_data = self.diarizer.get_segment_embeddings(speaker_id)
+                                    for emb, dur in seg_data:
+                                        if dur >= 3.0:
+                                            self.speaker_store.update_profile_embedding(
+                                                match.profile_id, emb,
+                                                duration=dur, confirmed=False,
+                                            )
+
+                                # Apply color + confidence on main thread
+                                self.call_from_thread(
+                                    self._on_auto_recognition,
+                                    speaker_id, match.name, match.color,
+                                    "high", match.score,
+                                )
+
+                            elif match.tier == "medium":
+                                # Suggest but don't auto-assign
+                                speaker_label = f"{match.name}?"
+                                confidence = "medium"
+                                self.diarizer.mark_matched(speaker_id)
+
+                                self.call_from_thread(
+                                    self._on_auto_recognition,
+                                    speaker_id, f"{match.name}?", match.color,
+                                    "medium", match.score,
+                                )
+
                 except Exception:
                     pass
 
             if text:
                 self.call_from_thread(
-                    self._on_transcription, text, speaker_label, speaker_id
+                    self._on_transcription, text, speaker_label, speaker_id,
+                    confidence,
                 )
         except Exception as e:
             self._write_crash_dump("_transcribe_audio", e)
@@ -659,10 +741,73 @@ class VoxTerm(App):
             # ALWAYS unblock — even if worker is cancelled or crashes
             self._transcribing.clear()
 
-    def _on_transcription(self, text: str, speaker: str = "", speaker_id: int = 0):
-        self.query_one(TranscriptPanel).add_transcript(text, speaker, speaker_id)
+    def _on_transcription(
+        self, text: str, speaker: str = "", speaker_id: int = 0,
+        confidence: str = "",
+    ):
+        self.query_one(TranscriptPanel).add_transcript(
+            text, speaker, speaker_id, confidence=confidence,
+        )
         self._append_live_transcript(text, speaker, speaker_id)
         self._update_telemetry()
+
+        # First-use onboarding tip
+        if (
+            not self._onboarding_shown
+            and speaker_id > 0
+            and not self.speaker_store.get_all_profiles()
+            and not self.diarizer.get_speaker_names()
+        ):
+            self._onboarding_shown = True
+            self.query_one(TranscriptPanel).system_message(
+                "tip: press [T] to name speakers — VoxTerm will remember them"
+            )
+
+    def _on_auto_recognition(
+        self, speaker_id: int, name: str, color: str,
+        tier: str, score: float,
+    ):
+        """Called on main thread when cross-session matching identifies a speaker."""
+        transcript = self.query_one(TranscriptPanel)
+        transcript.set_speaker_confidence(speaker_id, tier, score)
+        # Rename all prior entries for this speaker in the transcript
+        transcript.rename_speaker(speaker_id, name, color)
+
+        # For MEDIUM matches: show confirmation prompt (if within budget)
+        if tier == "medium" and self._can_prompt():
+            self._show_confirm_prompt(speaker_id, name.rstrip("?"), score)
+
+        self._update_telemetry()
+
+    # ── active learning / fatigue ──────────────────────────────
+
+    def _can_prompt(self) -> bool:
+        """Check if we're within the active learning prompt budget."""
+        now = time.time()
+        session_elapsed = now - self._session_start.timestamp()
+
+        # Max 5 prompts per 10-minute window
+        cutoff = now - 600
+        recent = [t for t in self._prompt_times if t > cutoff]
+        if len(recent) >= 5:
+            return False
+
+        # After first 5 min: max 1 prompt per 2 minutes
+        if session_elapsed > 300 and (now - self._last_prompt_time) < 120:
+            return False
+
+        return True
+
+    def _show_confirm_prompt(self, speaker_id: int, name: str, score: float):
+        """Show a non-blocking confirmation for a MEDIUM-confidence match."""
+        pct = int(score * 100)
+        transcript = self.query_one(TranscriptPanel)
+        transcript.system_message(
+            f"is this {name}? (~{pct}%) "
+            f"press [T] to confirm or rename"
+        )
+        self._prompt_times.append(time.time())
+        self._last_prompt_time = time.time()
 
     # ── background auto-save ───────────────────────────────────
 
@@ -724,6 +869,12 @@ class VoxTerm(App):
             "loading speaker identification model..."
         )
         try:
+            # Set up crash/restart callbacks for subprocess mode
+            self.diarizer.on_subprocess_crash = self._on_diarizer_crash
+            self.diarizer.on_subprocess_ready = lambda: self.call_from_thread(
+                self.query_one(TranscriptPanel).system_message,
+                "speaker identification restarted"
+            )
             self.diarizer.load()
             self.call_from_thread(self._on_diarizer_loaded)
         except Exception as e:
@@ -735,9 +886,26 @@ class VoxTerm(App):
 
     def _on_diarizer_loaded(self):
         self._diarizer_loaded = True
-        self.query_one(TranscriptPanel).system_message("speaker identification online")
+        mode = "subprocess" if self.diarizer._mode == "subprocess" else "in-process"
+        self.query_one(TranscriptPanel).system_message(
+            f"speaker identification online ({mode})"
+        )
         self.query_one(TranscriptPanel).system_message("press [R] to start recording")
         self._update_telemetry()
+
+    def _on_diarizer_crash(self, crash_count: int):
+        """Called from worker thread when diarizer subprocess crashes."""
+        self._write_crash_dump(f"diarizer_subprocess_crash #{crash_count}")
+        if self.diarizer._mode == "inprocess":
+            self.call_from_thread(
+                self.query_one(TranscriptPanel).system_message,
+                "speaker ID subprocess failed — using in-process fallback"
+            )
+        else:
+            self.call_from_thread(
+                self.query_one(TranscriptPanel).system_message,
+                f"speaker ID subprocess crashed — restarting ({crash_count}/{3})"
+            )
 
     def _on_diarizer_fallback(self):
         self.query_one(TranscriptPanel).system_message("press [R] to start recording")
@@ -823,6 +991,177 @@ class VoxTerm(App):
             self._update_telemetry()
 
         self.push_screen(LanguageSelectScreen(self._language), on_lang_selected)
+
+    def action_tag_speakers(self):
+        """Open speaker tagging modal."""
+        if not self._diarizer_loaded:
+            self.query_one(TranscriptPanel).system_message(
+                "speaker identification not loaded yet"
+            )
+            return
+
+        session_speakers = self.diarizer.get_all_session_speakers()
+        if not session_speakers:
+            self.query_one(TranscriptPanel).system_message("no speakers detected yet")
+            return
+
+        # Build speaker list for the modal
+        speaker_names = self.diarizer.get_speaker_names()
+        speakers = []
+        for sid, seg_count in sorted(session_speakers.items()):
+            name = speaker_names.get(sid, f"Speaker {sid}")
+            color = self.diarizer.get_speaker_color(sid)
+            tagged = sid in speaker_names
+            speakers.append({
+                "id": sid,
+                "name": name,
+                "color": color,
+                "segments": seg_count,
+                "tagged": tagged,
+            })
+
+        # Collect known names from persistent profiles for autocomplete
+        known_names = list(self.speaker_store.get_profile_names().values())
+
+        def on_tag_result(result):
+            if result is None:
+                return
+            if "merge_source" in result:
+                self._apply_speaker_merge(
+                    result["merge_source"], result["merge_target"]
+                )
+            else:
+                self._apply_speaker_tag(result["speaker_id"], result["name"])
+
+        self.push_screen(
+            SpeakerTagScreen(speakers, known_names=known_names),
+            on_tag_result,
+        )
+
+    def _apply_speaker_tag(self, speaker_id: int, name: str):
+        """Apply a speaker tag: update diarizer, transcript, and persistent store."""
+        # 1. Update the in-session diarizer
+        self.diarizer.set_speaker_name(speaker_id, name)
+
+        # 2. Get the session embeddings for enrollment
+        segment_data = self.diarizer.get_segment_embeddings(speaker_id)
+        embeddings = [emb for emb, dur in segment_data if dur >= 3.0]
+        durations = [dur for emb, dur in segment_data if dur >= 3.0]
+
+        # Fall back to all embeddings if none pass the 3s filter
+        if not embeddings and segment_data:
+            embeddings = [emb for emb, dur in segment_data]
+            durations = [dur for emb, dur in segment_data]
+
+        # 3. Check if this name matches an existing profile
+        existing_profiles = self.speaker_store.get_all_profiles()
+        matched_profile = None
+        for p in existing_profiles:
+            if p.name.lower() == name.lower():
+                matched_profile = p
+                break
+
+        if matched_profile:
+            # Update existing profile with new embeddings
+            profile_id = matched_profile.id
+            color = matched_profile.color
+            for emb, dur in zip(embeddings, durations):
+                self.speaker_store.update_profile_embedding(
+                    profile_id, emb, duration=dur, confirmed=True
+                )
+        elif embeddings:
+            # Create a new profile
+            color = self.diarizer.get_speaker_color(speaker_id)
+            profile_id = self.speaker_store.create_profile(
+                name=name,
+                color=color,
+                embeddings=embeddings,
+                durations=durations,
+            )
+        else:
+            # No embeddings available — just rename in-session
+            color = None
+            profile_id = None
+
+        if profile_id:
+            self._speaker_profile_map[speaker_id] = profile_id
+
+        # 4. Update transcript display
+        self.query_one(TranscriptPanel).rename_speaker(speaker_id, name, color)
+
+        # 5. Feedback
+        self.query_one(TranscriptPanel).system_message(f"tagged as {name}")
+        self._update_telemetry()
+
+    def _apply_speaker_merge(self, source_id: int, target_id: int):
+        """Merge source session speaker into target."""
+        transcript = self.query_one(TranscriptPanel)
+        target_name = self.diarizer.get_speaker_name(target_id)
+        target_color = self.diarizer.get_speaker_color(target_id)
+
+        # Merge in-session: rename source entries to target
+        transcript.rename_speaker(source_id, target_name, target_color)
+
+        # Merge in diarizer (centroids, embeddings, cleanup)
+        self.diarizer.merge_speakers(source_id, target_id)
+
+        # If both have persistent profiles, merge those too
+        source_pid = self._speaker_profile_map.get(source_id)
+        target_pid = self._speaker_profile_map.get(target_id)
+        if source_pid and target_pid and source_pid != target_pid:
+            self.speaker_store.merge_profiles(source_pid, target_pid)
+            self._speaker_profile_map.pop(source_id, None)
+
+        transcript.system_message(
+            f"merged Speaker {source_id} into {target_name}"
+        )
+        self._update_telemetry()
+
+    def action_manage_profiles(self):
+        """Open speaker profiles management screen."""
+        profiles = self.speaker_store.get_all_profiles()
+
+        def on_profile_result(result):
+            if result is None:
+                return
+            action = result.get("action")
+            if action == "rename":
+                pid = result["profile_id"]
+                new_name = result["name"]
+                self.speaker_store.rename_profile(pid, new_name)
+                self.query_one(TranscriptPanel).system_message(
+                    f"profile renamed to {new_name}"
+                )
+                # Update in-session labels if this profile is active
+                for sid, mapped_pid in self._speaker_profile_map.items():
+                    if mapped_pid == pid:
+                        self.diarizer.set_speaker_name(sid, new_name)
+                        self.query_one(TranscriptPanel).rename_speaker(
+                            sid, new_name
+                        )
+            elif action == "delete":
+                pid = result["profile_id"]
+                meta = next(
+                    (p for p in profiles if p.id == pid), None
+                )
+                name = meta.name if meta else "unknown"
+                self.speaker_store.delete_profile(pid)
+                # Remove from session mapping
+                self._speaker_profile_map = {
+                    sid: p for sid, p in self._speaker_profile_map.items()
+                    if p != pid
+                }
+                self.query_one(TranscriptPanel).system_message(
+                    f"deleted profile: {name}"
+                )
+            elif action == "delete_all":
+                self.speaker_store.delete_all_data()
+                self._speaker_profile_map.clear()
+                self.query_one(TranscriptPanel).system_message(
+                    "all voice data deleted"
+                )
+
+        self.push_screen(SpeakerProfileScreen(profiles), on_profile_result)
 
     def _swap_model(self, model_key: str):
         self._model_loaded = False
@@ -930,6 +1269,9 @@ class VoxTerm(App):
 
     def _start_new_session(self):
         """Clear transcript and reset for a new session."""
+        # Record session-speaker mappings before clearing
+        self._record_session_stats()
+
         transcript = self.query_one(TranscriptPanel)
         transcript.clear()
         self.audio_buffer.clear()
@@ -937,10 +1279,29 @@ class VoxTerm(App):
         self._silence_chunks = 0
         if self._diarizer_loaded:
             self.diarizer.reset_session()
+        self._speaker_profile_map.clear()
+        self._prompt_times.clear()
+        self._prompt_confirmations.clear()
+        self._last_prompt_time = 0.0
         # Start fresh live file
         self._session_start = datetime.now()
         self._live_file = None
         self._live_header_written = False
+
+    def _record_session_stats(self):
+        """Record speaker-session mappings to persistent store."""
+        if not self.speaker_store.is_open or not self._speaker_profile_map:
+            return
+        session_id = self._session_start.strftime("%Y-%m-%d_%H%M%S")
+        session_speakers = self.diarizer.get_all_session_speakers()
+        for sid, profile_id in self._speaker_profile_map.items():
+            seg_count = session_speakers.get(sid, 0)
+            try:
+                self.speaker_store.record_session_speaker(
+                    session_id, profile_id, sid, seg_count
+                )
+            except Exception:
+                pass
 
     def action_show_help(self):
         self.push_screen(HelpScreen())
@@ -958,11 +1319,21 @@ class VoxTerm(App):
         self._silence_chunks = 0
         if self._diarizer_loaded:
             self.diarizer.reset_session()
+        self._speaker_profile_map.clear()
 
     def action_quit(self):
         # Live file already on disk — no extra save needed
+        self._record_session_stats()
         self.audio_capture.stop()
         self.system_capture.stop()
+        try:
+            self.diarizer.shutdown()
+        except Exception:
+            pass
+        try:
+            self.speaker_store.close()
+        except Exception:
+            pass
 
         # Let Textual restore the terminal, then hard-exit before
         # Python's GC triggers C extension segfaults.
@@ -1059,21 +1430,13 @@ if __name__ == "__main__":
     import atexit
     atexit.register(os._exit, 0)
 
+    # Restore terminal on segfault so the shell doesn't get stuck in raw mode
+    diagnostics.setup_signal_handlers()
+
     app = VoxTerm(transcriber=transcriber, model_name=model_name, language=language)
 
     # Global exception hooks — dump diagnostics on any uncaught crash
-    _orig_excepthook = sys.excepthook
-    def _crash_excepthook(exc_type, exc_value, exc_tb):
-        app._write_crash_dump(f"uncaught:{exc_type.__name__}", exc_value)
-        _orig_excepthook(exc_type, exc_value, exc_tb)
-    sys.excepthook = _crash_excepthook
-
-    _orig_thread_excepthook = getattr(threading, "excepthook", None)
-    def _thread_crash_hook(args):
-        app._write_crash_dump(f"thread:{args.thread.name if args.thread else 'unknown'}", args.exc_value)
-        if _orig_thread_excepthook:
-            _orig_thread_excepthook(args)
-    threading.excepthook = _thread_crash_hook
+    diagnostics.setup_exception_hooks(app)
 
     try:
         app.run()
