@@ -700,7 +700,7 @@ class SpeakerStore:
         return self._encrypt(raw)
 
     def _blob_to_embeddings(self, blob: bytes) -> list[np.ndarray]:
-        """Unpack a BLOB into a list of 192-dim embeddings."""
+        """Unpack a BLOB into a list of 512-dim embeddings."""
         if not blob:
             return []
         raw = self._decrypt(blob)
