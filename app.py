@@ -1462,7 +1462,16 @@ class VoxTerm(App):
                     if peer_info.node_id in mgr._peers:
                         return
                 if not peer_info.in_session:
+                    self.call_from_thread(
+                        self._p2p_debug_msg,
+                        f"found {peer_info.display_name} (idle, not in session)"
+                    )
                     return
+                self.call_from_thread(
+                    self._p2p_debug_msg,
+                    f"found {peer_info.display_name} in session — "
+                    + ("connecting..." if my_id < peer_info.node_id else "waiting for their connection...")
+                )
                 # Tie-break: lower node_id initiates
                 if my_id < peer_info.node_id:
                     threading.Thread(
@@ -1492,9 +1501,18 @@ class VoxTerm(App):
             def _retry_connect():
                 import time as _time
                 _time.sleep(3.0)
-                if not mgr._running or mgr._peers:
+                if not mgr._running:
                     return
-                for pi in self._discovery.get_visible_peers() if self._discovery else []:
+                with mgr._lock:
+                    has_peers = bool(mgr._peers)
+                if has_peers:
+                    return
+                visible = self._discovery.get_visible_peers() if self._discovery else []
+                self.call_from_thread(
+                    self._p2p_debug_msg,
+                    f"no peers after 3s, retrying... ({len(visible)} visible on network)"
+                )
+                for pi in visible:
                     if pi.in_session and pi.node_id != my_id:
                         with mgr._lock:
                             if pi.node_id in mgr._peers:
@@ -1561,11 +1579,19 @@ class VoxTerm(App):
                 mgr.session_code,
             )
             if not success:
-                # Wrong session code or connection failed — that's fine,
-                # they're in a different session
-                pass
-        except Exception:
-            pass
+                self.call_from_thread(
+                    self._p2p_debug_msg,
+                    f"connection to {peer_info.display_name} failed (wrong session or unreachable)"
+                )
+        except Exception as exc:
+            self.call_from_thread(
+                self._p2p_debug_msg,
+                f"connection error: {exc}"
+            )
+
+    def _p2p_debug_msg(self, text: str) -> None:
+        """Show a P2P debug message in the transcript."""
+        self.query_one(TranscriptPanel).system_message(f"[P2P] {text}")
 
     def _wire_session_callbacks(self) -> None:
         mgr = self._session_mgr
