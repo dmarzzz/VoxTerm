@@ -37,6 +37,7 @@ class SystemCapture:
         self._unavailable = False
         self._status_message = ""
         self._bt_multi_output_active = False  # True if we created a multi-output device
+        self._died_during_recording = False  # A2: set if helper dies while active
 
     # ── public API (matches AudioCapture) ────────────────────
 
@@ -161,6 +162,11 @@ class SystemCapture:
     def status_message(self) -> str:
         return self._status_message
 
+    @property
+    def died_during_recording(self) -> bool:
+        """True if the SCK helper died while audio capture was active."""
+        return self._died_during_recording
+
     # ── private ──────────────────────────────────────────────
 
     @staticmethod
@@ -256,7 +262,11 @@ class SystemCapture:
         except (OSError, ValueError):
             pass
         finally:
+            was_active = self._active
             self._active = False
+            # A2: flag if the helper died while we were actively recording
+            if was_active:
+                self._died_during_recording = True
             # Check exit code for permission errors
             if proc.poll() == 1:
                 self._status_message = (

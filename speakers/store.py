@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sqlite3
 import threading
 import uuid
@@ -109,9 +110,14 @@ class SpeakerStore:
     def open(self) -> None:
         """Open (or create) the database and load centroids into memory."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
-            str(self._db_path), timeout=5.0, check_same_thread=False,
-        )
+        # S2: restrict umask so WAL/SHM files inherit owner-only permissions
+        old_umask = os.umask(0o077)
+        try:
+            self._conn = sqlite3.connect(
+                str(self._db_path), timeout=5.0, check_same_thread=False,
+            )
+        finally:
+            os.umask(old_umask)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -140,6 +146,19 @@ class SpeakerStore:
     @property
     def is_open(self) -> bool:
         return self._conn is not None
+
+    def _safe_commit(self) -> bool:
+        """S1: commit with rollback on failure (e.g. disk full)."""
+        try:
+            self._safe_commit()
+            return True
+        except sqlite3.OperationalError:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            log.warning("SQLite commit failed (disk full?)")
+            return False
 
     # ── queries ──────────────────────────────────────────────
 
@@ -297,7 +316,7 @@ class SpeakerStore:
                     now, now, now,
                 ),
             )
-            self._conn.commit()
+            self._safe_commit()
 
             # Update caches
             self._centroids[profile_id] = centroid
@@ -357,7 +376,7 @@ class SpeakerStore:
                     profile_id,
                 ),
             )
-            self._conn.commit()
+            self._safe_commit()
 
             self._centroids[profile_id] = profile.centroid.copy()
             if profile_id in self._profiles:
@@ -379,7 +398,7 @@ class SpeakerStore:
                 "UPDATE speakers SET name = ?, updated_at = ? WHERE id = ?",
                 (name, now, profile_id),
             )
-            self._conn.commit()
+            self._safe_commit()
             if profile_id in self._profiles:
                 self._profiles[profile_id].name = name
                 self._profiles[profile_id].updated_at = now
@@ -393,7 +412,7 @@ class SpeakerStore:
                 "UPDATE speakers SET color = ? WHERE id = ?",
                 (color, profile_id),
             )
-            self._conn.commit()
+            self._safe_commit()
             if profile_id in self._profiles:
                 self._profiles[profile_id].color = color
 
@@ -406,7 +425,7 @@ class SpeakerStore:
             self._conn.execute(
                 "DELETE FROM session_speakers WHERE speaker_id = ?", (profile_id,)
             )
-            self._conn.commit()
+            self._safe_commit()
             self._conn.execute("VACUUM")
             self._centroids.pop(profile_id, None)
             self._profiles.pop(profile_id, None)
@@ -464,7 +483,7 @@ class SpeakerStore:
                 (target_id, source_id),
             )
             self._conn.execute("DELETE FROM speakers WHERE id = ?", (source_id,))
-            self._conn.commit()
+            self._safe_commit()
 
             self._centroids[target_id] = target.centroid.copy()
             self._centroids.pop(source_id, None)
@@ -491,7 +510,7 @@ class SpeakerStore:
                    VALUES (?, ?, ?, ?)""",
                 (session_id, speaker_id, local_id, segment_count),
             )
-            self._conn.commit()
+            self._safe_commit()
 
     # ── export / import / delete ─────────────────────────────
 
@@ -528,7 +547,7 @@ class SpeakerStore:
                         f"INSERT OR REPLACE INTO speakers VALUES ({placeholders})",
                         row,
                     )
-                self._conn.commit()
+                self._safe_commit()
                 self._load_all()
         finally:
             src.close()
@@ -539,7 +558,7 @@ class SpeakerStore:
             if self._conn:
                 self._conn.execute("DELETE FROM session_speakers")
                 self._conn.execute("DELETE FROM speakers")
-                self._conn.commit()
+                self._safe_commit()
                 self._conn.execute("VACUUM")  # scrub encrypted bytes from free pages
                 self._centroids.clear()
                 self._profiles.clear()
@@ -594,7 +613,7 @@ class SpeakerStore:
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
                 (_SCHEMA_VERSION,),
             )
-            self._conn.commit()
+            self._safe_commit()
 
     def _migrate_embedding_dim(self) -> None:
         """Clear profiles from a previous embedding model (dimension mismatch)."""
@@ -610,7 +629,7 @@ class SpeakerStore:
             )
             self._conn.execute("DELETE FROM speakers")
             self._conn.execute("DELETE FROM session_speakers")
-            self._conn.commit()
+            self._safe_commit()
 
     def _load_all(self) -> None:
         """Eagerly load all centroids and metadata into memory."""
@@ -750,7 +769,7 @@ class SpeakerStore:
                 )
                 migrated += 1
         if migrated:
-            self._conn.commit()
+            self._safe_commit()
             log.info("Encrypted %d speaker profile(s)", migrated)
 
     @staticmethod

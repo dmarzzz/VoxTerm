@@ -53,6 +53,10 @@ class DiarizationProxy:
         self.on_subprocess_ready: callable | None = None
         self._last_debug: dict = {}  # debug info from last identify() call
 
+        # T2/I2: cached values for non-blocking telemetry reads from main thread
+        self._cached_num_speakers: int = 0
+        self._cached_speaker_names: dict[int, str] = {}
+
     # ── lifecycle ─────────────────────────────────────────
 
     def load(self):
@@ -61,7 +65,7 @@ class DiarizationProxy:
             self._spawn()
             self._loaded = True
         except Exception:
-            self._fallback_to_inprocess()
+            self._disable()
 
     def _spawn(self):
         """Start the subprocess worker."""
@@ -100,7 +104,7 @@ class DiarizationProxy:
 
     def shutdown(self):
         """Cleanly stop the subprocess."""
-        if self._mode == "inprocess":
+        if self._mode in ("inprocess", "disabled"):
             return
         with self._lock:
             if self._proc is not None:
@@ -118,6 +122,8 @@ class DiarizationProxy:
     # ── speaker identification (main API) ─────────────────
 
     def identify(self, audio: np.ndarray, sample_rate: int = 16000) -> tuple[str, int]:
+        if self._mode == "disabled":
+            return "Speaker 1", 1
         if self._mode == "inprocess":
             with self._engine_lock:
                 return self._engine.identify(audio, sample_rate)
@@ -134,6 +140,8 @@ class DiarizationProxy:
             k: resp[k] for k in ("debug_rms", "debug_samples", "debug_speakers")
             if k in resp
         }
+        # T2/I2: refresh cached telemetry so main-thread reads don't block
+        self._cached_num_speakers = resp.get("debug_speakers", self._cached_num_speakers)
         return resp.get("label", "Speaker 1"), resp.get("speaker_id", 1)
 
     def identify_segments(
@@ -143,6 +151,8 @@ class DiarizationProxy:
 
         Returns list of (label, speaker_id, start_sample, end_sample).
         """
+        if self._mode == "disabled":
+            return [("Speaker 1", 1, 0, len(audio))]
         if self._mode == "inprocess":
             with self._engine_lock:
                 return self._engine.identify_segments(audio, sample_rate)
@@ -177,6 +187,8 @@ class DiarizationProxy:
     # ── speaker queries ───────────────────────────────────
 
     def get_speaker_color(self, speaker_id: int) -> str:
+        if self._mode == "disabled":
+            return "#00ffcc"
         if self._mode == "inprocess":
             return self._engine.get_speaker_color(speaker_id)
         resp = self._call({"type": MSG_GET_COLOR, "speaker_id": speaker_id})
@@ -185,6 +197,8 @@ class DiarizationProxy:
         return resp.get("color", "#00ffcc")
 
     def get_speaker_name(self, speaker_id: int) -> str:
+        if self._mode == "disabled":
+            return f"Speaker {speaker_id}"
         if self._mode == "inprocess":
             return self._engine.get_speaker_name(speaker_id)
         resp = self._call({"type": MSG_GET_NAME, "speaker_id": speaker_id})
@@ -193,6 +207,8 @@ class DiarizationProxy:
         return resp.get("name", f"Speaker {speaker_id}")
 
     def get_speaker_names(self) -> dict[int, str]:
+        if self._mode == "disabled":
+            return {}
         if self._mode == "inprocess":
             return self._engine.get_speaker_names()
         resp = self._call({"type": MSG_GET_NAMES})
@@ -202,6 +218,8 @@ class DiarizationProxy:
 
     @property
     def num_speakers(self) -> int:
+        if self._mode == "disabled":
+            return 0
         if self._mode == "inprocess":
             return self._engine.num_speakers
         resp = self._call({"type": MSG_NUM_SPEAKERS})
@@ -209,15 +227,32 @@ class DiarizationProxy:
             return 0
         return resp.get("count", 0)
 
+    # T2/I2: non-blocking cached accessors for main-thread telemetry
+    @property
+    def cached_num_speakers(self) -> int:
+        """Return cached speaker count (non-blocking, no IPC)."""
+        return self._cached_num_speakers
+
+    @property
+    def cached_speaker_names(self) -> dict[int, str]:
+        """Return cached speaker names (non-blocking, no IPC)."""
+        return self._cached_speaker_names.copy()
+
     def set_speaker_name(self, speaker_id: int, name: str) -> None:
+        if self._mode == "disabled":
+            return
         if self._mode == "inprocess":
             self._engine.set_speaker_name(speaker_id, name)
             return
         self._call({"type": MSG_SET_NAME, "speaker_id": speaker_id, "name": name})
+        # Update cached names
+        self._cached_speaker_names[speaker_id] = name
 
     # ── session state queries ─────────────────────────────
 
     def get_all_session_speakers(self) -> dict[int, int]:
+        if self._mode == "disabled":
+            return {}
         if self._mode == "inprocess":
             return self._engine.get_all_session_speakers()
         resp = self._call({"type": MSG_GET_STATE})
@@ -226,6 +261,8 @@ class DiarizationProxy:
         return {int(k): v for k, v in resp.get("session_speakers", {}).items()}
 
     def get_segment_embeddings(self, speaker_id: int) -> list[tuple[np.ndarray, float]]:
+        if self._mode == "disabled":
+            return []
         if self._mode == "inprocess":
             return self._engine.get_segment_embeddings(speaker_id)
         resp = self._call({"type": MSG_GET_EMBEDDINGS, "speaker_id": speaker_id})
@@ -240,6 +277,8 @@ class DiarizationProxy:
             return []
 
     def get_session_centroid(self, speaker_id: int) -> np.ndarray | None:
+        if self._mode == "disabled":
+            return None
         if self._mode == "inprocess":
             return self._engine.get_session_centroid(speaker_id)
         resp = self._call({"type": MSG_GET_CENTROID, "speaker_id": speaker_id})
@@ -254,6 +293,8 @@ class DiarizationProxy:
             return None
 
     def is_speaker_stable(self, speaker_id: int) -> bool:
+        if self._mode == "disabled":
+            return False
         if self._mode == "inprocess":
             return self._engine.is_speaker_stable(speaker_id)
         resp = self._call({"type": MSG_IS_STABLE, "speaker_id": speaker_id})
@@ -262,12 +303,16 @@ class DiarizationProxy:
         return resp.get("stable", False)
 
     def mark_matched(self, speaker_id: int) -> None:
+        if self._mode == "disabled":
+            return
         if self._mode == "inprocess":
             self._engine.mark_matched(speaker_id)
             return
         self._call({"type": MSG_MARK_MATCHED, "speaker_id": speaker_id})
 
     def is_matched(self, speaker_id: int) -> bool:
+        if self._mode == "disabled":
+            return False
         if self._mode == "inprocess":
             return self._engine.is_matched(speaker_id)
         resp = self._call({"type": MSG_IS_MATCHED, "speaker_id": speaker_id})
@@ -276,12 +321,16 @@ class DiarizationProxy:
         return resp.get("matched", False)
 
     def merge_speakers(self, source_id: int, target_id: int) -> None:
+        if self._mode == "disabled":
+            return
         if self._mode == "inprocess":
             self._engine.merge_speakers(source_id, target_id)
             return
         self._call({"type": MSG_MERGE, "source_id": source_id, "target_id": target_id})
 
     def reset_session(self):
+        if self._mode == "disabled":
+            return
         if self._mode == "inprocess":
             self._engine.reset_session()
             return
@@ -295,6 +344,10 @@ class DiarizationProxy:
         Returns the response dict, or None on failure (subprocess crash).
         On crash, respawn happens OUTSIDE the lock to avoid UI freezes.
         """
+        # Fast path: disabled or respawning — return None immediately
+        if self._mode == "disabled" or self._needs_respawn:
+            return None
+
         needs_crash_handling = False
 
         with self._lock:
@@ -322,7 +375,7 @@ class DiarizationProxy:
     # ── crash recovery ────────────────────────────────────
 
     def _handle_crash(self):
-        """Handle a subprocess crash. Respawn or fall back to in-process.
+        """Handle a subprocess crash. Respawn or disable.
 
         Called OUTSIDE _lock to avoid blocking the UI thread during sleep/respawn.
         """
@@ -340,16 +393,23 @@ class DiarizationProxy:
                 pass
 
         if len(self._crash_times) >= DIARIZER_MAX_RESTARTS:
-            self._fallback_to_inprocess()
+            self._disable()
             return
 
-        # Brief delay before respawn
+        # Non-blocking respawn on a daemon thread so the transcription worker
+        # isn't stuck for 2-30s waiting for model reload.
+        self._needs_respawn = True
+        threading.Thread(target=self._background_respawn, daemon=True).start()
+
+    def _background_respawn(self):
+        """Respawn subprocess on a background thread (non-blocking)."""
         time.sleep(1.0)
         with self._lock:
             try:
                 self._spawn()
+                self._needs_respawn = False
             except Exception:
-                self._fallback_to_inprocess()
+                self._disable()
                 return
 
         if self.on_subprocess_ready:
@@ -358,18 +418,16 @@ class DiarizationProxy:
             except Exception:
                 pass
 
-    def _fallback_to_inprocess(self):
-        """Fall back to running diarization in-process with lock protection."""
-        with self._lock:
-            if self._mode == "inprocess":
-                return
-            self._mode = "inprocess"
-            self._kill()
+    def _disable(self):
+        """Disable diarization rather than importing PyTorch into the MLX process.
 
-        from diarization.engine import DiarizationEngine
-        self._engine = DiarizationEngine()
-        try:
-            self._engine.load()
-            self._loaded = True
-        except Exception:
-            self._loaded = False
+        The previous in-process fallback imported PyTorch, whose C++ runtime
+        conflicts with MLX at the dynamic linker level — the exact crash that
+        subprocess isolation was designed to prevent.  Instead we gracefully
+        degrade: all calls return safe defaults until the app is restarted.
+        """
+        with self._lock:
+            if self._mode == "disabled":
+                return
+            self._mode = "disabled"
+            self._kill()
