@@ -1253,7 +1253,7 @@ class VoxTerm(App):
         filepath = SESSIONS_DIR / filename
 
         # Write the full markdown (cleaner than the append-mode live file)
-        md = transcript.get_markdown(self._model_name)
+        md = transcript.get_markdown(self._model_name, session_start=self._session_start, language=self._language or "")
         filepath.write_text(md, encoding="utf-8")
 
         # Remove the live file since we promoted it
