@@ -77,3 +77,14 @@ ACTIVE_COLOR = "#00ff88"
 
 # Block characters for waveform (high to low intensity)
 WAVE_BLOCKS = ["█", "▓", "▒", "░", "·"]
+
+# P2P networking
+P2P_TCP_PORT = 9900
+P2P_UDP_PORT = 9901
+P2P_HEARTBEAT_INTERVAL = 1.0       # seconds between heartbeats
+P2P_HEARTBEAT_TIMEOUT = 5.0        # seconds without heartbeat → peer dead
+P2P_PROTO_VERSION = 1
+P2P_MAX_PEERS = 20
+P2P_AUDIO_FRAME_MS = 20            # milliseconds per UDP audio frame
+P2P_CLOCK_SYNC_WINDOW = 20         # sliding window of offset samples
+P2P_SERVICE_TYPE = "_voxterm._tcp.local."
