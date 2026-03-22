@@ -10,6 +10,7 @@ from network.crypto import (
     DecryptionError,
     generate_session_code,
     normalize_session_code,
+    validate_session_code,
     derive_session_key,
     encrypt,
     decrypt,
@@ -23,41 +24,62 @@ from network.crypto import (
 class TestSessionCodes:
     def test_format(self):
         code = generate_session_code()
-        assert len(code) == 9  # XXXX-XXXX
-        assert code[4] == "-"
-        parts = code.replace("-", "")
-        assert len(parts) == 8
-        assert parts.isalnum()
-        assert parts == parts.upper()
+        parts = code.split("-")
+        assert len(parts) == 3
+        for word in parts:
+            assert word.isalpha()
+            assert word == word.lower()
 
     def test_uniqueness(self):
         codes = {generate_session_code() for _ in range(100)}
         assert len(codes) == 100  # all unique (astronomically unlikely to collide)
 
-    def test_normalize(self):
-        assert normalize_session_code("ABCD-1234") == "ABCD1234"
-        assert normalize_session_code("abcd-1234") == "ABCD1234"
-        assert normalize_session_code("AB CD 12 34") == "ABCD1234"
+    def test_normalize_case_insensitive(self):
+        assert normalize_session_code("bacon-horse-galaxy") == "bacon-horse-galaxy"
+        assert normalize_session_code("BACON-HORSE-GALAXY") == "bacon-horse-galaxy"
+        assert normalize_session_code("Bacon Horse Galaxy") == "bacon-horse-galaxy"
+
+    def test_normalize_strips_whitespace(self):
+        assert normalize_session_code("  bacon-horse-galaxy  ") == "bacon-horse-galaxy"
+
+    def test_normalize_collapses_separators(self):
+        assert normalize_session_code("bacon  horse  galaxy") == "bacon-horse-galaxy"
+        assert normalize_session_code("bacon--horse--galaxy") == "bacon-horse-galaxy"
+        assert normalize_session_code("bacon - horse - galaxy") == "bacon-horse-galaxy"
+
+    def test_validate_accepts_valid_code(self):
+        code = generate_session_code()
+        assert validate_session_code(code) == code
+
+    def test_validate_rejects_typo(self):
+        assert validate_session_code("bacon-horse-xyzqqq") is None
+
+    def test_validate_rejects_wrong_word_count(self):
+        assert validate_session_code("bacon-horse") is None
+        assert validate_session_code("bacon-horse-galaxy-extra") is None
+
+    def test_validate_normalizes(self):
+        assert validate_session_code("BACON  HORSE  GALAXY") == "bacon-horse-galaxy"
 
 
 class TestKeyDerivation:
     def test_deterministic(self):
-        k1 = derive_session_key("ABCD-1234")
-        k2 = derive_session_key("ABCD-1234")
+        k1 = derive_session_key("bacon-horse-galaxy")
+        k2 = derive_session_key("bacon-horse-galaxy")
         assert k1 == k2
 
     def test_key_length(self):
-        key = derive_session_key("ABCD-1234")
+        key = derive_session_key("bacon-horse-galaxy")
         assert len(key) == 32  # 256 bits
 
     def test_different_codes_different_keys(self):
-        k1 = derive_session_key("ABCD-1234")
-        k2 = derive_session_key("WXYZ-5678")
+        k1 = derive_session_key("bacon-horse-galaxy")
+        k2 = derive_session_key("apple-forest-river")
         assert k1 != k2
 
     def test_normalization_applied(self):
-        k1 = derive_session_key("ABCD-1234")
-        k2 = derive_session_key("abcd1234")
+        k1 = derive_session_key("bacon-horse-galaxy")
+        k2 = derive_session_key("BACON HORSE GALAXY")
         assert k1 == k2
 
 

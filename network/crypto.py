@@ -8,21 +8,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import secrets
 import socket
-import string
 import struct
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
+from network.wordlist import WORDS as _WORDLIST
+
 # ── constants ─────────────────────────────────────────────────
 
-_CODE_ALPHABET = string.ascii_uppercase + string.digits  # A-Z 0-9
-_CODE_LENGTH = 8  # XXXX-XXXX (displayed with hyphen, stored without)
+_WORD_SET = frozenset(_WORDLIST)
+_SEPARATOR_RE = re.compile(r"[\s-]+")  # collapse runs of spaces/hyphens
 _SALT = hashlib.sha256(b"voxterm-p2p-v1").digest()
+
+log = logging.getLogger("p2p.crypto")
 _INFO = b"voxterm-session-key"
 _KEY_LENGTH = 32  # AES-256
 _NONCE_LENGTH = 12  # GCM standard
@@ -39,14 +44,41 @@ class DecryptionError(Exception):
 # ── session codes ─────────────────────────────────────────────
 
 def generate_session_code() -> str:
-    """Generate a random session code in XXXX-XXXX format."""
-    chars = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
-    return f"{chars[:4]}-{chars[4:]}"
+    """Generate a random session code as three hyphenated English words.
+
+    Example: "bacon-horse-galaxy"
+    Entropy: 2048^3 ≈ 8.6 billion combinations (33 bits).
+    """
+    words = [secrets.choice(_WORDLIST) for _ in range(3)]
+    return "-".join(words)
 
 
 def normalize_session_code(code: str) -> str:
-    """Strip hyphens/spaces and uppercase for key derivation."""
-    return code.replace("-", "").replace(" ", "").upper()
+    """Normalize a session code for key derivation.
+
+    Strips whitespace, lowercases, and collapses any run of spaces/hyphens
+    into a single hyphen. Accepts "bacon-horse-galaxy", "bacon horse galaxy",
+    "BACON-HORSE-GALAXY", "bacon  horse  galaxy", etc.
+    """
+    return _SEPARATOR_RE.sub("-", code.strip().lower())
+
+
+def validate_session_code(code: str) -> str | None:
+    """Validate and normalize a session code.
+
+    Returns the normalized code if valid, or None if any word is not in the
+    wordlist. This lets the join UI reject typos before attempting connection.
+    """
+    normalized = normalize_session_code(code)
+    words = normalized.split("-")
+    if len(words) != 3:
+        log.debug("Session code has %d words, expected 3: %r", len(words), code)
+        return None
+    for w in words:
+        if w not in _WORD_SET:
+            log.debug("Unknown word in session code: %r", w)
+            return None
+    return normalized
 
 
 # ── key derivation ────────────────────────────────────────────
