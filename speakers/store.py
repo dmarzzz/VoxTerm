@@ -141,6 +141,11 @@ class SpeakerStore:
     def is_open(self) -> bool:
         return self._conn is not None
 
+    @property
+    def is_encrypted(self) -> bool:
+        """Whether embedding encryption is active (Keychain key loaded)."""
+        return self._enc_key is not None
+
     # ── queries ──────────────────────────────────────────────
 
     def get_all_profiles(self) -> list[SpeakerMeta]:

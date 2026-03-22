@@ -10,6 +10,7 @@ repeatedly (3 crashes within 60 seconds).
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import threading
@@ -27,6 +28,8 @@ from diarization.ipc import (
     MSG_RESET, MSG_SET_NAME, MSG_SHUTDOWN,
     decode_array, encode_array, recv_msg, send_msg,
 )
+
+log = logging.getLogger(__name__)
 
 _WORKER_MODULE = "diarization.subprocess_worker"
 
@@ -306,6 +309,7 @@ class DiarizationProxy:
                 if resp is None:
                     raise BrokenPipeError("subprocess EOF")
                 if resp.get("type") == MSG_ERROR:
+                    log.warning("diarizer subprocess error: %s", resp.get("error", "unknown"))
                     return None
                 return resp
             except (BrokenPipeError, OSError, ValueError):
