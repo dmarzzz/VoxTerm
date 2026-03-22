@@ -458,17 +458,9 @@ class VoxTerm(App):
             self._start_audio_timer()
             self._load_model()
 
-        # Auto-start P2P session if requested via CLI
-        if _P2P_AVAILABLE and self._p2p_auto_create and self._p2p_auto_name:
-            self._on_session_create_result({
-                "display_name": self._p2p_auto_name,
-                "session_code": generate_session_code(),
-            })
-        elif _P2P_AVAILABLE and self._p2p_auto_join_code and self._p2p_auto_name:
-            self._on_session_join_result({
-                "display_name": self._p2p_auto_name,
-                "session_code": self._p2p_auto_join_code,
-            })
+        # Start P2P peer discovery on launch (just visibility, no session)
+        if _P2P_AVAILABLE:
+            self._start_peer_discovery()
 
     @property
     def _chunk_duration(self) -> float:
@@ -508,12 +500,16 @@ class VoxTerm(App):
         else:
             saved_text = ""
 
-        # P2P session indicator
+        # P2P indicator
         p2p_text = ""
         if self._session_mgr and self._session_mgr.is_in_session:
             pc = self._session_mgr.peer_count
             code = self._session_mgr.session_code or ""
             p2p_text = f"    [#00e5ff]P2P {code} ({pc} peer{'s' if pc != 1 else ''})[/]"
+        elif self._discovery:
+            visible = len(self._discovery.get_visible_peers())
+            if visible > 0:
+                p2p_text = f"    [#00e5ff]{visible} peer{'s' if visible != 1 else ''} on network[/]"
 
         self.query_one("#telemetry", Static).update(
             f"  {status}"
@@ -1400,6 +1396,46 @@ class VoxTerm(App):
             udp_port=0,
         )
         self._discovery.start()
+
+    @work(thread=True, group="p2p_discovery")
+    def _start_peer_discovery(self) -> None:
+        """Start mDNS discovery on launch — just show who's on the network."""
+        try:
+            self._ensure_p2p_identity()
+            self._discovery = PeerDiscovery(
+                self._p2p_node_id,
+                self._p2p_display_name or "voxterm",
+                tcp_port=0,
+                udp_port=0,
+            )
+
+            def on_found(peer_info):
+                self.call_from_thread(
+                    self._p2p_debug_msg,
+                    f"peer online: {peer_info.display_name} ({peer_info.ip})"
+                )
+                self.call_from_thread(self._update_telemetry)
+
+            def on_lost(node_id):
+                self.call_from_thread(
+                    self._p2p_debug_msg,
+                    f"peer offline: {node_id[:8]}"
+                )
+                self.call_from_thread(self._update_telemetry)
+
+            self._discovery.on_peer_found = on_found
+            self._discovery.on_peer_lost = on_lost
+            self._discovery.start()
+
+            self.call_from_thread(
+                self._p2p_debug_msg,
+                "scanning network for VoxTerm peers..."
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self._p2p_debug_msg,
+                f"peer discovery failed: {exc}"
+            )
 
     def _stop_discovery(self) -> None:
         """Stop mDNS discovery and clean up."""
