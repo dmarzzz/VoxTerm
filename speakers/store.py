@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sqlite3
 import threading
 import uuid
@@ -499,9 +500,21 @@ class SpeakerStore:
         """Export all speaker profiles as a portable SQLite file."""
         if not self._conn:
             return
-        dst = sqlite3.connect(str(output_path))
-        self._conn.backup(dst)
-        dst.close()
+        # Restrictive umask so sqlite3.connect() creates the file as 0o600.
+        # os.umask() is process-wide; export_db() is user-initiated, never concurrent.
+        old_umask = os.umask(0o077)
+        try:
+            dst = sqlite3.connect(str(output_path))
+            self._conn.backup(dst)
+            dst.close()
+        finally:
+            os.umask(old_umask)
+        # Belt-and-suspenders: re-chmod in case the file pre-existed with
+        # looser permissions before the export overwrote it.
+        try:
+            output_path.chmod(0o600)
+        except OSError:
+            log.warning("Could not set permissions on exported database %s", output_path)
 
     def import_db(self, input_path: Path, merge: bool = True) -> None:
         """Import profiles from an exported database.
@@ -560,14 +573,24 @@ class SpeakerStore:
             return
         try:
             BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            # Re-tighten on every call (including early-return path) as
+            # defense-in-depth in case something else loosened permissions.
+            BACKUP_DIR.chmod(0o700)
             today = datetime.now().strftime("%Y-%m-%d")
             backup_path = BACKUP_DIR / f"speakers_{today}.db"
             if backup_path.exists():
                 return  # already backed up today
 
-            dst = sqlite3.connect(str(backup_path))
-            self._conn.backup(dst)
-            dst.close()
+            # Restrictive umask so sqlite3.connect() creates the file as 0o600.
+            # os.umask() is process-wide; backup() runs once at startup, never concurrent.
+            old_umask = os.umask(0o077)
+            try:
+                dst = sqlite3.connect(str(backup_path))
+                self._conn.backup(dst)
+                dst.close()
+            finally:
+                os.umask(old_umask)
+            backup_path.chmod(0o600)
 
             # Prune old backups, keep last 7
             backups = sorted(BACKUP_DIR.glob("speakers_*.db"))
