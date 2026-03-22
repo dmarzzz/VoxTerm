@@ -1,12 +1,14 @@
 """System audio capture via platform-specific backends.
 
 On macOS: uses a Swift helper binary (ScreenCaptureKit) compiled on first use.
-On other platforms: no-op (returns empty chunks). Future backends can be added.
+On Linux: uses PipeWire (pw-record) or PulseAudio (parec) subprocess.
+On other platforms: no-op (returns empty chunks).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import queue
 import subprocess
@@ -43,11 +45,86 @@ class SystemCapture:
     def start(self) -> None:
         if self._active:
             return
-        if CURRENT_PLATFORM != Platform.MACOS:
+        if CURRENT_PLATFORM == Platform.MACOS:
+            self._start_macos()
+        elif CURRENT_PLATFORM == Platform.LINUX:
+            self._start_linux()
+        else:
             self._unavailable = True
             self._status_message = "system audio capture not supported on this platform"
             return
 
+        if not self._active:
+            return
+
+        # Reader thread: stdout → chunked numpy arrays → queue
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name="sys-audio-reader"
+        )
+        self._reader_thread.start()
+
+        # Stderr monitor: capture error messages from helper
+        threading.Thread(
+            target=self._stderr_loop, daemon=True, name="sys-audio-stderr"
+        ).start()
+
+    def stop(self) -> None:
+        if self._proc is None:
+            return
+
+        try:
+            self._proc.send_signal(signal.SIGTERM)
+        except OSError:
+            pass
+
+        try:
+            self._proc.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=1)
+            except OSError:
+                pass
+
+        self._proc = None
+        self._active = False
+
+        # Teardown multi-output device if we created one (macOS only)
+        if self._bt_multi_output_active:
+            try:
+                from audio.blackhole import destroy_multi_output
+                destroy_multi_output()
+            except Exception:
+                pass
+            self._bt_multi_output_active = False
+
+        # Drain remaining items from queue
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def drain(self) -> list[np.ndarray]:
+        chunks = []
+        while True:
+            try:
+                chunks.append(self.queue.get_nowait())
+            except queue.Empty:
+                break
+        return chunks
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    @property
+    def status_message(self) -> str:
+        return self._status_message
+
+    # ── macOS backend ─────────────────────────────────────────
+
+    def _start_macos(self) -> None:
         # Kill any stale sck-helper from a prior crash so it releases the audio tap
         self._kill_stale_helpers()
 
@@ -91,77 +168,6 @@ class SystemCapture:
                     )
         except Exception:
             pass
-
-        # Reader thread: stdout → chunked numpy arrays → queue
-        self._reader_thread = threading.Thread(
-            target=self._reader_loop, daemon=True, name="sck-reader"
-        )
-        self._reader_thread.start()
-
-        # Stderr monitor: capture error messages from helper
-        threading.Thread(
-            target=self._stderr_loop, daemon=True, name="sck-stderr"
-        ).start()
-
-    def stop(self) -> None:
-        if self._proc is None:
-            return
-
-        # Send SIGTERM so the helper's signal handler can stop the SCStream
-        # and release the CoreAudio tap before exiting
-        try:
-            self._proc.send_signal(signal.SIGTERM)
-        except OSError:
-            pass
-
-        # Wait for clean shutdown (helper stops SCStream, then exits)
-        try:
-            self._proc.wait(timeout=4)
-        except subprocess.TimeoutExpired:
-            # Force kill as last resort
-            try:
-                self._proc.kill()
-                self._proc.wait(timeout=1)
-            except OSError:
-                pass
-
-        self._proc = None
-        self._active = False
-
-        # Teardown multi-output device if we created one
-        if self._bt_multi_output_active:
-            try:
-                from audio.blackhole import destroy_multi_output
-                destroy_multi_output()
-            except Exception:
-                pass
-            self._bt_multi_output_active = False
-
-        # Drain remaining items from queue
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                break
-
-    def drain(self) -> list[np.ndarray]:
-        chunks = []
-        while True:
-            try:
-                chunks.append(self.queue.get_nowait())
-            except queue.Empty:
-                break
-        return chunks
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
-
-    @property
-    def status_message(self) -> str:
-        return self._status_message
-
-    # ── private ──────────────────────────────────────────────
 
     @staticmethod
     def _kill_stale_helpers() -> None:
@@ -225,6 +231,62 @@ class SystemCapture:
 
         return _BINARY_PATH
 
+    # ── Linux backend ─────────────────────────────────────────
+
+    def _start_linux(self) -> None:
+        cmd = self._build_linux_capture_cmd()
+        if cmd is None:
+            self._unavailable = True
+            self._status_message = (
+                "system audio requires PipeWire (pw-record) or PulseAudio (parec)"
+            )
+            return
+
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as e:
+            self._unavailable = True
+            self._status_message = f"failed to launch system audio capture: {e}"
+            return
+
+        self._active = True
+        self._status_message = ""
+
+    @staticmethod
+    def _build_linux_capture_cmd() -> list[str] | None:
+        """Build the command to capture system audio on Linux."""
+        # Prefer PipeWire
+        if shutil.which("pw-record"):
+            return [
+                "pw-record",
+                "--format", "f32",
+                "--rate", str(SAMPLE_RATE),
+                "--channels", "1",
+                "--target", "0",  # default monitor
+                "-",              # stdout
+            ]
+
+        # Fall back to PulseAudio
+        if shutil.which("parec"):
+            monitor = _find_pulseaudio_monitor()
+            cmd = [
+                "parec",
+                "--format=float32le",
+                f"--rate={SAMPLE_RATE}",
+                "--channels=1",
+            ]
+            if monitor:
+                cmd.append(f"--device={monitor}")
+            return cmd
+
+        return None
+
+    # ── shared reader/stderr loops ────────────────────────────
+
     def _reader_loop(self) -> None:
         """Read raw PCM from helper stdout, chunk into 1024-sample blocks."""
         buf = bytearray()
@@ -257,8 +319,8 @@ class SystemCapture:
             pass
         finally:
             self._active = False
-            # Check exit code for permission errors
-            if proc.poll() == 1:
+            # Check exit code for permission errors (macOS-specific)
+            if proc.poll() == 1 and CURRENT_PLATFORM == Platform.MACOS:
                 self._status_message = (
                     "Screen Recording permission required — "
                     "grant access in System Settings > Privacy & Security > Screen Recording"
@@ -276,3 +338,21 @@ class SystemCapture:
                     self._status_message = msg
         except (OSError, ValueError):
             pass
+
+
+def _find_pulseaudio_monitor() -> str | None:
+    """Discover the default PulseAudio monitor source for system audio capture."""
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "short", "sources"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if ".monitor" in line:
+                # Format: ID  NAME  DRIVER  FORMAT  STATE
+                parts = line.split()
+                if len(parts) >= 2:
+                    return parts[1]
+    except Exception:
+        pass
+    return None

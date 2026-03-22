@@ -6,21 +6,38 @@ CHUNK_SIZE = 1024
 CHANNELS = 1
 DTYPE = "float32"
 
-# Transcription — Qwen3-ASR (primary) + legacy Whisper models
-DEFAULT_MODEL = "qwen3-0.6b"
-AVAILABLE_MODELS = {
-    "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
-    "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",
-    "tiny":        "mlx-community/whisper-tiny",
-    "small":       "mlx-community/whisper-small-mlx",
-    "medium":      "mlx-community/whisper-medium-mlx",
-    "large-v3":    "mlx-community/whisper-large-v3-mlx",
-    "turbo":       "mlx-community/whisper-large-v3-turbo",
-    "distil-v3":   "distil-whisper/distil-large-v3",
-}
-# Which model keys use Qwen3-ASR vs Whisper backend
-QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
-WHISPER_MODEL = "mlx-community/whisper-small-mlx"  # legacy default
+# Transcription — platform-conditional model maps
+import sys as _sys
+
+if _sys.platform == "darwin":
+    # macOS: Qwen3-ASR (primary, MLX) + mlx-whisper (fallback)
+    DEFAULT_MODEL = "qwen3-0.6b"
+    AVAILABLE_MODELS = {
+        "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
+        "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",
+        "tiny":        "mlx-community/whisper-tiny",
+        "small":       "mlx-community/whisper-small-mlx",
+        "medium":      "mlx-community/whisper-medium-mlx",
+        "large-v3":    "mlx-community/whisper-large-v3-mlx",
+        "turbo":       "mlx-community/whisper-large-v3-turbo",
+        "distil-v3":   "distil-whisper/distil-large-v3",
+    }
+    QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
+    WHISPER_MODEL = "mlx-community/whisper-small-mlx"
+else:
+    # Linux / other: faster-whisper (CTranslate2)
+    # Values are faster-whisper model size strings
+    DEFAULT_MODEL = "small"
+    AVAILABLE_MODELS = {
+        "tiny":      "tiny",
+        "small":     "small",
+        "medium":    "medium",
+        "large-v3":  "large-v3",
+        "turbo":     "large-v3-turbo",
+        "distil-v3": "distil-large-v3",
+    }
+    QWEN3_MODELS: set[str] = set()
+    WHISPER_MODEL = "small"
 
 # Language forcing for Qwen3-ASR (None = auto-detect)
 DEFAULT_LANGUAGE = "en"
@@ -47,10 +64,7 @@ SILENCE_TRIGGER_SECONDS = 0.3
 VAD_THRESHOLD = 0.5           # Silero VAD speech probability threshold
 
 # Session persistence
-LIVE_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".live"
-
-# System audio capture — compiled Swift helper cached here
-BIN_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".bin"
+from paths import LIVE_DIR, BIN_DIR  # noqa: E402 — platform-aware paths
 
 # Diarizer subprocess
 DIARIZER_TIMEOUT = 5.0        # seconds to wait for subprocess response

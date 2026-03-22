@@ -2,9 +2,11 @@
 
 ## What is this project?
 
-VoxTerm is a local, offline voice transcription TUI for macOS Apple Silicon. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions.
+VoxTerm is a local, offline voice transcription TUI for macOS and Linux. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions.
 
-**Stack**: MLX (Qwen3-ASR transcription on Metal GPU) · CAM++ (512-dim speaker embeddings on CPU) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (speaker profiles) · sounddevice (mic) · Swift/ScreenCaptureKit (system audio)
+**Stack (macOS)**: MLX (Qwen3-ASR transcription on Metal GPU) · Swift/ScreenCaptureKit (system audio)
+**Stack (Linux)**: faster-whisper/CTranslate2 (transcription on CPU/CUDA) · PipeWire/PulseAudio (system audio)
+**Stack (shared)**: CAM++ (512-dim speaker embeddings on CPU) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (speaker profiles) · sounddevice (mic) · cryptography + keyring (speaker embedding encryption)
 
 ## Architecture
 
@@ -17,7 +19,7 @@ MAIN PROCESS
 │  └─ SQLite reads for profile display
 │
 ├─ Worker thread (@work(thread=True), group="transcription")
-│  ├─ MLX transcription (Qwen3-ASR or Whisper)
+│  ├─ MLX transcription (macOS: Qwen3-ASR/Whisper) or faster-whisper (Linux)
 │  ├─ Cross-session speaker matching (SQLite writes)
 │  └─ call_from_thread() → UI updates
 │
@@ -28,19 +30,21 @@ SUBPROCESSES
 │  ├─ Owns all session state (centroids, names, embeddings)
 │  └─ Auto-restarts on crash; falls back to in-process if repeated failures
 │
-└─ System audio subprocess (Swift/ScreenCaptureKit)
-   ├─ Compiled on first use from _macos_sck.swift
+└─ System audio subprocess
+   ├─ macOS: Swift/ScreenCaptureKit (compiled on first use from _macos_sck.swift)
+   ├─ Linux: PipeWire (pw-record) or PulseAudio (parec)
    ├─ Streams raw PCM over stdout pipe
-   └─ For Bluetooth: routes through BlackHole virtual device
+   └─ macOS Bluetooth: routes through BlackHole virtual device
 ```
 
-**Why process isolation?** MLX (Metal GPU) and PyTorch (CPU) have C++ runtimes that conflict when loaded in the same process, causing segfaults. The diarizer runs in its own subprocess so they never share an address space.
+**Why process isolation?** On macOS, MLX (Metal GPU) and PyTorch (CPU) have C++ runtimes that conflict when loaded in the same process, causing segfaults. The diarizer runs in its own subprocess so they never share an address space. On Linux (faster-whisper/CTranslate2), there's no such conflict, but the architecture is preserved for consistency.
 
 ## File map
 
 | File | Description |
 |------|-------------|
 | `app.py` | Main Textual app — audio loop, transcription pipeline, session management, modals |
+| `paths.py` | Platform-aware directory paths (macOS vs Linux XDG) |
 | `config.py` | Constants: sample rate, models, colors, paths, thresholds |
 | `cyberpunk.tcss` | Textual CSS theme |
 | `diagnostics.py` | Crash reporting: faulthandler, signal handlers, crash dumps, log rotation |
@@ -52,7 +56,7 @@ SUBPROCESSES
 | `audio/blackhole.py` | BlackHole virtual device integration for Bluetooth routing |
 | `audio/_macos_sck.swift` | ScreenCaptureKit Swift helper source |
 | `audio/_macos_aggregate.swift` | Multi-output device Swift helper source |
-| `transcriber/engine.py` | Qwen3-ASR (primary) + mlx-whisper (fallback), hallucination filter, dedup |
+| `transcriber/engine.py` | Qwen3-ASR + mlx-whisper (macOS) + faster-whisper (Linux), hallucination filter, dedup |
 | `diarization/campplus.py` | CAM++ model architecture (vendored from WeSpeaker, Apache 2.0) |
 | `diarization/engine.py` | CAM++ online speaker clustering (runs inside subprocess) |
 | `diarization/proxy.py` | DiarizationProxy — same API as engine, delegates to subprocess |
@@ -68,29 +72,31 @@ SUBPROCESSES
 
 ## Data and debug paths
 
-These are the locations to check when debugging. All under the user's home directory.
+Paths are platform-aware (see `paths.py`). All under the user's home directory.
 
-### User-visible data
+### macOS paths
 | Path | Contents |
 |------|----------|
-| `~/Documents/voxterm/` | Exported transcript files (.md) |
-| `~/Documents/voxterm/.live/` | Live auto-save during recording (append-mode .md) |
-| `~/Documents/voxterm/.state.json` | Persisted preferences (last model, last language) |
+| `~/Documents/voxterm/` | Transcripts, live saves, state, crashes, compiled binaries |
+| `~/Library/Application Support/voxterm/` | Speaker database, backups, encryption key |
 
-### Debug and crash data
+### Linux paths
 | Path | Contents |
 |------|----------|
-| `~/Documents/voxterm/.crashes/*.log` | Human-readable crash dumps (timestamp, uptime, stack trace, runtime state, memory stats) |
-| `~/Documents/voxterm/.crashes/*.json` | Machine-readable crash dumps (same data, structured) |
-| `~/Documents/voxterm/.crashes/faulthandler.log` | C-level segfault tracebacks from Python's faulthandler module |
+| `$XDG_DATA_HOME/voxterm/` (default: `~/.local/share/voxterm/`) | All data: transcripts, speaker database, backups, crashes |
 
-### Application data
-| Path | Contents |
+### Common subdirectories
+| Subdirectory | Contents |
 |------|----------|
-| `~/Library/Application Support/voxterm/.speakers.db` | SQLite speaker profiles — biometric voice embeddings (chmod 600, WAL mode) |
-| `~/Library/Application Support/voxterm/.backups/` | Daily DB backups (7-day retention, `speakers_YYYY-MM-DD.db`) |
-| `~/Documents/voxterm/.bin/sck-helper` | Compiled Swift ScreenCaptureKit helper binary |
-| `~/Documents/voxterm/.bin/aggregate-helper` | Compiled Swift multi-output device helper binary |
+| `.live/` | Live auto-save during recording (append-mode .md) |
+| `.state.json` | Persisted preferences (last model, last language) |
+| `.crashes/*.log` | Human-readable crash dumps |
+| `.crashes/*.json` | Machine-readable crash dumps |
+| `.crashes/faulthandler.log` | C-level segfault tracebacks |
+| `.speakers.db` | SQLite speaker profiles — biometric voice embeddings (chmod 600, WAL mode) |
+| `.backups/` | Daily DB backups (7-day retention) |
+| `.bin/sck-helper` | Compiled Swift ScreenCaptureKit helper (macOS only) |
+| `.bin/aggregate-helper` | Compiled Swift multi-output device helper (macOS only) |
 
 ### Model caches (managed by frameworks)
 | Path | Contents |
@@ -112,15 +118,24 @@ Press `D` in the TUI to toggle debug mode. Shows in the transcript panel:
 3. Crash dumps include: peak RSS, audio buffer duration, style cache stats, transcript entry count, speaker count, GC counters, model state
 
 ### Known issues
-- **MLX/PyTorch segfault**: These C++ runtimes conflict in the same process. Fixed by running diarizer in a subprocess. If subprocess isolation fails, falls back to in-process mode with `threading.Lock` + `OMP_NUM_THREADS=1` + `torch.set_num_threads(1)`.
+- **MLX/PyTorch segfault (macOS only)**: These C++ runtimes conflict in the same process. Fixed by running diarizer in a subprocess. If subprocess isolation fails, falls back to in-process mode with `threading.Lock` + `OMP_NUM_THREADS=1` + `torch.set_num_threads(1)`. Not an issue on Linux (faster-whisper uses CTranslate2, not MLX).
 - **Shutdown segfault**: Python's GC collects C extension objects (PortAudio, PyTorch, SpeechBrain) in random order during shutdown, causing segfaults. Mitigated with `os._exit(0)` via atexit handler and finally block.
 - **Resource tracker warning**: SpeechBrain/PyTorch create semaphores that aren't cleaned up before forced exit. Harmless — suppressed with `warnings.filterwarnings`.
 
 ## How to run
 
 ```bash
+# macOS (MLX/Qwen3-ASR)
+pip install -r requirements-macos.txt
 python3 app.py                    # default: qwen3-0.6b, English
 python3 app.py -m qwen3-1.7b     # larger model
+
+# Linux (faster-whisper/CTranslate2)
+pip install -r requirements-linux.txt
+python3 app.py                    # default: small, English
+python3 app.py -m large-v3        # larger model
+
+# Common
 python3 app.py -l ja              # Japanese
 python3 app.py --list-models      # show all available models
 ./voxterm                         # launcher script

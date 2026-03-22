@@ -1,0 +1,3 @@
+-r requirements.txt
+mlx-whisper>=0.4.0
+mlx-qwen3-asr>=0.1.0
