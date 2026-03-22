@@ -950,10 +950,10 @@ class VoxTerm(App):
     def _on_diarizer_crash(self, crash_count: int):
         """Called from worker thread when diarizer subprocess crashes."""
         self._write_crash_dump(f"diarizer_subprocess_crash #{crash_count}")
-        if self.diarizer._mode == "inprocess":
+        if self.diarizer._mode == "disabled":
             self.call_from_thread(
                 self.query_one(TranscriptPanel).system_message,
-                "speaker ID subprocess failed — using in-process fallback"
+                "speaker ID unavailable — too many subprocess failures"
             )
         else:
             self.call_from_thread(

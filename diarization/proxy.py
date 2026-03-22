@@ -4,8 +4,10 @@ Drop-in replacement for DiarizationEngine. Same public API, but delegates
 all PyTorch/SpeechBrain work to a child process so MLX and PyTorch never
 share an address space (preventing C++ runtime segfaults).
 
-Falls back to in-process DiarizationEngine if the subprocess fails
-repeatedly (3 crashes within 60 seconds).
+If the subprocess fails repeatedly (3 crashes within 60 seconds),
+diarization is disabled (all calls return safe defaults). PyTorch is
+never imported into the MLX process — the previous in-process fallback
+was removed because it re-introduced the C++ runtime conflict.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ class DiarizationProxy:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()  # serializes IPC calls
         self._loaded = False
-        self._mode = "subprocess"  # "subprocess" or "inprocess"
+        self._mode = "subprocess"  # "subprocess", "inprocess", or "disabled"
         self._needs_respawn = False  # set on crash, handled outside lock
 
         # Crash tracking for fallback
