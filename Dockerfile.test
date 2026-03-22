@@ -1,0 +1,31 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps: PortAudio with PulseAudio backend + PulseAudio client tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libportaudio2 \
+    pulseaudio-utils \
+    libpulse0 \
+    libasound2-plugins \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tell ALSA to route through PulseAudio
+RUN mkdir -p /etc/alsa && printf '\
+pcm.default pulse\n\
+ctl.default pulse\n\
+pcm.pulse {\n\
+    type pulse\n\
+}\n\
+ctl.pulse {\n\
+    type pulse\n\
+}\n' > /etc/alsa/alsa.conf
+
+# Install Python deps (only Linux-relevant ones)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy project
+COPY . .
+
+CMD ["bash"]

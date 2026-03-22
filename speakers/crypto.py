@@ -1,14 +1,13 @@
 """Transparent AES-256-CBC encryption for speaker embedding BLOBs.
 
-Uses macOS CommonCrypto (via ctypes) for encryption and the macOS Keychain
-Security framework (via ctypes) for zero-config key storage.  No subprocess
-calls, no pip dependencies — the key never appears in argv or the process list.
+On macOS: uses CommonCrypto (ctypes) for AES and Keychain for key storage.
+On Linux: uses the `cryptography` library for AES and file-based key storage.
 
 Security properties:
 - AES-256-CBC with random IV per BLOB
 - HMAC-SHA256 for integrity (encrypt-then-MAC)
 - Separate encryption and MAC keys derived via HKDF-SHA256
-- Key stored/retrieved via SecKeychainAddGenericPassword (native C API)
+- Key stored in platform keystore (macOS Keychain) or file with 0600 perms (Linux)
 - Encrypted BLOBs prefixed with magic marker (VXE1) for unambiguous detection
 """
 
@@ -20,6 +19,8 @@ import hmac
 import hashlib
 import logging
 import os
+import sys
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,15 @@ _lib = ctypes.CDLL(_libpath) if _libpath else None
 _sec_path = ctypes.util.find_library("Security")
 _sec = ctypes.CDLL(_sec_path) if _sec_path else None
 
+# Check if Python cryptography library is available (Linux fallback)
+_has_cryptography = False
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding as _crypto_padding
+    _has_cryptography = True
+except ImportError:
+    pass
+
 # Keychain service/account identifiers
 _KC_SERVICE = b"voxterm-speaker-encryption"
 _KC_ACCOUNT = b"voxterm"
@@ -58,8 +68,8 @@ _MAC_LABEL = b"voxterm-mac-v1"
 
 
 def is_available() -> bool:
-    """Check if CommonCrypto is available (macOS only)."""
-    return _lib is not None
+    """Check if encryption is available on this platform."""
+    return _lib is not None or _has_cryptography
 
 
 # ── HKDF key derivation ────────────────────────────────────
@@ -80,7 +90,7 @@ def derive_keys(master_key: bytes) -> tuple[bytes, bytes]:
     return enc_key, mac_key
 
 
-# ── Keychain via Security framework (native, no subprocess) ──
+# ── Keychain via Security framework (macOS, native) ─────────
 
 # OSStatus codes
 _errSecSuccess = 0
@@ -89,10 +99,7 @@ _errSecDuplicateItem = -25299
 
 
 def _keychain_get() -> bytes | None:
-    """Retrieve the encryption key from macOS Keychain.
-
-    Uses SecKeychainFindGenericPassword — no subprocess, key never in argv.
-    """
+    """Retrieve the encryption key from macOS Keychain."""
     if not _sec:
         return None
     try:
@@ -100,17 +107,16 @@ def _keychain_get() -> bytes | None:
         pw_data = ctypes.c_void_p(0)
 
         status = _sec.SecKeychainFindGenericPassword(
-            None,                                      # default keychain
+            None,
             ctypes.c_uint32(len(_KC_SERVICE)), _KC_SERVICE,
             ctypes.c_uint32(len(_KC_ACCOUNT)), _KC_ACCOUNT,
             ctypes.byref(pw_len),
             ctypes.byref(pw_data),
-            None,                                      # itemRef (don't need it)
+            None,
         )
         if status != _errSecSuccess:
             return None
 
-        # Copy the bytes out before freeing
         key = ctypes.string_at(pw_data, pw_len.value)
         _sec.SecKeychainItemFreeContent(None, pw_data)
         return key if len(key) == _kCCKeySizeAES256 else None
@@ -119,22 +125,18 @@ def _keychain_get() -> bytes | None:
 
 
 def _keychain_set(key: bytes) -> bool:
-    """Store the encryption key in macOS Keychain.
-
-    Uses SecKeychainAddGenericPassword — key stays in process memory only.
-    """
+    """Store the encryption key in macOS Keychain."""
     if not _sec:
         return False
     try:
         status = _sec.SecKeychainAddGenericPassword(
-            None,                                      # default keychain
+            None,
             ctypes.c_uint32(len(_KC_SERVICE)), _KC_SERVICE,
             ctypes.c_uint32(len(_KC_ACCOUNT)), _KC_ACCOUNT,
             ctypes.c_uint32(len(key)), key,
-            None,                                      # itemRef
+            None,
         )
         if status == _errSecDuplicateItem:
-            # Key already exists — update it via find + modify
             pw_len = ctypes.c_uint32(0)
             pw_data = ctypes.c_void_p(0)
             item_ref = ctypes.c_void_p(0)
@@ -153,7 +155,6 @@ def _keychain_set(key: bytes) -> bool:
                     item_ref, None,
                     ctypes.c_uint32(len(key)), key,
                 )
-                # CFRelease the item ref
                 cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
                 cf.CFRelease(item_ref)
             return status == _errSecSuccess
@@ -163,27 +164,70 @@ def _keychain_set(key: bytes) -> bool:
         return False
 
 
+# ── File-based key storage (Linux) ──────────────────────────
+
+def _file_key_path() -> Path:
+    """Key file path for file-based storage on Linux."""
+    from paths import DB_DIR
+    return DB_DIR / ".keyfile"
+
+
+def _file_key_get() -> bytes | None:
+    """Retrieve the encryption key from a chmod-600 file."""
+    path = _file_key_path()
+    if not path.exists():
+        return None
+    try:
+        key = path.read_bytes()
+        return key if len(key) == _kCCKeySizeAES256 else None
+    except Exception:
+        return None
+
+
+def _file_key_set(key: bytes) -> bool:
+    """Store the encryption key in a chmod-600 file."""
+    path = _file_key_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(key)
+        path.chmod(0o600)
+        return True
+    except Exception:
+        return False
+
+
+# ── Platform-aware key management ────────────────────────────
+
 def get_or_create_key() -> bytes | None:
     """Get the master encryption key, creating one if it doesn't exist.
 
-    Returns 32-byte master key, or None if Keychain is unavailable.
-    Separate enc/mac keys are derived from this via HKDF.
-    Key never appears in argv or the process list.
+    On macOS: uses Keychain. On Linux: uses file-based storage with 0600 perms.
+    Returns 32-byte master key, or None if storage is unavailable.
     """
-    key = _keychain_get()
+    # Try platform-appropriate key retrieval
+    if _sec:
+        key = _keychain_get()
+    else:
+        key = _file_key_get()
+
     if key and len(key) == _kCCKeySizeAES256:
         return key
 
     # Generate a new random master key
     key = os.urandom(_kCCKeySizeAES256)
-    if _keychain_set(key):
-        return key
 
-    log.warning("Could not store encryption key in Keychain — encryption disabled")
+    if _sec:
+        if _keychain_set(key):
+            return key
+    else:
+        if _file_key_set(key):
+            return key
+
+    log.warning("Could not store encryption key — encryption disabled")
     return None
 
 
-# ── AES-256-CBC via CommonCrypto ────────────────────────────
+# ── AES-256-CBC via CommonCrypto (macOS) ─────────────────────
 
 def _cc_crypt(operation: int, key: bytes, iv: bytes, data: bytes) -> bytes:
     """Low-level CommonCrypto CCCrypt wrapper."""
@@ -210,6 +254,30 @@ def _cc_crypt(operation: int, key: bytes, iv: bytes, data: bytes) -> bytes:
     return out_buf.raw[: out_moved.value]
 
 
+# ── AES-256-CBC via cryptography library (Linux) ────────────
+
+def _py_crypt(operation: int, key: bytes, iv: bytes, data: bytes) -> bytes:
+    """AES-256-CBC via Python cryptography library."""
+    if not _has_cryptography:
+        raise RuntimeError("cryptography library not available — pip install cryptography")
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    if operation == _kCCEncrypt:
+        padder = _crypto_padding.PKCS7(128).padder()
+        padded = padder.update(data) + padder.finalize()
+        encryptor = cipher.encryptor()
+        return encryptor.update(padded) + encryptor.finalize()
+    else:
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(data) + decryptor.finalize()
+        unpadder = _crypto_padding.PKCS7(128).unpadder()
+        return unpadder.update(padded) + unpadder.finalize()
+
+
+# Select the appropriate crypto backend
+_crypt = _cc_crypt if _lib else _py_crypt
+
+
 def encrypt_blob(master_key: bytes, plaintext: bytes) -> bytes:
     """Encrypt a BLOB with AES-256-CBC + HMAC-SHA256.
 
@@ -221,7 +289,7 @@ def encrypt_blob(master_key: bytes, plaintext: bytes) -> bytes:
     enc_key, mac_key = derive_keys(master_key)
 
     iv = os.urandom(_IV_LEN)
-    ciphertext = _cc_crypt(_kCCEncrypt, enc_key, iv, plaintext)
+    ciphertext = _crypt(_kCCEncrypt, enc_key, iv, plaintext)
 
     # HMAC over magic + IV + ciphertext for integrity (encrypt-then-MAC)
     mac_data = _MAGIC + iv + ciphertext
@@ -256,7 +324,7 @@ def decrypt_blob(master_key: bytes, data: bytes) -> bytes:
     if not hmac.compare_digest(stored_mac, expected_mac):
         raise ValueError("BLOB integrity check failed — data may be tampered")
 
-    return _cc_crypt(_kCCDecrypt, enc_key, iv, ciphertext)
+    return _crypt(_kCCDecrypt, enc_key, iv, ciphertext)
 
 
 def is_encrypted(data: bytes) -> bool:

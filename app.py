@@ -6,6 +6,7 @@ from __future__ import annotations
 import gc
 import sys
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -48,7 +49,7 @@ from widgets.profile_screen import SpeakerProfileScreen
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
-from transcriber.engine import Qwen3Transcriber, WhisperTranscriber
+from transcriber.engine import Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber
 from diarization.proxy import DiarizationProxy
 from speakers.store import SpeakerStore
 from audio.vad import SileroVAD
@@ -56,13 +57,24 @@ from config import (
     SAMPLE_RATE, CHUNK_SIZE, WAVEFORM_FPS,
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
     MAX_BUFFER_SECONDS, MIN_BUFFER_SECONDS,
-    DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS,
+    DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS,
     DEFAULT_LANGUAGE, AVAILABLE_LANGUAGES,
     LIVE_DIR,
 )
+from paths import SESSIONS_DIR, STATE_FILE
 
-# Session save directory
-SESSIONS_DIR = Path.home() / "Documents" / "voxterm"
+
+def _clipboard_cmd() -> list[str] | None:
+    """Return the clipboard copy command for this platform."""
+    if sys.platform == "darwin":
+        return ["pbcopy"]
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+    if shutil.which("wl-copy"):
+        return ["wl-copy"]
+    return None
 
 from config_store import ConfigStore
 
@@ -1194,6 +1206,8 @@ class VoxTerm(App):
         try:
             if model_key in QWEN3_MODELS:
                 new_transcriber = Qwen3Transcriber(model=repo, language=self._language)
+            elif model_key in FASTER_WHISPER_MODELS:
+                new_transcriber = FasterWhisperTranscriber(model=repo, language=self._language)
             else:
                 new_transcriber = WhisperTranscriber(model=repo)
             new_transcriber.load()
@@ -1261,10 +1275,14 @@ class VoxTerm(App):
     def _export_to_clipboard(self):
         """Copy transcript to clipboard."""
         transcript = self.query_one(TranscriptPanel)
+        cmd = _clipboard_cmd()
+        if cmd is None:
+            transcript.system_message("no clipboard tool found (install xclip, xsel, or wl-copy)")
+            return
         text = transcript.get_plain_text()
         entry_count = len(transcript.get_entries())
         try:
-            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             proc.communicate(text.encode("utf-8"))
             self._start_new_session()
             transcript.system_message(f"copied {entry_count} entries to clipboard")
@@ -1400,42 +1418,50 @@ if __name__ == "__main__":
         print("Available models:")
         for name, repo in AVAILABLE_MODELS.items():
             tag = " (default)" if name == _default_model else ""
-            qwen = " [qwen3-asr]" if name in QWEN3_MODELS else " [whisper]"
-            print(f"  {name:12s} → {repo}{qwen}{tag}")
+            if name in QWEN3_MODELS:
+                backend = " [qwen3-asr]"
+            elif name in FASTER_WHISPER_MODELS:
+                backend = " [faster-whisper]"
+            else:
+                backend = " [whisper]"
+            print(f"  {name:20s} → {repo}{backend}{tag}")
         sys.exit(0)
 
     model_repo = AVAILABLE_MODELS[args.model]
     model_name = args.model
     language = args.language
 
-    # Pre-TUI setup: install BlackHole if Bluetooth output detected
+    # Pre-TUI setup: install BlackHole if Bluetooth output detected (macOS only)
     # Must happen before TUI launches — brew needs the live terminal for sudo
-    try:
-        from audio.platform import get_output_device_info
-        from audio.blackhole import is_blackhole_installed
-        dev_info = get_output_device_info()
-        if dev_info.get("is_bluetooth") and not is_blackhole_installed():
-            print(f"VOXTERM // Bluetooth output detected ({dev_info['name']})")
-            print("Installing BlackHole for system audio capture...\n")
-            result = subprocess.run(["brew", "install", "blackhole-2ch"])
-            if result.returncode == 0:
-                print("\nBlackHole installed. Restarting audio service...")
-                subprocess.run(
-                    ["sudo", "killall", "coreaudiod"],
-                    timeout=15,
-                )
-                import time
-                time.sleep(2)  # Give CoreAudio time to restart and detect BlackHole
-                print("Audio service restarted.\n")
-            else:
-                print("\nBlackHole install failed — system audio capture will be limited.\n")
-    except Exception:
-        pass
+    if sys.platform == "darwin":
+        try:
+            from audio.platform import get_output_device_info
+            from audio.blackhole import is_blackhole_installed
+            dev_info = get_output_device_info()
+            if dev_info.get("is_bluetooth") and not is_blackhole_installed():
+                print(f"VOXTERM // Bluetooth output detected ({dev_info['name']})")
+                print("Installing BlackHole for system audio capture...\n")
+                result = subprocess.run(["brew", "install", "blackhole-2ch"])
+                if result.returncode == 0:
+                    print("\nBlackHole installed. Restarting audio service...")
+                    subprocess.run(
+                        ["sudo", "killall", "coreaudiod"],
+                        timeout=15,
+                    )
+                    import time
+                    time.sleep(2)  # Give CoreAudio time to restart and detect BlackHole
+                    print("Audio service restarted.\n")
+                else:
+                    print("\nBlackHole install failed — system audio capture will be limited.\n")
+        except Exception:
+            pass
 
     print(f"VOXTERM // loading model ({model_name}) lang={language}...")
     print("(first run downloads the model, please wait)\n")
     if model_name in QWEN3_MODELS:
         transcriber = Qwen3Transcriber(model=model_repo, language=language)
+    elif model_name in FASTER_WHISPER_MODELS:
+        transcriber = FasterWhisperTranscriber(model=model_repo, language=language)
     else:
         transcriber = WhisperTranscriber(model=model_repo)
     transcriber.load()

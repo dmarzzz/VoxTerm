@@ -1,17 +1,17 @@
-"""Transcription engine — supports Qwen3-ASR (primary) and mlx-whisper (fallback)."""
+"""Transcription engine — Qwen3-ASR (macOS), mlx-whisper (macOS), faster-whisper (Linux)."""
 
 from __future__ import annotations
 
 import re
 import numpy as np
 
-# Available Qwen3-ASR models (MLX-native, fast, accurate)
+# Available Qwen3-ASR models (MLX-native, fast, accurate — macOS only)
 QWEN3_MODELS = {
     "qwen3-0.6b": "Qwen/Qwen3-ASR-0.6B",
     "qwen3-1.7b": "Qwen/Qwen3-ASR-1.7B",
 }
 
-# Legacy Whisper models (mlx-whisper)
+# Legacy Whisper models (mlx-whisper — macOS only)
 WHISPER_MODELS = {
     "tiny":      "mlx-community/whisper-tiny",
     "base":      "mlx-community/whisper-base-mlx",
@@ -20,6 +20,16 @@ WHISPER_MODELS = {
     "large-v3":  "mlx-community/whisper-large-v3-mlx",
     "turbo":     "mlx-community/whisper-large-v3-turbo",
     "distil-v3": "distil-whisper/distil-large-v3",
+}
+
+# faster-whisper models (CTranslate2 backend — Linux/cross-platform)
+FASTER_WHISPER_MODELS = {
+    "fw-tiny":           "tiny",
+    "fw-base":           "base",
+    "fw-small":          "small",
+    "fw-medium":         "medium",
+    "fw-large-v3":       "large-v3",
+    "fw-distil-large-v3": "distil-large-v3",
 }
 
 
@@ -174,6 +184,53 @@ class WhisperTranscriber(_DeduplicatorMixin):
 
         text = result.get("text", "").strip()
         if _is_hallucination(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        if self._is_duplicate(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        return {"text": text, "speaker": "", "speaker_id": 0}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
+class FasterWhisperTranscriber(_DeduplicatorMixin):
+    """Cross-platform transcriber using faster-whisper (CTranslate2 backend).
+
+    Works on Linux (CPU/CUDA) and any platform with faster-whisper installed.
+    """
+
+    def __init__(self, model: str = "small", language: str | None = "en"):
+        self.model_size = model
+        self._language = language
+        self._model = None
+        self._loaded = False
+        self._init_dedup()
+
+    def load(self):
+        """Pre-load the model (downloads on first run)."""
+        from faster_whisper import WhisperModel
+        self._model = WhisperModel(
+            self.model_size, device="auto", compute_type="auto",
+        )
+        self._loaded = True
+
+    def transcribe(self, audio: np.ndarray, **kwargs) -> dict:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        segments, _info = self._model.transcribe(
+            audio,
+            language=self._language,
+            beam_size=5,
+            vad_filter=False,  # we already run Silero VAD upstream
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        if _is_hallucination(text, self._language):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         if self._is_duplicate(text):
