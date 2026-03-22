@@ -45,10 +45,8 @@ class MatchResult:
     color: str           # profile color (empty if low)
     ambiguous: bool      # True if top-2 are too close (conflict)
 
-# Default storage location (not synced by iCloud)
-DEFAULT_DB_DIR = Path.home() / "Library" / "Application Support" / "voxterm"
-DEFAULT_DB_PATH = DEFAULT_DB_DIR / ".speakers.db"
-BACKUP_DIR = DEFAULT_DB_DIR / ".backups"
+# Default storage location (platform-aware, not synced by iCloud on macOS)
+from paths import DB_DIR as DEFAULT_DB_DIR, DB_PATH as DEFAULT_DB_PATH, BACKUP_DIR
 
 _SCHEMA_VERSION = 1
 

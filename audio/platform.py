@@ -33,10 +33,14 @@ def get_output_device_info() -> dict:
     Returns dict with at least {"name": str, "is_bluetooth": bool}.
     On failure, returns {"name": "unknown", "is_bluetooth": False}.
     """
-    _BT_KEYWORDS = ("airpods", "bluetooth", " bt ", "beats pill", "jbl", "bose")
+    _BT_KEYWORDS = ("airpods", "bluetooth", " bt ", "beats pill", "jbl", "bose", "bluez")
     fallback = {"name": "unknown", "is_bluetooth": False}
+    platform = detect_platform()
 
-    if detect_platform() != Platform.MACOS:
+    if platform == Platform.LINUX:
+        return _get_output_device_info_linux(fallback, _BT_KEYWORDS)
+
+    if platform != Platform.MACOS:
         return fallback
 
     try:
@@ -91,6 +95,38 @@ def get_output_device_info() -> dict:
         is_bt = any(kw in name_lower for kw in _BT_KEYWORDS)
 
     return {"name": device_name, "is_bluetooth": is_bt}
+
+
+def _get_output_device_info_linux(fallback: dict, bt_keywords: tuple) -> dict:
+    """Get output device info on Linux via pactl."""
+    try:
+        result = subprocess.run(
+            ["pactl", "get-default-sink"],
+            capture_output=True, text=True, timeout=5,
+        )
+        sink_name = result.stdout.strip()
+        if not sink_name:
+            return fallback
+    except Exception:
+        return fallback
+
+    is_bt = any(kw in sink_name.lower() for kw in bt_keywords)
+
+    # Check sink properties for bluetooth transport if name didn't match
+    if not is_bt:
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sinks", "short"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if sink_name in line and "bluez" in line.lower():
+                    is_bt = True
+                    break
+        except Exception:
+            pass
+
+    return {"name": sink_name, "is_bluetooth": is_bt}
 
 
 CURRENT_PLATFORM = detect_platform()

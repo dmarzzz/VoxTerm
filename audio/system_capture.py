@@ -1,12 +1,13 @@
 """System audio capture via platform-specific backends.
 
 On macOS: uses a Swift helper binary (ScreenCaptureKit) compiled on first use.
-On other platforms: no-op (returns empty chunks). Future backends can be added.
+On Linux: uses parec (PulseAudio/PipeWire) to capture monitor source audio.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import queue
 import subprocess
@@ -42,6 +43,9 @@ class SystemCapture:
 
     def start(self) -> None:
         if self._active:
+            return
+        if CURRENT_PLATFORM == Platform.LINUX:
+            self._start_linux()
             return
         if CURRENT_PLATFORM != Platform.MACOS:
             self._unavailable = True
@@ -276,3 +280,65 @@ class SystemCapture:
                     self._status_message = msg
         except (OSError, ValueError):
             pass
+
+    # ── Linux: PulseAudio / PipeWire via parec ────────────────
+
+    def _start_linux(self) -> None:
+        """Start system audio capture on Linux using parec."""
+        if not shutil.which("parec"):
+            self._unavailable = True
+            self._status_message = (
+                "parec not found — install pulseaudio-utils or pipewire-pulse"
+            )
+            return
+
+        monitor = self._find_monitor_source()
+        if monitor is None:
+            self._unavailable = True
+            self._status_message = "no monitor source found — is PulseAudio/PipeWire running?"
+            return
+
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    "parec",
+                    "--format=float32le",
+                    f"--rate={SAMPLE_RATE}",
+                    "--channels=1",
+                    f"--device={monitor}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as e:
+            self._unavailable = True
+            self._status_message = f"failed to launch parec: {e}"
+            return
+
+        self._active = True
+        self._status_message = ""
+
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name="parec-reader"
+        )
+        self._reader_thread.start()
+
+        threading.Thread(
+            target=self._stderr_loop, daemon=True, name="parec-stderr"
+        ).start()
+
+    @staticmethod
+    def _find_monitor_source() -> str | None:
+        """Find a PulseAudio/PipeWire monitor source for system audio capture."""
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sources", "short"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().splitlines():
+                fields = line.split("\t")
+                if len(fields) >= 2 and ".monitor" in fields[1]:
+                    return fields[1]
+        except Exception:
+            pass
+        return None
