@@ -55,7 +55,7 @@ class TestSessionManagerLifecycle:
         try:
             code = mgr.create_session()
             assert code is not None
-            assert len(code) == 9  # XXXX-XXXX
+            assert len(code.split("-")) == 3  # word-word-word
             assert mgr.is_in_session
             assert mgr.session_code == code
             assert mgr.peer_count == 0

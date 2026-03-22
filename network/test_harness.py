@@ -7,7 +7,7 @@ convergence without needing multiple physical machines.
 
 Usage::
 
-    harness = PeerHarness(peer_count=5, session_code="TEST-1234")
+    harness = PeerHarness(peer_count=5, session_code="test-bacon-horse")
     harness.start()
 
     # All peers are connected to each other
@@ -50,7 +50,7 @@ class PeerHarness:
         session_code: Shared session code for all peers.
     """
 
-    def __init__(self, peer_count: int = 3, session_code: str = "TEST-1234"):
+    def __init__(self, peer_count: int = 3, session_code: str = "test-bacon-horse"):
         self._session_code = session_code
         self._peer_count = peer_count
         self.peers: list[VirtualPeer] = []

@@ -10,7 +10,7 @@ from network.test_harness import PeerHarness
 @pytest.mark.timeout(30)
 class TestMultiPeerMesh:
     def test_three_peers_connect(self):
-        harness = PeerHarness(peer_count=3, session_code="TEST-3333")
+        harness = PeerHarness(peer_count=3, session_code="apple-forest-river")
         try:
             harness.start()
             # All peers should have at least 1 connection
@@ -20,7 +20,7 @@ class TestMultiPeerMesh:
             harness.stop()
 
     def test_broadcast_reaches_all_peers(self):
-        harness = PeerHarness(peer_count=3, session_code="TEST-BCST")
+        harness = PeerHarness(peer_count=3, session_code="bacon-horse-galaxy")
         try:
             harness.start()
             time.sleep(0.5)  # let connections stabilize
@@ -39,7 +39,7 @@ class TestMultiPeerMesh:
             harness.stop()
 
     def test_bidirectional_exchange(self):
-        harness = PeerHarness(peer_count=3, session_code="TEST-BIDI")
+        harness = PeerHarness(peer_count=3, session_code="crane-dragon-echo")
         try:
             harness.start()
             time.sleep(0.5)
@@ -61,7 +61,7 @@ class TestMultiPeerMesh:
 
     def test_five_peers_mesh(self):
         """Stress test with 5 peers."""
-        harness = PeerHarness(peer_count=5, session_code="TEST-5555")
+        harness = PeerHarness(peer_count=5, session_code="eagle-frost-marble")
         try:
             harness.start()
             time.sleep(0.5)
@@ -79,7 +79,7 @@ class TestMultiPeerMesh:
 
     def test_clock_sync_convergence(self):
         """After heartbeat exchange, clock offsets should be near zero on loopback."""
-        harness = PeerHarness(peer_count=2, session_code="TEST-CLCK")
+        harness = PeerHarness(peer_count=2, session_code="gold-hammer-nest")
         try:
             harness.start()
 

@@ -11,17 +11,16 @@ import json
 import os
 import secrets
 import socket
-import string
 import struct
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
+from network.wordlist import WORDS as _WORDLIST
+
 # ── constants ─────────────────────────────────────────────────
 
-_CODE_ALPHABET = string.ascii_uppercase + string.digits  # A-Z 0-9
-_CODE_LENGTH = 8  # XXXX-XXXX (displayed with hyphen, stored without)
 _SALT = hashlib.sha256(b"voxterm-p2p-v1").digest()
 _INFO = b"voxterm-session-key"
 _KEY_LENGTH = 32  # AES-256
@@ -39,14 +38,22 @@ class DecryptionError(Exception):
 # ── session codes ─────────────────────────────────────────────
 
 def generate_session_code() -> str:
-    """Generate a random session code in XXXX-XXXX format."""
-    chars = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
-    return f"{chars[:4]}-{chars[4:]}"
+    """Generate a random session code as three hyphenated English words.
+
+    Example: "bacon-horse-galaxy"
+    Entropy: 2048^3 ≈ 8.6 billion combinations (33 bits).
+    """
+    words = [secrets.choice(_WORDLIST) for _ in range(3)]
+    return "-".join(words)
 
 
 def normalize_session_code(code: str) -> str:
-    """Strip hyphens/spaces and uppercase for key derivation."""
-    return code.replace("-", "").replace(" ", "").upper()
+    """Normalize a session code for key derivation.
+
+    Strips whitespace, lowercases, and normalizes separators to hyphens.
+    Accepts "bacon-horse-galaxy", "bacon horse galaxy", "BACON-HORSE-GALAXY", etc.
+    """
+    return code.strip().lower().replace(" ", "-")
 
 
 # ── key derivation ────────────────────────────────────────────
