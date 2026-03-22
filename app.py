@@ -39,6 +39,7 @@ from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work
+from textual.worker import get_current_worker
 
 from widgets.header import CyberHeader
 from widgets.waveform import WaveformWidget, _make_style
@@ -393,6 +394,7 @@ class VoxTerm(App):
         self._had_speech = False
         self._silence_chunks = 0
         self._transcribing = threading.Event()  # set = busy, clear = idle
+        self._transcribe_lock = threading.Lock()  # serializes MLX GPU access
         self._transcribe_started: float = 0.0
         self._debug = False
         self._last_dbg: float = 0.0
@@ -650,17 +652,18 @@ class VoxTerm(App):
             # Graduated watchdog: warn → force-reset → disable
             elapsed = time.time() - self._transcribe_started if self._transcribe_started else 0
             if elapsed > 30:
-                # Critical: transcriber appears hung — force-reset and warn
-                self._transcribing.clear()
+                # Critical: transcriber appears hung — warn but do NOT clear flag.
+                # Only the worker's finally block should clear _transcribing;
+                # clearing here while MLX holds the GPU causes a race where a
+                # second worker submits concurrent Metal command buffers → crash.
                 self._write_crash_dump(f"transcription_hung_{elapsed:.0f}s")
                 self.query_one(TranscriptPanel).system_message(
-                    f"transcription timed out ({elapsed:.0f}s) — try a smaller model [M]"
+                    f"transcription stalled ({elapsed:.0f}s) — try a smaller model [M]"
                 )
             elif elapsed > 15:
-                # Force-reset and log
-                self._transcribing.clear()
+                # Warn but do NOT clear — same race condition as above
                 self.query_one(TranscriptPanel).system_message(
-                    f"[watchdog] reset after {elapsed:.0f}s"
+                    f"[watchdog] transcription slow: {elapsed:.0f}s"
                 )
             elif elapsed > 8 and self._debug:
                 self.query_one(TranscriptPanel).system_message(
@@ -698,6 +701,8 @@ class VoxTerm(App):
     @work(thread=True, group="transcription")
     def _transcribe_audio(self, audio: np.ndarray):
         try:
+            if get_current_worker().is_cancelled:
+                return
             if self._debug:
                 duration = len(audio) / SAMPLE_RATE
                 self.call_from_thread(
@@ -706,8 +711,11 @@ class VoxTerm(App):
                 )
             # 1. Transcribe (Qwen3: ~100ms, Whisper: ~2-4s)
             # MLX runs in main process; PyTorch diarizer runs in subprocess.
-            # No lock needed — they're in separate processes.
-            result = self.transcriber.transcribe(audio)
+            # MLX is not thread-safe — concurrent Metal command buffer
+            # submissions crash with MTLCommandBufferStatusCommitted.
+            # Lock serializes GPU access across overlapping workers.
+            with self._transcribe_lock:
+                result = self.transcriber.transcribe(audio)
 
             # Periodic GC to prevent MLX memory buildup
             self._transcribe_count += 1
