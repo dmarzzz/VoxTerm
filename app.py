@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import sys
 import os
 import subprocess
