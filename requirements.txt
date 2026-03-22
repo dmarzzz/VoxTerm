@@ -1,7 +1,7 @@
 textual>=8.0.0
-mlx-whisper>=0.4.0
-mlx-qwen3-asr>=0.1.0
 sounddevice>=0.5.0
 numpy>=2.0.0
 silero-vad>=5.1
 onnxruntime>=1.16.0
+cryptography>=41.0.0
+keyring>=24.0.0

@@ -49,7 +49,8 @@ from widgets.profile_screen import SpeakerProfileScreen
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
-from transcriber.engine import Qwen3Transcriber, WhisperTranscriber
+from audio.platform import CURRENT_PLATFORM, Platform
+from transcriber.engine import Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber
 from diarization.proxy import DiarizationProxy
 from speakers.store import SpeakerStore
 from audio.vad import SileroVAD
@@ -62,10 +63,8 @@ from config import (
     LIVE_DIR,
 )
 
-# Session save directory
-SESSIONS_DIR = Path.home() / "Documents" / "voxterm"
-# Persistent state file (remembers last-used model across launches)
-STATE_FILE = SESSIONS_DIR / ".state.json"
+# Session save directory and persistent state (platform-aware paths)
+from paths import SESSIONS_DIR, STATE_FILE
 
 
 def _load_state() -> dict:
@@ -83,6 +82,20 @@ def _save_state(data: dict) -> None:
         STATE_FILE.write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass
+
+
+def _clipboard_cmd() -> list[str] | None:
+    """Return the platform-appropriate clipboard copy command, or None."""
+    import shutil
+    if sys.platform == "darwin":
+        return ["pbcopy"]
+    if shutil.which("wl-copy"):
+        return ["wl-copy"]
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+    return None
 
 
 class ModelSelectScreen(ModalScreen):
@@ -369,7 +382,12 @@ class VoxTerm(App):
         self.system_capture = SystemCapture()
         self.audio_buffer = AudioBuffer()
         self.vad = SileroVAD()
-        self.transcriber = transcriber or Qwen3Transcriber()
+        if transcriber:
+            self.transcriber = transcriber
+        elif CURRENT_PLATFORM == Platform.LINUX:
+            self.transcriber = FasterWhisperTranscriber()
+        else:
+            self.transcriber = Qwen3Transcriber()
         self.diarizer = DiarizationProxy()
         self.speaker_store = SpeakerStore()
         self._model_name = model_name
@@ -1199,7 +1217,11 @@ class VoxTerm(App):
     def _do_swap(self, model_key: str):
         repo = AVAILABLE_MODELS[model_key]
         try:
-            if model_key in QWEN3_MODELS:
+            if CURRENT_PLATFORM == Platform.LINUX:
+                new_transcriber = FasterWhisperTranscriber(
+                    model_size=repo, language=self._language,
+                )
+            elif model_key in QWEN3_MODELS:
                 new_transcriber = Qwen3Transcriber(model=repo, language=self._language)
             else:
                 new_transcriber = WhisperTranscriber(model=repo)
@@ -1270,7 +1292,11 @@ class VoxTerm(App):
         text = transcript.get_plain_text()
         entry_count = len(transcript.get_entries())
         try:
-            proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+            cmd = _clipboard_cmd()
+            if cmd is None:
+                transcript.system_message("no clipboard tool found (pbcopy/xclip/wl-copy)")
+                return
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             proc.communicate(text.encode("utf-8"))
             self._start_new_session()
             transcript.system_message(f"copied {entry_count} entries to clipboard")
@@ -1406,7 +1432,12 @@ if __name__ == "__main__":
         print("Available models:")
         for name, repo in AVAILABLE_MODELS.items():
             tag = " (default)" if name == _default_model else ""
-            qwen = " [qwen3-asr]" if name in QWEN3_MODELS else " [whisper]"
+            if name in QWEN3_MODELS:
+                qwen = " [qwen3-asr]"
+            elif CURRENT_PLATFORM == Platform.LINUX:
+                qwen = " [faster-whisper]"
+            else:
+                qwen = " [whisper]"
             print(f"  {name:12s} → {repo}{qwen}{tag}")
         sys.exit(0)
 
@@ -1414,13 +1445,13 @@ if __name__ == "__main__":
     model_name = args.model
     language = args.language
 
-    # Pre-TUI setup: install BlackHole if Bluetooth output detected
+    # Pre-TUI setup: install BlackHole if Bluetooth output detected (macOS only)
     # Must happen before TUI launches — brew needs the live terminal for sudo
     try:
         from audio.platform import get_output_device_info
         from audio.blackhole import is_blackhole_installed
         dev_info = get_output_device_info()
-        if dev_info.get("is_bluetooth") and not is_blackhole_installed():
+        if CURRENT_PLATFORM == Platform.MACOS and dev_info.get("is_bluetooth") and not is_blackhole_installed():
             print(f"VOXTERM // Bluetooth output detected ({dev_info['name']})")
             print("Installing BlackHole for system audio capture...\n")
             result = subprocess.run(["brew", "install", "blackhole-2ch"])
@@ -1440,7 +1471,9 @@ if __name__ == "__main__":
 
     print(f"VOXTERM // loading model ({model_name}) lang={language}...")
     print("(first run downloads the model, please wait)\n")
-    if model_name in QWEN3_MODELS:
+    if CURRENT_PLATFORM == Platform.LINUX:
+        transcriber = FasterWhisperTranscriber(model_size=model_repo, language=language)
+    elif model_name in QWEN3_MODELS:
         transcriber = Qwen3Transcriber(model=model_repo, language=language)
     else:
         transcriber = WhisperTranscriber(model=model_repo)

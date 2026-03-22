@@ -1,4 +1,5 @@
-"""Transcription engine — supports Qwen3-ASR (primary) and mlx-whisper (fallback)."""
+"""Transcription engine — supports Qwen3-ASR and mlx-whisper (macOS/MLX)
+and faster-whisper (Linux/CTranslate2)."""
 
 from __future__ import annotations
 
@@ -174,6 +175,47 @@ class WhisperTranscriber(_DeduplicatorMixin):
 
         text = result.get("text", "").strip()
         if _is_hallucination(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        if self._is_duplicate(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        return {"text": text, "speaker": "", "speaker_id": 0}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
+class FasterWhisperTranscriber(_DeduplicatorMixin):
+    """Cross-platform Whisper transcriber using faster-whisper (CTranslate2)."""
+
+    def __init__(self, model_size: str = "small", language: str | None = "en"):
+        self.model_size = model_size
+        self._language = language
+        self._model = None
+        self._loaded = False
+        self._init_dedup()
+
+    def load(self):
+        from faster_whisper import WhisperModel
+        self._model = WhisperModel(self.model_size, device="auto", compute_type="int8")
+        self._loaded = True
+
+    def transcribe(self, audio: np.ndarray, **kwargs) -> dict:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        segments, _info = self._model.transcribe(
+            audio,
+            language=self._language,
+            beam_size=5,
+            vad_filter=True,
+        )
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        if _is_hallucination(text, self._language):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         if self._is_duplicate(text):

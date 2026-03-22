@@ -36,9 +36,16 @@ def get_output_device_info() -> dict:
     _BT_KEYWORDS = ("airpods", "bluetooth", " bt ", "beats pill", "jbl", "bose")
     fallback = {"name": "unknown", "is_bluetooth": False}
 
-    if detect_platform() != Platform.MACOS:
-        return fallback
+    platform = detect_platform()
+    if platform == Platform.MACOS:
+        return _get_output_device_info_macos(_BT_KEYWORDS, fallback)
+    elif platform == Platform.LINUX:
+        return _get_output_device_info_linux(_BT_KEYWORDS, fallback)
+    return fallback
 
+
+def _get_output_device_info_macos(bt_keywords: tuple, fallback: dict) -> dict:
+    """macOS: use system_profiler to detect output device and Bluetooth."""
     try:
         result = subprocess.run(
             ["system_profiler", "SPBluetoothDataType", "SPAudioDataType"],
@@ -48,16 +55,12 @@ def get_output_device_info() -> dict:
     except Exception:
         return fallback
 
-    # Parse SPAudioDataType — device names are section headers,
-    # "Default Output Device: Yes" appears indented beneath them.
-    # Also look for "Transport: Bluetooth" in the same section.
     device_name = ""
     transport = ""
     current_section = ""
     for line in output.splitlines():
         stripped = line.strip()
 
-        # Section headers end with ":" and are indented exactly 8 spaces
         if line.startswith("        ") and stripped.endswith(":") and not stripped.startswith(("Default", "Transport", "Manufacturer", "Input", "Output", "Current")):
             current_section = stripped.rstrip(":")
             transport = ""
@@ -70,7 +73,6 @@ def get_output_device_info() -> dict:
             break
 
     if not device_name:
-        # Try sounddevice as secondary approach
         try:
             import sounddevice as sd
             dev = sd.query_devices(kind="output")
@@ -82,13 +84,68 @@ def get_output_device_info() -> dict:
     if not device_name:
         return fallback
 
-    # Check Bluetooth via transport type from system_profiler
     is_bt = transport == "bluetooth"
+    if not is_bt:
+        name_lower = device_name.lower()
+        is_bt = any(kw in name_lower for kw in bt_keywords)
+
+    return {"name": device_name, "is_bluetooth": is_bt}
+
+
+def _get_output_device_info_linux(bt_keywords: tuple, fallback: dict) -> dict:
+    """Linux: use pactl to detect output device and Bluetooth."""
+    device_name = ""
+    is_bt = False
+
+    # Get default sink name
+    try:
+        result = subprocess.run(
+            ["pactl", "info"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if line.strip().startswith("Default Sink:"):
+                device_name = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+
+    if not device_name:
+        # Fallback to sounddevice
+        try:
+            import sounddevice as sd
+            dev = sd.query_devices(kind="output")
+            if dev and isinstance(dev, dict):
+                device_name = dev.get("name", "")
+        except Exception:
+            pass
+
+    if not device_name:
+        return fallback
+
+    # Check if sink is Bluetooth via pactl properties
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sinks"],
+            capture_output=True, text=True, timeout=5,
+        )
+        in_target_sink = False
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Name:") and device_name in stripped:
+                in_target_sink = True
+            elif stripped.startswith("Name:"):
+                in_target_sink = False
+            if in_target_sink and "bluetooth" in stripped.lower():
+                is_bt = True
+                break
+    except Exception:
+        pass
 
     # Also check by device name keywords
     if not is_bt:
         name_lower = device_name.lower()
-        is_bt = any(kw in name_lower for kw in _BT_KEYWORDS)
+        is_bt = any(kw in name_lower for kw in bt_keywords)
 
     return {"name": device_name, "is_bluetooth": is_bt}
 
