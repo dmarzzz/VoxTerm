@@ -1441,9 +1441,9 @@ class VoxTerm(App):
             self._session_mgr = mgr
             self._wire_session_callbacks()
 
-            # Set session code/key BEFORE starting the server
+            # Set session code and start server (plaintext for now, no key needed)
             mgr._session_code = code
-            mgr._session_key = derive_session_key(code)
+            mgr._session_key = b"unused"  # encryption disabled for debugging
             mgr._start_server()
             mgr._in_session = True
             port = mgr._server_sock.getsockname()[1]

@@ -136,6 +136,31 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
     return data
 
 
+# ── Plaintext TCP framing (for debugging / development) ──────
+
+def send_plaintext_msg(sock: socket.socket, msg: dict) -> None:
+    """Send a length-prefixed JSON message over TCP (no encryption)."""
+    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    sock.sendall(_TCP_HEADER.pack(len(payload)) + payload)
+
+
+def recv_plaintext_msg(sock: socket.socket) -> dict | None:
+    """Read a length-prefixed JSON message from TCP (no encryption).
+
+    Returns None on EOF.
+    """
+    header = _recv_exact(sock, _TCP_HEADER.size)
+    if header is None:
+        return None
+    (length,) = _TCP_HEADER.unpack(header)
+    if length > _MAX_MSG_SIZE or length == 0:
+        return None
+    payload = _recv_exact(sock, length)
+    if payload is None:
+        return None
+    return json.loads(payload.decode("utf-8"))
+
+
 # ── UDP encrypted audio frames ────────────────────────────────
 #
 # Datagram format:

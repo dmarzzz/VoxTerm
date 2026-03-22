@@ -33,6 +33,8 @@ from network.crypto import (
     generate_session_code,
     send_encrypted_msg,
     recv_encrypted_msg,
+    send_plaintext_msg,
+    recv_plaintext_msg,
 )
 from network.peer import PeerConnection
 from network.protocol import (
@@ -247,7 +249,7 @@ class SessionManager:
             return False
         try:
             with peer.send_lock:
-                send_encrypted_msg(peer.sock, self._session_key, msg)
+                send_plaintext_msg(peer.sock, msg)
             peer.stats.tcp_tx += 1
             return True
         except Exception as exc:
@@ -300,27 +302,26 @@ class SessionManager:
             ).start()
 
     def _handle_incoming(self, conn: socket.socket, addr: tuple[str, int]) -> None:
-        """Handle an incoming TCP connection: handshake then read loop."""
+        """Handle an incoming TCP connection: exchange HELLOs then read loop."""
         try:
             conn.settimeout(5.0)
-            if not self._do_handshake_server(conn):
-                conn.close()
-                return
-            conn.settimeout(None)
 
-            # Exchange HELLOs
+            # Exchange HELLOs (plaintext for now)
             my_hello = build_hello(
                 self._node_id, self._display_name,
                 proto_v=P2P_PROTO_VERSION,
                 sample_rate=SAMPLE_RATE,
                 channels=CHANNELS,
             )
-            send_encrypted_msg(conn, self._session_key, my_hello)
-            their_hello = recv_encrypted_msg(conn, self._session_key)
+            send_plaintext_msg(conn, my_hello)
+            their_hello = recv_plaintext_msg(conn)
 
             if not their_hello or their_hello.get("type") != MSG_HELLO:
+                log.debug("Incoming HELLO failed from %s", addr)
                 conn.close()
                 return
+
+            conn.settimeout(None)
 
             peer = PeerConnection(
                 node_id=their_hello["node_id"],
@@ -347,24 +348,21 @@ class SessionManager:
             sock.settimeout(5.0)
             sock.connect((ip, port))
 
-            if not self._do_handshake_client(sock):
-                sock.close()
-                return False
-            sock.settimeout(None)
-
-            # Exchange HELLOs
+            # Exchange HELLOs (plaintext for now)
             my_hello = build_hello(
                 self._node_id, self._display_name,
                 proto_v=P2P_PROTO_VERSION,
                 sample_rate=SAMPLE_RATE,
                 channels=CHANNELS,
             )
-            send_encrypted_msg(sock, self._session_key, my_hello)
-            their_hello = recv_encrypted_msg(sock, self._session_key)
+            send_plaintext_msg(sock, my_hello)
+            their_hello = recv_plaintext_msg(sock)
 
             if not their_hello or their_hello.get("type") != MSG_HELLO:
                 sock.close()
                 return False
+
+            sock.settimeout(None)
 
             peer = PeerConnection(
                 node_id=their_hello["node_id"],
@@ -456,7 +454,7 @@ class SessionManager:
         """Per-peer TCP read loop. Runs in its own thread."""
         while self._running and peer.state == "connected":
             try:
-                msg = recv_encrypted_msg(peer.sock, self._session_key)
+                msg = recv_plaintext_msg(peer.sock)
             except Exception:
                 msg = None
 
