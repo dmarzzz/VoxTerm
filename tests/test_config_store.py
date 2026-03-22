@@ -6,9 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 from config_store import ConfigStore
 
 
@@ -102,15 +99,25 @@ class TestBackwardCompat:
 
 
 class TestTypeValidation:
-    def test_wrong_type_rejected(self, tmp_path_file):
+    def test_wrong_type_rejected_on_load(self, tmp_path_file):
         tmp_path_file.write_text(json.dumps({"audio_retention": "yes"}))
         cs = ConfigStore(tmp_path_file)
         assert cs.get("audio_retention") is False  # default, not "yes"
 
-    def test_correct_type_accepted(self, tmp_path_file):
+    def test_correct_type_accepted_on_load(self, tmp_path_file):
         tmp_path_file.write_text(json.dumps({"audio_retention": True}))
         cs = ConfigStore(tmp_path_file)
         assert cs.get("audio_retention") is True
+
+    def test_wrong_type_rejected_on_set(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        with pytest.raises(TypeError, match="expected bool"):
+            cs.set("audio_retention", "yes")
+
+    def test_wrong_type_rejected_on_update(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        with pytest.raises(TypeError, match="expected str"):
+            cs.update({"last_model": 123})
 
 
 class TestAtomicWrite:
@@ -124,6 +131,28 @@ class TestAtomicWrite:
         cs = ConfigStore(deep)
         cs.set("last_model", "test")
         assert deep.exists()
+
+
+class TestUpdate:
+    def test_update_multiple_keys(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        cs.update({"last_model": "qwen3-1.7b", "last_language": "ja"})
+        assert cs.get("last_model") == "qwen3-1.7b"
+        assert cs.get("last_language") == "ja"
+
+    def test_update_single_disk_write(self, tmp_path_file):
+        """update() writes to disk once, not per-key."""
+        cs = ConfigStore(tmp_path_file)
+        cs.update({"last_model": "turbo", "last_language": "fr"})
+        raw = json.loads(tmp_path_file.read_text())
+        assert raw["last_model"] == "turbo"
+        assert raw["last_language"] == "fr"
+
+    def test_update_preserves_existing(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        cs.set("export_format", "txt")
+        cs.update({"last_model": "turbo"})
+        assert cs.get("export_format") == "txt"
 
 
 class TestDataSnapshot:

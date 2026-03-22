@@ -76,7 +76,26 @@ class ConfigStore:
     def set(self, key: str, value: Any) -> None:
         """Set a config value and persist to disk (merge, not overwrite)."""
         with self._lock:
+            expected = _TYPES.get(key)
+            if expected is not None and not isinstance(value, expected):
+                raise TypeError(
+                    f"Invalid type for config key '{key}': "
+                    f"expected {expected.__name__}, got {type(value).__name__}"
+                )
             self._data[key] = value
+            self._save()
+
+    def update(self, values: dict[str, Any]) -> None:
+        """Set multiple config values and persist once (single disk write)."""
+        with self._lock:
+            for key, value in values.items():
+                expected = _TYPES.get(key)
+                if expected is not None and not isinstance(value, expected):
+                    raise TypeError(
+                        f"Invalid type for config key '{key}': "
+                        f"expected {expected.__name__}, got {type(value).__name__}"
+                    )
+                self._data[key] = value
             self._save()
 
     @property
