@@ -1,5 +1,9 @@
 """Tests for speakers/store.py — persistent speaker profile storage."""
 
+import logging
+from pathlib import Path
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -135,3 +139,62 @@ class TestSpeakerStore:
         in_memory_store.delete_all_data()
 
         assert len(in_memory_store.get_all_profiles()) == 0
+
+    # ── file permission tests ─────────────────────────────────
+
+    def test_export_db_permissions(self, in_memory_store: SpeakerStore, random_embedding, tmp_path):
+        """Exported database files should be owner-only (0o600)."""
+        emb = random_embedding(seed=100)
+        in_memory_store.create_profile(name="ExportTest", color="#aaaaaa", embeddings=[emb])
+
+        export_path = tmp_path / "exported.db"
+        in_memory_store.export_db(export_path)
+
+        assert export_path.exists()
+        mode = export_path.stat().st_mode & 0o777
+        assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+
+    def test_backup_permissions(self, in_memory_store: SpeakerStore, tmp_path):
+        """Backup files should be 0o600, backup directory should be 0o700."""
+        backup_dir = tmp_path / ".backups"
+        with patch("speakers.store.BACKUP_DIR", backup_dir):
+            in_memory_store.backup()
+
+        assert backup_dir.exists()
+        dir_mode = backup_dir.stat().st_mode & 0o777
+        assert dir_mode == 0o700, f"Expected dir 0o700, got {oct(dir_mode)}"
+
+        backup_files = list(backup_dir.glob("speakers_*.db"))
+        assert len(backup_files) == 1
+        file_mode = backup_files[0].stat().st_mode & 0o777
+        assert file_mode == 0o600, f"Expected file 0o600, got {oct(file_mode)}"
+
+    def test_export_db_chmod_failure_logs_warning(
+        self, in_memory_store: SpeakerStore, random_embedding, tmp_path, caplog
+    ):
+        """When chmod fails on export, a warning should be logged."""
+        emb = random_embedding(seed=101)
+        in_memory_store.create_profile(name="LogTest", color="#bbbbbb", embeddings=[emb])
+
+        export_path = tmp_path / "exported.db"
+
+        with patch.object(Path, "chmod", side_effect=OSError("permission denied")):
+            with caplog.at_level(logging.WARNING, logger="speakers.store"):
+                in_memory_store.export_db(export_path)
+
+        assert export_path.exists()
+        assert "Could not set permissions" in caplog.text
+
+    def test_backup_retightens_directory_on_early_return(self, in_memory_store: SpeakerStore, tmp_path):
+        """Even when today's backup exists, directory permissions are re-tightened."""
+        backup_dir = tmp_path / ".backups"
+        with patch("speakers.store.BACKUP_DIR", backup_dir):
+            # First backup creates the file
+            in_memory_store.backup()
+            # Loosen directory permissions to simulate external change
+            backup_dir.chmod(0o755)
+            # Second backup hits early return but should still tighten
+            in_memory_store.backup()
+
+        dir_mode = backup_dir.stat().st_mode & 0o777
+        assert dir_mode == 0o700, f"Expected dir 0o700 after re-tightening, got {oct(dir_mode)}"
