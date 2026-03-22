@@ -1427,52 +1427,76 @@ class VoxTerm(App):
         self._p2p_display_name = name
         self._ensure_p2p_identity()
 
-        # Create session manager with ephemeral port
-        self._session_mgr = SessionManager(
-            name, node_id=self._p2p_node_id, tcp_port=0,
-        )
-        self._wire_session_callbacks()
-
-        # Set session code/key BEFORE starting the server to avoid race
-        self._session_mgr._session_code = code
-        self._session_mgr._session_key = derive_session_key(code)
-        self._session_mgr._start_server()
-        self._session_mgr._in_session = True
-        port = self._session_mgr._server_sock.getsockname()[1]
-
-        # Wire discovery callback BEFORE starting so we don't miss peers
-        mgr = self._session_mgr
-
-        def on_peer_found_creator(peer_info):
-            if peer_info.node_id == self._p2p_node_id:
-                return
-            with mgr._lock:
-                if peer_info.node_id in mgr._peers:
-                    return
-            if peer_info.in_session:
-                threading.Thread(
-                    target=self._try_connect_peer,
-                    args=(peer_info,),
-                    daemon=True,
-                ).start()
-
-        self._start_discovery(port)
-        self._discovery.on_peer_found = on_peer_found_creator
-        self._discovery.update_session_status(True)
-
-        # Also connect to any already-visible peers
-        for peer_info in self._discovery.get_visible_peers():
-            if peer_info.in_session and peer_info.node_id != self._p2p_node_id:
-                threading.Thread(
-                    target=self._try_connect_peer,
-                    args=(peer_info,),
-                    daemon=True,
-                ).start()
-
         tp = self.query_one(TranscriptPanel)
-        tp.system_message(f"P2P session started")
-        tp.system_message(f"code: {code}  — tell others to press J and enter this")
-        tp.system_message(f"scanning network for peers...")
+        tp.system_message(f"P2P session starting...")
+        self._start_p2p_session(code, is_creator=True)
+
+    @work(thread=True, group="p2p_setup")
+    def _start_p2p_session(self, code: str, is_creator: bool) -> None:
+        """Start P2P session in a worker thread to avoid blocking the event loop."""
+        try:
+            mgr = SessionManager(
+                self._p2p_display_name, node_id=self._p2p_node_id, tcp_port=0,
+            )
+            self._session_mgr = mgr
+            self._wire_session_callbacks()
+
+            # Set session code/key BEFORE starting the server
+            mgr._session_code = code
+            mgr._session_key = derive_session_key(code)
+            mgr._start_server()
+            mgr._in_session = True
+            port = mgr._server_sock.getsockname()[1]
+
+            # Wire discovery callback BEFORE starting so we don't miss peers
+            def on_peer_found(peer_info):
+                if peer_info.node_id == self._p2p_node_id:
+                    return
+                with mgr._lock:
+                    if peer_info.node_id in mgr._peers:
+                        return
+                if peer_info.in_session:
+                    threading.Thread(
+                        target=self._try_connect_peer,
+                        args=(peer_info,),
+                        daemon=True,
+                    ).start()
+
+            self._start_discovery(port)
+            self._discovery.on_peer_found = on_peer_found
+            self._discovery.update_session_status(True)
+
+            # Connect to any already-visible peers
+            for peer_info in self._discovery.get_visible_peers():
+                if peer_info.in_session and peer_info.node_id != self._p2p_node_id:
+                    threading.Thread(
+                        target=self._try_connect_peer,
+                        args=(peer_info,),
+                        daemon=True,
+                    ).start()
+
+            if is_creator:
+                self.call_from_thread(
+                    self._p2p_session_ready,
+                    f"code: {code}  — tell others to press J and enter this",
+                )
+            else:
+                self.call_from_thread(
+                    self._p2p_session_ready,
+                    f"joining session: {code} — scanning network...",
+                )
+
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one(TranscriptPanel).system_message,
+                f"P2P session failed: {exc}",
+            )
+
+    def _p2p_session_ready(self, status_msg: str) -> None:
+        """Called on main thread when P2P session is ready."""
+        tp = self.query_one(TranscriptPanel)
+        tp.system_message("P2P session active")
+        tp.system_message(status_msg)
         self._update_telemetry()
 
     def action_join_session(self):
@@ -1494,48 +1518,9 @@ class VoxTerm(App):
         self._p2p_display_name = name
         self._ensure_p2p_identity()
 
-        # Create session manager
-        self._session_mgr = SessionManager(
-            name, node_id=self._p2p_node_id, tcp_port=0,
-        )
-        self._wire_session_callbacks()
-        self._session_mgr.join_session(code)
-        port = self._session_mgr._server_sock.getsockname()[1]
-
-        # Wire discovery callback BEFORE starting so we don't miss peers
-        mgr = self._session_mgr
-
-        def on_peer_found(peer_info):
-            if peer_info.node_id == self._p2p_node_id:
-                return
-            with mgr._lock:
-                if peer_info.node_id in mgr._peers:
-                    return
-            if peer_info.in_session:
-                threading.Thread(
-                    target=self._try_connect_peer,
-                    args=(peer_info,),
-                    daemon=True,
-                ).start()
-
-        # Start mDNS discovery — auto-connect to found peers
-        self._start_discovery(port)
-        self._discovery.on_peer_found = on_peer_found
-        self._discovery.update_session_status(True)
-
         tp = self.query_one(TranscriptPanel)
-        tp.system_message(f"joining session: {code}")
-        tp.system_message(f"scanning network for the session creator...")
-        self._update_telemetry()
-
-        # Also try connecting to any already-visible peers
-        for peer_info in self._discovery.get_visible_peers():
-            if peer_info.in_session and peer_info.node_id != self._p2p_node_id:
-                threading.Thread(
-                    target=self._try_connect_peer,
-                    args=(peer_info,),
-                    daemon=True,
-                ).start()
+        tp.system_message(f"joining session...")
+        self._start_p2p_session(code, is_creator=False)
 
     def _try_connect_peer(self, peer_info) -> None:
         """Try connecting to a discovered peer (runs in background thread)."""
