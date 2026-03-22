@@ -163,19 +163,28 @@ class TranscriptPanel(RichLog):
             lines.append(f"[{ts}] {prefix}{content}")
         return "\n".join(lines)
 
-    def get_markdown(self, model_name: str = "unknown") -> str:
+    def get_markdown(
+        self,
+        model_name: str = "unknown",
+        session_start: datetime | None = None,
+        language: str = "",
+    ) -> str:
         """Return transcript as markdown."""
-        now = datetime.now()
+        header_ts = session_start or datetime.now()
         lines = [
             f"# VOXTERM Transcript",
             f"",
-            f"- **Date:** {now.strftime('%Y-%m-%d')}",
-            f"- **Time:** {now.strftime('%H:%M:%S')}",
-            f"- **Model:** whisper-{model_name}",
+            f"- **Date:** {header_ts.strftime('%Y-%m-%d')}",
+            f"- **Time:** {header_ts.strftime('%H:%M:%S')}",
+            f"- **Model:** {model_name}",
+        ]
+        if language:
+            lines.append(f"- **Language:** {language}")
+        lines.extend([
             f"",
             f"---",
             f"",
-        ]
+        ])
         for entry in self._entries:
             ts, _, content, speaker = entry[0], entry[1], entry[2], entry[3]
             speaker_tag = f" **{speaker}:**" if speaker else ""

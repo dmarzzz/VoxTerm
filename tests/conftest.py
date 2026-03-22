@@ -21,7 +21,7 @@ SAMPLE_RATE = 16000
 
 @pytest.fixture
 def random_embedding():
-    """Generate a random L2-normalized 192-dim float32 embedding."""
+    """Generate a random L2-normalized 512-dim float32 embedding."""
     def _make(seed=None):
         rng = np.random.RandomState(seed)
         emb = rng.randn(EMBEDDING_DIM).astype(np.float32)

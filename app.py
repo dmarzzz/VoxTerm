@@ -7,7 +7,6 @@ import gc
 import sys
 import os
 import subprocess
-import json
 import threading
 import time
 from datetime import datetime
@@ -66,22 +65,17 @@ from config import (
 # Session save directory and persistent state (platform-aware paths)
 from paths import SESSIONS_DIR, STATE_FILE
 
+from config_store import ConfigStore
 
-def _load_state() -> dict:
-    """Load persisted state from disk. Returns {} on any failure."""
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+# Module-level config store instance (lazy init for import safety)
+_config: ConfigStore | None = None
 
 
-def _save_state(data: dict) -> None:
-    """Write state dict to disk. Silently ignores errors."""
-    try:
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except Exception:
-        pass
+def _get_config() -> ConfigStore:
+    global _config
+    if _config is None:
+        _config = ConfigStore()
+    return _config
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -1025,7 +1019,8 @@ class VoxTerm(App):
             # Update transcriber language if it's Qwen3
             if self._is_qwen3 and hasattr(self.transcriber, '_language'):
                 self.transcriber._language = lang_code
-            _save_state({"last_model": self._model_name, "last_language": lang_code})
+            _get_config().set("last_model", self._model_name)
+            _get_config().set("last_language", lang_code)
             self.query_one(TranscriptPanel).system_message(f"language set to {lang_name}")
             self._update_telemetry()
 
@@ -1237,7 +1232,8 @@ class VoxTerm(App):
         self._model_name = model_key
         self._is_qwen3 = model_key in QWEN3_MODELS
         self._model_loaded = True
-        _save_state({"last_model": model_key, "last_language": self._language})
+        _get_config().set("last_model", model_key)
+        _get_config().set("last_language", self._language)
         transcript = self.query_one(TranscriptPanel)
         transcript.system_message(f"model loaded: {model_key}")
         transcript.system_message("press [R] to start recording")
@@ -1275,7 +1271,7 @@ class VoxTerm(App):
         filepath = SESSIONS_DIR / filename
 
         # Write the full markdown (cleaner than the append-mode live file)
-        md = transcript.get_markdown(self._model_name)
+        md = transcript.get_markdown(self._model_name, session_start=self._session_start, language=self._language or "")
         filepath.write_text(md, encoding="utf-8")
 
         # Remove the live file since we promoted it
@@ -1402,9 +1398,9 @@ if __name__ == "__main__":
     import argparse
 
     # Resolve defaults: saved preferences > config defaults
-    _state = _load_state()
-    _saved_model = _state.get("last_model")
-    _saved_lang = _state.get("last_language")
+    _cfg = _get_config()
+    _saved_model = _cfg.get("last_model")
+    _saved_lang = _cfg.get("last_language")
     _default_model = _saved_model if _saved_model in AVAILABLE_MODELS else DEFAULT_MODEL
     _default_lang = _saved_lang if _saved_lang in AVAILABLE_LANGUAGES else DEFAULT_LANGUAGE
 
