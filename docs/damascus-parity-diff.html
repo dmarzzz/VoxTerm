@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoxTerm ↔ Damascus Spec — Parity Diff</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #2a2a3a;
+    --text: #e0e0e8;
+    --dim: #888899;
+    --green: #4ade80;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --cyan: #22d3ee;
+    --purple: #a78bfa;
+    --pink: #f472b6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+  }
+  .deck {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+  }
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 48px 64px;
+    overflow-y: auto;
+    visibility: hidden;
+  }
+  .slide.active { visibility: visible; }
+  h1 {
+    font-size: 2.4rem;
+    margin-bottom: 8px;
+    background: linear-gradient(90deg, var(--cyan), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  h2 {
+    font-size: 1.6rem;
+    color: var(--cyan);
+    margin: 24px 0 12px;
+  }
+  h3 {
+    font-size: 1.1rem;
+    color: var(--purple);
+    margin: 16px 0 8px;
+  }
+  .subtitle {
+    font-size: 1rem;
+    color: var(--dim);
+    margin-bottom: 32px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 0.85rem;
+  }
+  th {
+    text-align: left;
+    padding: 8px 12px;
+    background: var(--surface);
+    border-bottom: 2px solid var(--cyan);
+    color: var(--cyan);
+    font-weight: 600;
+  }
+  td {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .done { color: var(--green); font-weight: 700; }
+  .missing { color: var(--red); font-weight: 700; }
+  .partial { color: var(--amber); font-weight: 700; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .tag-major { background: #7f1d1d; color: var(--red); }
+  .tag-medium { background: #78350f; color: var(--amber); }
+  .tag-low { background: #1a2e05; color: var(--green); }
+  ul { margin: 8px 0 8px 20px; line-height: 1.7; font-size: 0.9rem; }
+  li { margin: 2px 0; }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    margin: 16px 0;
+    background: #0d0d14;
+    border-radius: 8px;
+    padding: 24px;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .controls {
+    position: fixed;
+    bottom: 24px;
+    right: 32px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 100;
+  }
+  .controls button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85rem;
+    transition: border-color 0.15s;
+  }
+  .controls button:hover { border-color: var(--cyan); }
+  .counter {
+    color: var(--dim);
+    font-size: 0.8rem;
+    min-width: 48px;
+    text-align: center;
+  }
+  .cols { display: flex; gap: 32px; }
+  .cols > div { flex: 1; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 8px 0;
+  }
+  .card h3 { margin-top: 0; }
+  .phase-label {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  .p0 { background: #164e63; color: var(--cyan); }
+  .p1 { background: #3b0764; color: var(--purple); }
+  .p2 { background: #831843; color: var(--pink); }
+  .p3 { background: #713f12; color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- SLIDE 1: Title -->
+<div class="slide active" id="s1">
+  <div style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100%;">
+    <h1 style="font-size:3.2rem;text-align:center;">VoxTerm ↔ Damascus</h1>
+    <p class="subtitle" style="font-size:1.3rem;margin-top:12px;">Feature Parity Diff &amp; Implementation Strategy</p>
+    <p style="color:var(--dim);margin-top:32px;font-size:0.9rem;">March 2026</p>
+    <div style="margin-top:48px;color:var(--dim);font-size:0.85rem;">
+      ← → arrow keys to navigate
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 2: What's Done -->
+<div class="slide" id="s2">
+  <h1>What's Already Built</h1>
+  <p class="subtitle">Core transcription pipeline is production-grade</p>
+  <table>
+    <tr><th>Feature</th><th>Status</th><th>Details</th></tr>
+    <tr><td>Mic + system audio capture</td><td class="done">DONE</td><td>sounddevice + Swift/ScreenCaptureKit + BlackHole</td></tr>
+    <tr><td>Local STT (swappable)</td><td class="done">DONE</td><td>Qwen3-ASR (0.6B, 1.7B) + 6 Whisper variants, M key to switch</td></tr>
+    <tr><td>Speaker diarization</td><td class="done">DONE</td><td>CAM++ subprocess, online clustering, HMM smoothing</td></tr>
+    <tr><td>Cross-session speaker ID</td><td class="done">DONE</td><td>512-dim embeddings, multi-centroid, adaptive thresholds</td></tr>
+    <tr><td>Live attributed transcript</td><td class="done">DONE</td><td>Color-coded, confidence indicators, timestamps</td></tr>
+    <tr><td>At-rest encryption</td><td class="done">DONE</td><td>AES-256-CBC + HMAC-SHA256, macOS Keychain</td></tr>
+    <tr><td>Speaker profile management</td><td class="done">DONE</td><td>P key — rename, delete, stats, merge</td></tr>
+    <tr><td>Markdown export + clipboard</td><td class="done">DONE</td><td>S key, full metadata header</td></tr>
+    <tr><td>Crash recovery</td><td class="done">DONE</td><td>Auto-restart subprocess, crash dumps, faulthandler</td></tr>
+    <tr><td>Auto-save</td><td class="done">DONE</td><td>Append-mode live file, always on disk</td></tr>
+    <tr><td>14-language support</td><td class="done">DONE</td><td>en, zh, ja, ko, de, fr, es, ru, ar, hi, it, pt, tr, nl</td></tr>
+  </table>
+</div>
+
+<!-- SLIDE 3: What's Missing -->
+<div class="slide" id="s3">
+  <h1>The Gap</h1>
+  <p class="subtitle">Features required by Damascus spec but not yet implemented</p>
+  <table>
+    <tr><th>Feature</th><th>Impact</th><th>Dependencies</th></tr>
+    <tr><td>Post-session summarization</td><td><span class="tag tag-major">MAJOR</span></td><td>Needs local LLM, config UI, session storage</td></tr>
+    <tr><td>FileVerse sharing</td><td><span class="tag tag-major">MAJOR</span></td><td>FileVerse SDK, encrypt-before-share</td></tr>
+    <tr><td>CryptPad sharing</td><td><span class="tag tag-major">MAJOR</span></td><td>CryptPad API, encrypted link generation</td></tr>
+    <tr><td>JSON export</td><td><span class="tag tag-medium">MEDIUM</span></td><td>Structured session data model</td></tr>
+    <tr><td>PDF export</td><td><span class="tag tag-medium">MEDIUM</span></td><td>PDF library (reportlab / weasyprint)</td></tr>
+    <tr><td>Inline transcript editing</td><td><span class="tag tag-medium">MEDIUM</span></td><td>Editable transcript widget, session store</td></tr>
+    <tr><td>Re-transcription</td><td><span class="tag tag-medium">MEDIUM</span></td><td>Audio retention, session versioning</td></tr>
+    <tr><td>Encrypt-before-share</td><td><span class="tag tag-medium">MEDIUM</span></td><td>Export encryption layer</td></tr>
+    <tr><td>Audio retention toggle</td><td><span class="tag tag-low">LOW</span></td><td>Config store, disk management</td></tr>
+    <tr><td>Speaker enrollment flow</td><td><span class="tag tag-low">LOW</span></td><td>Enrollment modal, mic capture reuse</td></tr>
+    <tr><td>Session history browser</td><td><span class="tag tag-medium">MEDIUM</span></td><td>Session index, search</td></tr>
+    <tr><td>Model registry UI (download/delete)</td><td><span class="tag tag-low">LOW</span></td><td>Disk usage, manifest file</td></tr>
+    <tr><td>Summarization strength config</td><td><span class="tag tag-low">LOW</span></td><td>Blocked by summarization</td></tr>
+    <tr><td>Default export format setting</td><td><span class="tag tag-low">LOW</span></td><td>Blocked by JSON/PDF export</td></tr>
+  </table>
+</div>
+
+<!-- SLIDE 4: Dependency Graph -->
+<div class="slide" id="s4">
+  <h1>Dependency &amp; Parallelization Map</h1>
+  <p class="subtitle">What blocks what — and what can run in parallel</p>
+  <div class="mermaid">
+flowchart TD
+    subgraph P0["Phase 0 — Foundation"]
+        A["Session Store\nSQLite sessions table"]
+        B["Config Store\nsettings persistence"]
+        C["Audio Retention\nraw audio save/toggle"]
+    end
+
+    subgraph P1["Phase 1 — Export & Edit"]
+        D["JSON Export"]
+        E["PDF Export"]
+        F["Inline Transcript Edit"]
+        G["Session History Browser"]
+        H["Re-transcription"]
+    end
+
+    subgraph P2["Phase 2 — Summarization"]
+        I["Summarization Engine\nlocal LLM inference"]
+        J["Summarization UI\nstrength config"]
+    end
+
+    subgraph P3["Phase 3 — Sharing"]
+        K["Export Encryption Layer"]
+        L["FileVerse Integration"]
+        M["CryptPad Integration"]
+    end
+
+    A --> D
+    A --> E
+    A --> F
+    A --> G
+    A --> I
+    A --> H
+    B --> J
+    C --> H
+    D --> K
+    E --> K
+    K --> L
+    K --> M
+    I --> J
+
+    style A fill:#164e63,stroke:#22d3ee,color:#e0e0e8
+    style B fill:#164e63,stroke:#22d3ee,color:#e0e0e8
+    style C fill:#164e63,stroke:#22d3ee,color:#e0e0e8
+    style D fill:#3b0764,stroke:#a78bfa,color:#e0e0e8
+    style E fill:#3b0764,stroke:#a78bfa,color:#e0e0e8
+    style F fill:#3b0764,stroke:#a78bfa,color:#e0e0e8
+    style G fill:#3b0764,stroke:#a78bfa,color:#e0e0e8
+    style H fill:#3b0764,stroke:#a78bfa,color:#e0e0e8
+    style I fill:#831843,stroke:#f472b6,color:#e0e0e8
+    style J fill:#831843,stroke:#f472b6,color:#e0e0e8
+    style K fill:#713f12,stroke:#fbbf24,color:#e0e0e8
+    style L fill:#713f12,stroke:#fbbf24,color:#e0e0e8
+    style M fill:#713f12,stroke:#fbbf24,color:#e0e0e8
+  </div>
+</div>
+
+<!-- SLIDE 5: Git Strategy -->
+<div class="slide" id="s5">
+  <h1>Branch &amp; Merge Strategy</h1>
+  <p class="subtitle">Parallel feature branches with staged integration to minimize conflicts</p>
+  <div class="mermaid">
+gitgraph
+    commit id: "current main"
+    branch session-store
+    commit id: "SQLite sessions"
+    commit id: "session CRUD"
+    checkout main
+    branch config-store
+    commit id: "settings persist"
+    commit id: "config UI"
+    checkout main
+    branch audio-retention
+    commit id: "raw audio save"
+    commit id: "retention toggle"
+    checkout main
+    merge session-store id: "merge sessions"
+    merge config-store id: "merge config"
+    merge audio-retention id: "merge audio"
+    branch export-formats
+    commit id: "JSON export"
+    commit id: "PDF export"
+    checkout main
+    branch transcript-edit
+    commit id: "editable widget"
+    commit id: "segment editing"
+    checkout main
+    branch summarization
+    commit id: "summarize engine"
+    commit id: "strength config"
+    checkout main
+    branch session-browser
+    commit id: "session list"
+    commit id: "re-transcription"
+    checkout main
+    merge export-formats id: "merge exports"
+    merge transcript-edit id: "merge edit"
+    merge summarization id: "merge summarize"
+    merge session-browser id: "merge browser"
+    branch sharing
+    commit id: "export encryption"
+    commit id: "FileVerse SDK"
+    commit id: "CryptPad API"
+    checkout main
+    merge sharing id: "merge sharing v1"
+  </div>
+</div>
+
+<!-- SLIDE 6: Merge Conflict Risk -->
+<div class="slide" id="s6">
+  <h1>Merge Conflict Hotspots</h1>
+  <p class="subtitle">Files most likely to conflict and mitigation strategy</p>
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h3>High Risk Files</h3>
+        <table>
+          <tr><th>File</th><th>Touched By</th></tr>
+          <tr><td><code>app.py</code></td><td>Every feature (keybindings, modals, state machine)</td></tr>
+          <tr><td><code>config.py</code></td><td>Session store, config store, summarization, export</td></tr>
+          <tr><td><code>widgets/</code></td><td>Transcript edit, session browser, export UI</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Medium Risk Files</h3>
+        <table>
+          <tr><th>File</th><th>Touched By</th></tr>
+          <tr><td><code>cyberpunk.tcss</code></td><td>Any new modal or screen</td></tr>
+          <tr><td><code>speakers/store.py</code></td><td>Session store, enrollment</td></tr>
+          <tr><td><code>requirements.txt</code></td><td>PDF lib, summarization model, SDKs</td></tr>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h3>Mitigation Strategy</h3>
+        <ul>
+          <li><strong>app.py</strong> — each feature adds its keybinding + modal in an isolated block; merge Phase 0 first so later branches start from a shared base</li>
+          <li><strong>config.py</strong> — add new constants at end of file; use section comments to reduce overlap</li>
+          <li><strong>New modules</strong> — most features add new files (summarizer/, export/, sharing/) which don't conflict</li>
+          <li><strong>Merge order matters</strong> — merge foundation (Phase 0) before any Phase 1/2 branches start</li>
+          <li><strong>Rebase before merge</strong> — rebase feature branches onto main after each phase merge</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 7: Parallelization -->
+<div class="slide" id="s7">
+  <h1>Parallelization Plan</h1>
+  <p class="subtitle">What can be built simultaneously</p>
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h3><span class="phase-label p0">P0</span> Foundation</h3>
+        <p style="color:var(--dim);font-size:0.85rem;margin:4px 0;">All 3 run in parallel — independent new modules</p>
+        <ul>
+          <li>Session Store — new <code>sessions/</code> module</li>
+          <li>Config Store — extends <code>config.py</code> + new persistence</li>
+          <li>Audio Retention — extends <code>audio/</code> module</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="phase-label p1">P1</span> Features</h3>
+        <p style="color:var(--dim);font-size:0.85rem;margin:4px 0;">4 branches in parallel after P0 merges</p>
+        <ul>
+          <li>Export formats — new <code>export/</code> module</li>
+          <li>Transcript editing — extends <code>widgets/transcript.py</code></li>
+          <li>Summarization — new <code>summarizer/</code> module</li>
+          <li>Session browser — new <code>widgets/session_screen.py</code></li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h3><span class="phase-label p2">P2</span> Integration</h3>
+        <p style="color:var(--dim);font-size:0.85rem;margin:4px 0;">Re-transcription starts after P0, joins P1 merge window</p>
+        <ul>
+          <li>Re-transcription depends on both session store + audio retention</li>
+          <li>Summarization UI depends on config store + summarization engine</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="phase-label p3">P3</span> Sharing</h3>
+        <p style="color:var(--dim);font-size:0.85rem;margin:4px 0;">Sequential — requires all exports + encryption</p>
+        <ul>
+          <li>Export encryption layer first</li>
+          <li>Then FileVerse + CryptPad in parallel</li>
+          <li>SDK maturity is an open risk (FileVerse)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Max Parallelism</h3>
+        <ul>
+          <li><strong>P0:</strong> 3 parallel branches</li>
+          <li><strong>P1:</strong> 4 parallel branches</li>
+          <li><strong>P2:</strong> 2 parallel branches</li>
+          <li><strong>P3:</strong> 2 parallel branches (after encryption)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 8: Implementation Order -->
+<div class="slide" id="s8">
+  <h1>Recommended Implementation Order</h1>
+  <p class="subtitle">Phased rollout with dependency-aware sequencing</p>
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h3><span class="phase-label p0">Phase 0</span> Foundation</h3>
+        <ul>
+          <li><strong>Session Store</strong> — SQLite table for sessions (id, timestamps, transcript, metadata). All later features depend on this.</li>
+          <li><strong>Config Store</strong> — extend <code>.state.json</code> with full settings (audio retention, export format, summarization strength).</li>
+          <li><strong>Audio Retention</strong> — save raw PCM alongside transcript when enabled. Toggle in config.</li>
+        </ul>
+        <p style="color:var(--dim);font-size:0.8rem;margin-top:8px;">Merge all 3 into main before proceeding.</p>
+      </div>
+      <div class="card">
+        <h3><span class="phase-label p1">Phase 1a</span> Export &amp; Edit</h3>
+        <ul>
+          <li><strong>JSON export</strong> — structured output with segments, speakers, timestamps, metadata.</li>
+          <li><strong>PDF export</strong> — add <code>reportlab</code> or <code>weasyprint</code>. Speaker colors, header, page breaks.</li>
+          <li><strong>Inline editing</strong> — make transcript segments editable. Tap-to-edit with undo.</li>
+          <li><strong>Session browser</strong> — list past sessions, open, delete. Search by date/speaker.</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h3><span class="phase-label p2">Phase 1b</span> Summarization</h3>
+        <ul>
+          <li><strong>Summarization engine</strong> — local LLM (MLX-compatible, e.g. Qwen2.5-3B or Llama-3.2-3B). Load/unload to manage memory with STT model.</li>
+          <li><strong>Summarization UI</strong> — strength selector (low/med/high maps to system prompt variation). Progress indicator.</li>
+          <li><strong>Re-transcription</strong> — replay stored audio through different STT model. Version tracking.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="phase-label p3">Phase 2</span> Sharing</h3>
+        <ul>
+          <li><strong>Export encryption</strong> — encrypt Markdown/JSON/PDF before leaving the app. AES-256-GCM with password-derived key.</li>
+          <li><strong>FileVerse</strong> — SDK integration. Upload encrypted blob, return share link.</li>
+          <li><strong>CryptPad</strong> — API integration. Create encrypted pad, return URL.</li>
+        </ul>
+        <p style="color:var(--red);font-size:0.8rem;margin-top:8px;">Risk: FileVerse SDK maturity unknown. Prototype early.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 9: New Dependencies -->
+<div class="slide" id="s9">
+  <h1>New Dependencies</h1>
+  <p class="subtitle">Libraries to add per phase</p>
+  <table>
+    <tr><th>Phase</th><th>Package</th><th>Purpose</th><th>Size</th><th>Risk</th></tr>
+    <tr><td><span class="phase-label p0">P0</span></td><td>—</td><td>No new deps (SQLite built-in, json built-in)</td><td>—</td><td class="done">None</td></tr>
+    <tr><td><span class="phase-label p1">P1</span></td><td><code>reportlab</code> or <code>weasyprint</code></td><td>PDF generation</td><td>~15MB</td><td class="partial">Medium — weasyprint needs system libs</td></tr>
+    <tr><td><span class="phase-label p2">P2</span></td><td><code>mlx-lm</code></td><td>Local LLM for summarization</td><td>~50MB code + 1-3GB model</td><td class="partial">Memory pressure with STT model</td></tr>
+    <tr><td><span class="phase-label p2">P2</span></td><td>Qwen2.5-3B / Llama-3.2-3B (MLX)</td><td>Summarization model weights</td><td>~1.5-3GB</td><td class="partial">Must unload STT first on 16GB devices</td></tr>
+    <tr><td><span class="phase-label p3">P3</span></td><td><code>fileverse-sdk</code> (TBD)</td><td>Encrypted file sharing</td><td>Unknown</td><td class="missing">High — SDK maturity unknown</td></tr>
+    <tr><td><span class="phase-label p3">P3</span></td><td>CryptPad API client</td><td>Encrypted pad creation</td><td>Minimal</td><td class="partial">Medium — API surface unclear</td></tr>
+  </table>
+  <h2>Memory Budget Concern</h2>
+  <div class="card">
+    <ul>
+      <li>Qwen3-ASR 0.6B ≈ 600MB VRAM</li>
+      <li>Qwen3-ASR 1.7B ≈ 1.5GB VRAM</li>
+      <li>Summarization LLM 3B ≈ 1.5-3GB VRAM</li>
+      <li><strong>Strategy:</strong> Unload STT model before loading summarizer. Summarization is post-session only — no need for concurrent inference.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- SLIDE 10: Risk Summary -->
+<div class="slide" id="s10">
+  <h1>Risks &amp; Open Questions</h1>
+  <p class="subtitle">What could go wrong</p>
+  <div class="cols">
+    <div>
+      <div class="card" style="border-color:var(--red);">
+        <h3 style="color:var(--red);">High Risk</h3>
+        <ul>
+          <li><strong>FileVerse SDK</strong> — does it support fully on-device encryption before upload? Needs prototype.</li>
+          <li><strong>Memory pressure</strong> — STT + summarization LLM may not fit in 16GB. Requires sequential model loading.</li>
+          <li><strong>app.py merge conflicts</strong> — every feature touches this file. Strict merge ordering required.</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--amber);">
+        <h3 style="color:var(--amber);">Medium Risk</h3>
+        <ul>
+          <li><strong>CryptPad API</strong> — unclear if programmatic doc creation is supported or if it's link-only.</li>
+          <li><strong>PDF generation</strong> — weasyprint needs system-level dependencies (pango, cairo). reportlab is pure Python but less pretty.</li>
+          <li><strong>Inline editing UX</strong> — Textual's RichLog is append-only; editable transcript needs a custom widget.</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="border-color:var(--green);">
+        <h3 style="color:var(--green);">Low Risk</h3>
+        <ul>
+          <li><strong>JSON export</strong> — straightforward serialization of existing data model.</li>
+          <li><strong>Config store</strong> — extends existing .state.json pattern.</li>
+          <li><strong>Session store</strong> — SQLite already in use for speakers; add sessions table.</li>
+          <li><strong>Audio retention</strong> — simple file I/O alongside existing auto-save.</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--purple);">
+        <h3 style="color:var(--purple);">Open Questions (from spec)</h3>
+        <ul>
+          <li>Minimum device specs for acceptable summarization perf?</li>
+          <li>License choice: GPLv3 vs Apache 2.0?</li>
+          <li>Should raw audio be retained by default or opt-in?</li>
+          <li>Can STT + summarization models share MLX context?</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /deck -->
+
+<div class="controls">
+  <button onclick="nav(-1)">← Prev</button>
+  <span class="counter" id="counter">1 / 10</span>
+  <button onclick="nav(1)">Next →</button>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#164e63',
+      primaryTextColor: '#e0e0e8',
+      primaryBorderColor: '#22d3ee',
+      lineColor: '#4a4a5a',
+      secondaryColor: '#3b0764',
+      tertiaryColor: '#1a1a2e',
+      git0: '#22d3ee',
+      git1: '#a78bfa',
+      git2: '#f472b6',
+      git3: '#4ade80',
+      git4: '#fbbf24',
+      git5: '#f87171',
+      git6: '#38bdf8',
+      git7: '#c084fc',
+      gitBranchLabel0: '#22d3ee',
+      gitBranchLabel1: '#a78bfa',
+      gitBranchLabel2: '#f472b6',
+      gitBranchLabel3: '#4ade80',
+    },
+    gitGraph: { mainBranchName: 'main', showCommitLabel: true },
+    flowchart: { curve: 'basis', padding: 16 },
+  });
+  // Render all diagrams (all slides visible via visibility:hidden but laid out)
+  mermaid.run();
+
+  let cur = 0;
+  const slides = document.querySelectorAll('.slide');
+  const counter = document.getElementById('counter');
+
+  function show(i) {
+    slides.forEach(s => s.classList.remove('active'));
+    slides[i].classList.add('active');
+    counter.textContent = `${i + 1} / ${slides.length}`;
+  }
+
+  function nav(d) {
+    cur = Math.max(0, Math.min(slides.length - 1, cur + d));
+    show(cur);
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); nav(1); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); nav(-1); }
+    if (e.key === 'Home') { e.preventDefault(); cur = 0; show(0); }
+    if (e.key === 'End') { e.preventDefault(); cur = slides.length - 1; show(cur); }
+  });
+</script>
+</body>
+</html>

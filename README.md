@@ -66,7 +66,7 @@ Models download automatically on first use.
 
 ## Privacy & Voice Data
 
-Voice tagging stores ECAPA-TDNN speaker embeddings locally on your machine at `~/Library/Application Support/voxterm/.speakers.db`. These embeddings are biometric data — they can identify a person across recordings but cannot be used to reconstruct audio.
+Voice tagging stores CAM++ speaker embeddings locally on your machine at `~/Library/Application Support/voxterm/.speakers.db`. These embeddings are biometric data — they can identify a person across recordings but cannot be used to reconstruct audio.
 
 **What we do:**
 - All processing is local and offline — no data ever leaves your machine
