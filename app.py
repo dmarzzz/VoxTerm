@@ -355,14 +355,15 @@ class VoxTerm(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, transcriber=None, model_name="qwen3-0.6b", language="en"):
+    def __init__(self, transcriber=None, model_name="qwen3-0.6b", language="en",
+                 diarizer_backend: str | None = None):
         super().__init__()
         self.audio_capture = AudioCapture()
         self.system_capture = SystemCapture()
         self.audio_buffer = AudioBuffer()
         self.vad = SileroVAD()
         self.transcriber = transcriber or Qwen3Transcriber()
-        self.diarizer = DiarizationProxy()
+        self.diarizer = DiarizationProxy(backend_name=diarizer_backend)
         self.speaker_store = SpeakerStore()
         self._model_name = model_name
         self._language = language
@@ -1394,7 +1395,27 @@ if __name__ == "__main__":
         action="store_true",
         help="List available models and exit",
     )
+    parser.add_argument(
+        "-b", "--backend",
+        default=None,
+        help="Diarization embedding backend (default: campplus). "
+             "Options: campplus, ecapa_tdnn, titanet, resemblyzer, pyannote",
+    )
+    parser.add_argument(
+        "--list-backends",
+        action="store_true",
+        help="List available diarization backends and exit",
+    )
     args = parser.parse_args()
+
+    if args.list_backends:
+        from diarization.backends import BACKEND_INFO
+        print("Available diarization backends:")
+        for name, info in BACKEND_INFO.items():
+            tag = " (default)" if name == "campplus" else ""
+            print(f"  {name:14s}  {info['label']:30s}  dim={info['dim']}  {info['size']}{tag}")
+            print(f"  {'':14s}  requires: {info['package']}")
+        sys.exit(0)
 
     if args.list_models:
         print("Available models:")
@@ -1450,7 +1471,10 @@ if __name__ == "__main__":
     # Restore terminal on segfault so the shell doesn't get stuck in raw mode
     diagnostics.setup_signal_handlers()
 
-    app = VoxTerm(transcriber=transcriber, model_name=model_name, language=language)
+    app = VoxTerm(
+        transcriber=transcriber, model_name=model_name, language=language,
+        diarizer_backend=args.backend,
+    )
 
     # Global exception hooks — dump diagnostics on any uncaught crash
     diagnostics.setup_exception_hooks(app)

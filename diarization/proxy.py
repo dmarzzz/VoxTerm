@@ -34,7 +34,8 @@ _WORKER_MODULE = "diarization.subprocess_worker"
 class DiarizationProxy:
     """Subprocess-backed speaker diarization with same API as DiarizationEngine."""
 
-    def __init__(self):
+    def __init__(self, backend_name: str | None = None):
+        self._backend_name = backend_name  # None = use config default
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()  # serializes IPC calls
         self._loaded = False
@@ -66,12 +67,18 @@ class DiarizationProxy:
     def _spawn(self):
         """Start the subprocess worker."""
         project_root = str(Path(__file__).parent.parent)
+        env = None
+        if self._backend_name:
+            import os
+            env = os.environ.copy()
+            env["VOXTERM_DIARIZER_BACKEND"] = self._backend_name
         self._proc = subprocess.Popen(
             [sys.executable, "-m", _WORKER_MODULE],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,  # capture for diagnostics
             cwd=project_root,
+            env=env,
         )
 
         # Wait for READY message (model loading can take 5-30s)
@@ -367,7 +374,7 @@ class DiarizationProxy:
             self._kill()
 
         from diarization.engine import DiarizationEngine
-        self._engine = DiarizationEngine()
+        self._engine = DiarizationEngine(backend_name=self._backend_name)
         try:
             self._engine.load()
             self._loaded = True

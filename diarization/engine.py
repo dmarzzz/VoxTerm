@@ -1,10 +1,12 @@
-"""Speaker diarization via CAM++ embeddings + online cosine clustering.
+"""Speaker diarization via pluggable embedding backends + online cosine clustering.
 
-Identifies the dominant speaker in each audio chunk by extracting a 512-dim
-speaker embedding and comparing it to a running set of speaker centroids.
+Identifies the dominant speaker in each audio chunk by extracting a speaker
+embedding and comparing it to a running set of speaker centroids.
 New speakers are created automatically when similarity falls below a threshold.
 
-Model: CAM++ (WeSpeaker, VoxCeleb-trained, ~28 MB, downloads on first use)
+Default backend: CAM++ (WeSpeaker, 512-dim, ~28 MB).
+Alternatives: ecapa_tdnn, titanet, resemblyzer, pyannote.
+Select via config.DIARIZER_BACKEND or --backend CLI flag.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ _SCD_MIN_SAMPLES = 48000     # 3.0 s at 16 kHz — minimum audio length for SCD
 
 
 class DiarizationEngine:
-    """Online speaker identification using ECAPA-TDNN embeddings."""
+    """Online speaker identification using pluggable embedding backends."""
 
     MATCH_THRESHOLD = 0.35        # cosine sim above this → assign to existing speaker
     NEW_SPEAKER_THRESHOLD = 0.30  # must be below this vs ALL centroids to create new speaker
@@ -34,8 +36,10 @@ class DiarizationEngine:
     SCD_WINDOW_SEC = 2.0          # sliding window duration for SCD embedding extraction
     SCD_HOP_SEC = 0.5             # hop between consecutive SCD windows
 
-    def __init__(self):
-        self._model = None
+    def __init__(self, backend_name: str | None = None):
+        self._backend_name = backend_name  # resolved in load()
+        self._backend = None  # EmbeddingBackend instance
+        self._model = None  # kept for backward compat (weighted embedding path)
         self._segmentation = None  # pyannote segmentation for overlap-aware embeddings
         self._loaded = False
         self._speaker_centroids: dict[int, np.ndarray] = {}
@@ -69,32 +73,23 @@ class DiarizationEngine:
 
     # ── lifecycle ─────────────────────────────────────────
 
-    _MODEL_URL = (
-        "https://modelscope.cn/models/"
-        "iic/speech_campplus_sv_en_voxceleb_16k/resolve/master/"
-        "campplus_voxceleb.bin"
-    )
-
     def load(self):
-        """Load the CAM++ speaker encoder (blocks, ~2-5 s)."""
+        """Load the speaker embedding backend (blocks, ~2-30 s depending on model)."""
+        from diarization.backends import get_backend
+
+        # Resolve backend name: explicit arg > env var > config default
         import os
-        if os.environ.get("VOXTERM_MOCK_ENGINE"):
-            self._model = _MockEmbeddingModel()
-            self._loaded = True
-            return
+        name = self._backend_name
+        if name is None:
+            name = os.environ.get("VOXTERM_DIARIZER_BACKEND")
+        if name is None:
+            from config import DIARIZER_BACKEND
+            name = DIARIZER_BACKEND
 
-        import torch
-        torch.set_default_device("cpu")
-        torch.set_grad_enabled(False)
-        torch.set_num_threads(1)
-
-        from diarization.campplus import CAMPPlus
-
-        model_path = self._ensure_model()
-        self._model = CAMPPlus(feat_dim=80, embed_dim=512, pooling_func='TSTP')
-        state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
-        self._model.load_state_dict(state_dict)
-        self._model.eval()
+        self._backend = get_backend(name)
+        self._backend.load()
+        # Keep _model reference for campplus-specific weighted embedding path
+        self._model = getattr(self._backend, "_model", None)
 
         # Load segmentation model for overlap-aware embeddings (optional)
         try:
@@ -107,22 +102,23 @@ class DiarizationEngine:
 
         self._loaded = True
 
-    @classmethod
-    def _ensure_model(cls) -> str:
-        """Download CAM++ weights on first use, cache locally."""
-        from pathlib import Path
-        cache_dir = Path.home() / ".cache" / "wespeaker" / "campplus_voxceleb"
-        model_path = cache_dir / "campplus_voxceleb.bin"
-        if model_path.exists():
-            return str(model_path)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(cls._MODEL_URL, str(model_path))
-        return str(model_path)
-
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def active_backend(self) -> str:
+        """Return the name of the active embedding backend."""
+        if self._backend is not None:
+            return self._backend.name
+        return self._backend_name or "campplus"
+
+    @property
+    def embed_dim(self) -> int:
+        """Return the embedding dimensionality of the active backend."""
+        if self._backend is not None:
+            return self._backend.embed_dim
+        return 512  # default (campplus)
 
     # ── speaker identification ────────────────────────────
 
@@ -133,7 +129,7 @@ class DiarizationEngine:
             label      – custom name or "Speaker 1", "Speaker 2", …
             speaker_id – integer key (1-based)
         """
-        if not self._loaded or self._model is None:
+        if not self._loaded or self._backend is None:
             return "Speaker 1", 1
 
         import torch
@@ -325,26 +321,20 @@ class DiarizationEngine:
         return self._extract_embedding_raw(audio, sample_rate)
 
     def _extract_embedding_raw(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
-        """Extract a 512-dim speaker embedding (Fbank + CAM++ forward).
+        """Extract a speaker embedding via the active backend.
 
         Returns None if audio is too short or model not loaded.
         """
-        if not self._loaded or self._model is None:
+        if not self._loaded or self._backend is None:
             return None
-        if len(audio) < _MIN_SPEECH_SAMPLES:
-            return None
-
-        feats = self._compute_fbank(audio, sample_rate)
-        if feats is None:
-            return None
-
-        import torch
-        feats_t = torch.tensor(feats, dtype=torch.float32).unsqueeze(0)
-        embedding = self._model(feats_t).squeeze().cpu().numpy()
-        return embedding
+        return self._backend.extract(audio, sample_rate)
 
     def _compute_fbank(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
-        """Compute 80-dim Fbank features with CMN."""
+        """Compute 80-dim Fbank features with CMN (CAM++ specific)."""
+        # Delegate to campplus backend if available, otherwise compute directly
+        if self._backend is not None and hasattr(self._backend, "compute_fbank"):
+            return self._backend.compute_fbank(audio, sample_rate)
+
         import torch
         import torchaudio
 
@@ -363,32 +353,44 @@ class DiarizationEngine:
         frame_weights: np.ndarray,
         sample_rate: int = 16000,
     ) -> np.ndarray | None:
-        """Extract embedding with feature-level weighting from segmentation."""
-        if not self._loaded or self._model is None:
+        """Extract embedding with feature-level weighting from segmentation.
+
+        Only works with CAM++ backend (which operates on Fbank features).
+        For other backends, falls back to plain extraction from weighted audio.
+        """
+        if not self._loaded or self._backend is None:
             return None
         if len(audio) < _MIN_SPEECH_SAMPLES:
             return None
 
-        feats = self._compute_fbank(audio, sample_rate)
-        if feats is None:
-            return None
+        # CAM++ path: weight Fbank features directly
+        if hasattr(self._backend, "extract_from_fbank") and hasattr(self._backend, "compute_fbank"):
+            feats = self._backend.compute_fbank(audio, sample_rate)
+            if feats is None:
+                return None
 
-        # Upsample segmentation weights (~17ms) to Fbank frame level (~10ms)
-        n_fbank = feats.shape[0]
-        seg_dur = 270 / sample_rate
-        fbank_dur = 160 / sample_rate
-        fbank_weights = np.ones(n_fbank, dtype=np.float32)
-        for i in range(n_fbank):
-            seg_idx = min(int(i * fbank_dur / seg_dur), len(frame_weights) - 1)
-            fbank_weights[i] = frame_weights[seg_idx]
+            n_fbank = feats.shape[0]
+            seg_dur = 270 / sample_rate
+            fbank_dur = 160 / sample_rate
+            fbank_weights = np.ones(n_fbank, dtype=np.float32)
+            for i in range(n_fbank):
+                seg_idx = min(int(i * fbank_dur / seg_dur), len(frame_weights) - 1)
+                fbank_weights[i] = frame_weights[seg_idx]
 
-        # Apply weights to features
-        feats = feats * fbank_weights[:, None]
+            feats = feats * fbank_weights[:, None]
+            return self._backend.extract_from_fbank(feats)
 
-        import torch
-        feats_t = torch.tensor(feats, dtype=torch.float32).unsqueeze(0)
-        embedding = self._model(feats_t).squeeze().cpu().numpy()
-        return embedding
+        # Other backends: apply weights as amplitude modulation on raw audio,
+        # then extract normally
+        n_audio = len(audio)
+        audio_weighted = audio.copy()
+        seg_frame_samples = 270
+        for i in range(len(frame_weights)):
+            s = i * seg_frame_samples
+            e = min(s + seg_frame_samples, n_audio)
+            if s < n_audio:
+                audio_weighted[s:e] *= frame_weights[i]
+        return self._backend.extract(audio_weighted, sample_rate)
 
     def _extract_overlap_aware(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
         """Extract overlap-aware speaker embedding using segmentation."""
@@ -458,7 +460,7 @@ class DiarizationEngine:
         Returns list of (label, speaker_id, start_sample, end_sample).
         Falls back to single identify() when audio is too short for SCD.
         """
-        if not self._loaded or self._model is None:
+        if not self._loaded or self._backend is None:
             return [("Speaker 1", 1, 0, len(audio))]
 
         # Ensure mono float32
@@ -535,7 +537,7 @@ class DiarizationEngine:
         Multiple entries can cover the same time range (= overlap).
         Falls back to single identify() when segmentation is unavailable.
         """
-        if not self._loaded or self._model is None:
+        if not self._loaded or self._backend is None:
             return [("Speaker 1", 1, 0, len(audio))]
 
         if audio.ndim > 1:
@@ -1120,18 +1122,3 @@ class DiarizationEngine:
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
 
 
-class _MockEmbeddingModel:
-    """Lightweight stand-in for CAM++ (testing only).
-
-    Returns deterministic 512-dim embeddings derived from the audio content
-    so that different audio produces different speakers.
-    """
-
-    def __call__(self, feats):
-        import torch
-        # Derive embedding from feature content for deterministic but varied results
-        feat_np = feats.squeeze().numpy()
-        rng = np.random.RandomState(int(abs(feat_np[:100].sum()) * 1000) % 2**31)
-        emb = rng.randn(512).astype(np.float32)
-        emb /= np.linalg.norm(emb) + 1e-10
-        return torch.tensor(emb).unsqueeze(0)

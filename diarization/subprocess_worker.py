@@ -58,7 +58,9 @@ def main():
     except Exception:
         pass
 
-    engine = DiarizationEngine()
+    # Backend name from env var (set by DiarizationProxy)
+    backend_name = os.environ.get("VOXTERM_DIARIZER_BACKEND")
+    engine = DiarizationEngine(backend_name=backend_name)
 
     try:
         engine.load()
