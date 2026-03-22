@@ -999,8 +999,7 @@ class VoxTerm(App):
             # Update transcriber language if it's Qwen3
             if self._is_qwen3 and hasattr(self.transcriber, '_language'):
                 self.transcriber._language = lang_code
-            _get_config().set("last_model", self._model_name)
-            _get_config().set("last_language", lang_code)
+            _get_config().update({"last_model": self._model_name, "last_language": lang_code})
             self.query_one(TranscriptPanel).system_message(f"language set to {lang_name}")
             self._update_telemetry()
 
@@ -1208,8 +1207,7 @@ class VoxTerm(App):
         self._model_name = model_key
         self._is_qwen3 = model_key in QWEN3_MODELS
         self._model_loaded = True
-        _get_config().set("last_model", model_key)
-        _get_config().set("last_language", self._language)
+        _get_config().update({"last_model": model_key, "last_language": self._language})
         transcript = self.query_one(TranscriptPanel)
         transcript.system_message(f"model loaded: {model_key}")
         transcript.system_message("press [R] to start recording")
