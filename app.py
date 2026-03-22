@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import sys
 import os
 import subprocess
@@ -65,6 +66,8 @@ from config import (
 SESSIONS_DIR = Path.home() / "Documents" / "voxterm"
 
 from config_store import ConfigStore
+
+log = logging.getLogger(__name__)
 
 # Module-level config store instance (lazy init for import safety)
 _config: ConfigStore | None = None
@@ -415,17 +418,25 @@ class VoxTerm(App):
             self.speaker_store.open()
             self.speaker_store.backup()
         except Exception:
-            pass  # graceful degradation — ephemeral mode if DB fails
+            log.warning("speaker store init failed, running in ephemeral mode", exc_info=True)
 
         if self._model_loaded:
             transcript = self.query_one(TranscriptPanel)
             transcript.system_message("VOXTERM engine online")
             transcript.system_message(f"model loaded: {self._model_name}")
+            if self.speaker_store.is_open:
+                enc_status = "active" if self.speaker_store.is_encrypted else "unavailable"
+                transcript.system_message(f"speaker profiles loaded (encryption: {enc_status})")
             self._update_telemetry()
             self._start_audio_timer()
             self._load_diarizer()
         else:
             self.query_one(TranscriptPanel).system_message("initializing VOXTERM engine...")
+            if self.speaker_store.is_open:
+                enc_status = "active" if self.speaker_store.is_encrypted else "unavailable"
+                self.query_one(TranscriptPanel).system_message(
+                    f"speaker profiles loaded (encryption: {enc_status})"
+                )
             self._start_audio_timer()
             self._load_model()
 
