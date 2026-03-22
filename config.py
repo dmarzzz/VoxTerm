@@ -57,6 +57,10 @@ DIARIZER_TIMEOUT = 5.0        # seconds to wait for subprocess response
 DIARIZER_MAX_RESTARTS = 3     # max restarts before falling back to in-process
 DIARIZER_RESTART_WINDOW = 60  # seconds — restart counter resets after this
 
+# Diarizer embedding backend
+# Options: campplus, ecapa_tdnn, titanet, resemblyzer, pyannote
+DIARIZER_BACKEND = "campplus"
+
 # Crash reporting
 CRASH_LOG_MAX_COUNT = 50      # max crash logs to keep (rotated on startup)
 
