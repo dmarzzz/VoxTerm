@@ -1448,14 +1448,23 @@ class VoxTerm(App):
             mgr._in_session = True
             port = mgr._server_sock.getsockname()[1]
 
-            # Wire discovery callback BEFORE starting so we don't miss peers
+            # Wire discovery callback BEFORE starting so we don't miss peers.
+            # Only the node with the lower node_id initiates the TCP connection.
+            # The other side accepts via the accept loop. This prevents the
+            # dual-connect race where both sides connect simultaneously,
+            # clobber each other, and immediately disconnect.
+            my_id = self._p2p_node_id
+
             def on_peer_found(peer_info):
-                if peer_info.node_id == self._p2p_node_id:
+                if peer_info.node_id == my_id:
                     return
                 with mgr._lock:
                     if peer_info.node_id in mgr._peers:
                         return
-                if peer_info.in_session:
+                if not peer_info.in_session:
+                    return
+                # Tie-break: lower node_id initiates
+                if my_id < peer_info.node_id:
                     threading.Thread(
                         target=self._try_connect_peer,
                         args=(peer_info,),
@@ -1466,14 +1475,33 @@ class VoxTerm(App):
             self._discovery.on_peer_found = on_peer_found
             self._discovery.update_session_status(True)
 
-            # Connect to any already-visible peers
+            # Connect to any already-visible peers (same tie-break)
             for peer_info in self._discovery.get_visible_peers():
-                if peer_info.in_session and peer_info.node_id != self._p2p_node_id:
+                if (peer_info.in_session
+                        and peer_info.node_id != my_id
+                        and my_id < peer_info.node_id):
                     threading.Thread(
                         target=self._try_connect_peer,
                         args=(peer_info,),
                         daemon=True,
                     ).start()
+
+            # Fallback: if no peers connect within 3 seconds, try connecting
+            # to all visible peers regardless of tie-break (in case mDNS
+            # discovery was one-directional)
+            def _retry_connect():
+                import time as _time
+                _time.sleep(3.0)
+                if not mgr._running or mgr._peers:
+                    return
+                for pi in self._discovery.get_visible_peers() if self._discovery else []:
+                    if pi.in_session and pi.node_id != my_id:
+                        with mgr._lock:
+                            if pi.node_id in mgr._peers:
+                                continue
+                        self._try_connect_peer(pi)
+
+            threading.Thread(target=_retry_connect, daemon=True).start()
 
             if is_creator:
                 self.call_from_thread(
