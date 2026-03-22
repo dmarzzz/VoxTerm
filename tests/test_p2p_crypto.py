@@ -10,6 +10,7 @@ from network.crypto import (
     DecryptionError,
     generate_session_code,
     normalize_session_code,
+    validate_session_code,
     derive_session_key,
     encrypt,
     decrypt,
@@ -40,6 +41,25 @@ class TestSessionCodes:
 
     def test_normalize_strips_whitespace(self):
         assert normalize_session_code("  bacon-horse-galaxy  ") == "bacon-horse-galaxy"
+
+    def test_normalize_collapses_separators(self):
+        assert normalize_session_code("bacon  horse  galaxy") == "bacon-horse-galaxy"
+        assert normalize_session_code("bacon--horse--galaxy") == "bacon-horse-galaxy"
+        assert normalize_session_code("bacon - horse - galaxy") == "bacon-horse-galaxy"
+
+    def test_validate_accepts_valid_code(self):
+        code = generate_session_code()
+        assert validate_session_code(code) == code
+
+    def test_validate_rejects_typo(self):
+        assert validate_session_code("bacon-horse-xyzqqq") is None
+
+    def test_validate_rejects_wrong_word_count(self):
+        assert validate_session_code("bacon-horse") is None
+        assert validate_session_code("bacon-horse-galaxy-extra") is None
+
+    def test_validate_normalizes(self):
+        assert validate_session_code("BACON  HORSE  GALAXY") == "bacon-horse-galaxy"
 
 
 class TestKeyDerivation:
