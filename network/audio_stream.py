@@ -55,6 +55,7 @@ class AudioStreamer:
         self.tx_count = 0
         self.rx_count = 0
         self.rx_dropped = 0
+        self._last_drop_report_count = 0
 
         # Callback: (node_id_bytes, seq, timestamp, pcm_int16_bytes)
         self.on_frame_received: Callable[[bytes, int, float, bytes], None] | None = None
@@ -79,17 +80,20 @@ class AudioStreamer:
         )
         self._recv_thread.start()
         log.info("Audio streamer started on port %d", self.local_port)
+        log.debug("UDP audio socket bound to port %d", self.local_port)
 
     def stop(self) -> None:
         """Stop receive thread and close socket."""
         self._running = False
         if self._recv_thread and self._recv_thread.is_alive():
             self._recv_thread.join(timeout=2.0)
+            if self._recv_thread.is_alive():
+                log.warning("Audio recv thread did not exit within 2s")
         if self._sock:
             try:
                 self._sock.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Audio socket close error: %s", exc)
             self._sock = None
         log.info("Audio streamer stopped (tx=%d rx=%d dropped=%d)",
                  self.tx_count, self.rx_count, self.rx_dropped)
@@ -121,8 +125,8 @@ class AudioStreamer:
         for addr in peer_addrs:
             try:
                 self._sock.sendto(datagram, addr)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("UDP send failed to %s:%d: %s", addr[0], addr[1], exc)
         self.tx_count += 1
 
     def _recv_loop(self) -> None:
@@ -138,6 +142,10 @@ class AudioStreamer:
             result = decrypt_audio_frame(self._key, data)
             if result is None:
                 self.rx_dropped += 1
+                if self.rx_dropped - self._last_drop_report_count >= 100:
+                    log.warning("Audio frame drops: %d total (last 100 from %s:%d)",
+                                self.rx_dropped, addr[0], addr[1])
+                    self._last_drop_report_count = self.rx_dropped
                 continue
 
             node_id, pcm_bytes, seq, timestamp = result

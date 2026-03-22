@@ -73,6 +73,8 @@ try:
 except ImportError:
     _P2P_AVAILABLE = False
 
+log_p2p = logging.getLogger("p2p.app")
+
 # Session save directory
 SESSIONS_DIR = Path.home() / "Documents" / "voxterm"
 
@@ -815,6 +817,8 @@ class VoxTerm(App):
         # Broadcast to P2P peers if in a session
         if self._session_mgr and self._session_mgr.is_in_session:
             self._transcript_seq += 1
+            log_p2p.debug("Broadcasting FINAL to peers: seq=%d, %d chars",
+                          self._transcript_seq, len(text))
             self._session_mgr.broadcast_final(
                 speaker_name=speaker or self._p2p_display_name,
                 seq=self._transcript_seq,
@@ -1515,6 +1519,7 @@ class VoxTerm(App):
                 )
 
         except Exception as exc:
+            log_p2p.error("P2P session setup failed: %s", exc, exc_info=True)
             self.call_from_thread(
                 self.query_one(TranscriptPanel).system_message,
                 f"P2P session failed: {exc}",
@@ -1560,12 +1565,13 @@ class VoxTerm(App):
                 peer_info.ip, peer_info.tcp_port,
                 mgr.session_code,
             )
-            if not success:
-                # Wrong session code or connection failed — that's fine,
-                # they're in a different session
-                pass
-        except Exception:
-            pass
+            if success:
+                log_p2p.debug("Connected to discovered peer %s", peer_info.display_name)
+            else:
+                log_p2p.debug("Peer %s at %s:%d did not accept connection (likely different session)",
+                              peer_info.display_name, peer_info.ip, peer_info.tcp_port)
+        except Exception as exc:
+            log_p2p.debug("Connect to discovered peer %s failed: %s", peer_info.display_name, exc)
 
     def _wire_session_callbacks(self) -> None:
         mgr = self._session_mgr
@@ -1587,6 +1593,8 @@ class VoxTerm(App):
             self.call_from_thread(self._update_telemetry)
 
         def on_final(node_id, msg):
+            log_p2p.debug("Callback on_final: node=%s seq=%s, %d chars",
+                          node_id[:8], msg.get("seq"), len(msg.get("text", "")))
             if not self._assembler:
                 return
             peers = mgr.peers
@@ -1656,8 +1664,8 @@ class VoxTerm(App):
         if self._session_mgr and self._session_mgr.is_in_session:
             try:
                 self._session_mgr.leave_session()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_p2p.debug("Error leaving session on quit: %s", exc)
         # Live file already on disk — no extra save needed
         self._record_session_stats()
         self.audio_capture.stop()

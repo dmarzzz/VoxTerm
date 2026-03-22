@@ -80,7 +80,11 @@ class PeerDiscovery:
         """Register our mDNS service and start browsing for peers."""
         self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self._service_info = self._build_service_info()
-        self._zeroconf.register_service(self._service_info)
+        try:
+            self._zeroconf.register_service(self._service_info)
+        except Exception as exc:
+            log.error("mDNS service registration failed: %s", exc)
+            raise
         self._browser = ServiceBrowser(
             self._zeroconf,
             P2P_SERVICE_TYPE,
@@ -91,7 +95,10 @@ class PeerDiscovery:
     def stop(self) -> None:
         """Unregister service and close zeroconf."""
         if self._zeroconf and self._service_info:
-            self._zeroconf.unregister_service(self._service_info)
+            try:
+                self._zeroconf.unregister_service(self._service_info)
+            except Exception as exc:
+                log.debug("mDNS unregister error: %s", exc)
         if self._browser:
             self._browser.cancel()
             self._browser = None
@@ -104,9 +111,13 @@ class PeerDiscovery:
         """Update the mDNS TXT record to reflect session status."""
         self._in_session = in_session
         if self._zeroconf and self._service_info:
-            new_info = self._build_service_info()
-            self._zeroconf.update_service(new_info)
-            self._service_info = new_info
+            try:
+                new_info = self._build_service_info()
+                self._zeroconf.update_service(new_info)
+                self._service_info = new_info
+                log.debug("mDNS session status updated: in_session=%s", in_session)
+            except Exception as exc:
+                log.warning("mDNS service update failed: %s", exc)
 
     def get_visible_peers(self) -> list[PeerInfo]:
         """Return a snapshot of currently visible peers."""
@@ -156,6 +167,8 @@ class PeerDiscovery:
             if is_new and self.on_peer_found:
                 log.info("Peer found: %s at %s:%d", peer.display_name, peer.ip, peer.tcp_port)
                 self.on_peer_found(peer)
+            elif not is_new:
+                log.debug("Peer updated: %s at %s:%d", peer.display_name, peer.ip, peer.tcp_port)
 
         elif state_change == ServiceStateChange.Removed:
             # Try to figure out which peer was removed
@@ -169,7 +182,10 @@ class PeerDiscovery:
                     for nid, peer in self._peers.items():
                         if name.startswith(peer.display_name):
                             node_id = nid
+                            log.debug("Peer removal: matched %s by service name prefix", node_id)
                             break
+                if not node_id:
+                    log.debug("Peer removal: could not identify node_id from service %s", name)
             if node_id:
                 with self._lock:
                     self._peers.pop(node_id, None)
@@ -189,7 +205,7 @@ class PeerDiscovery:
             if not ip:
                 return None
             display_name = props.get(b"display_name", b"").decode("utf-8", errors="replace")
-            return PeerInfo(
+            peer = PeerInfo(
                 node_id=node_id,
                 display_name=display_name or (info.server.split(".")[0] if info.server else node_id[:8]),
                 ip=ip,
@@ -198,6 +214,9 @@ class PeerDiscovery:
                 in_session=props.get(b"in_session", b"0") == b"1",
                 proto_v=int(props.get(b"proto_v", b"1").decode()),
             )
+            log.debug("Parsed peer: %s (%s) at %s:%d proto_v=%d",
+                       peer.display_name, peer.node_id[:8], peer.ip, peer.tcp_port, peer.proto_v)
+            return peer
         except (KeyError, ValueError, IndexError) as exc:
             log.debug("Failed to parse service info: %s", exc)
             return None
@@ -212,4 +231,5 @@ class PeerDiscovery:
             s.close()
             return ip
         except Exception:
+            log.warning("Could not determine LAN IP, falling back to 127.0.0.1")
             return "127.0.0.1"

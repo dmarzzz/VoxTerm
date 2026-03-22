@@ -7,7 +7,10 @@ a robust estimate accurate to ~1ms on LAN.
 
 from __future__ import annotations
 
+import logging
 import statistics
+
+log = logging.getLogger("p2p.clock")
 
 
 class ClockSync:
@@ -42,12 +45,17 @@ class ClockSync:
         """
         rtt = t3 - t1
         if rtt < 0:
+            log.warning("Discarding bogus clock sample: rtt=%.3fs (t1=%.3f t2=%.3f t3=%.3f)", rtt, t1, t2, t3)
             return  # bogus sample
         owl = rtt / 2.0
         offset = t2 - t1 - owl
 
+        if rtt > 0.1:
+            log.warning("High RTT clock sample: %.1fms", rtt * 1000)
+
         self._offsets.append(offset)
         self._rtts.append(rtt)
+        log.debug("Clock sample: rtt=%.1fms offset=%.1fms (n=%d)", rtt * 1000, offset * 1000, len(self._offsets))
 
         # Trim to window
         if len(self._offsets) > self._window_size:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -30,6 +31,8 @@ _TAG_LENGTH = 16  # GCM tag is appended by AESGCM
 
 _TCP_HEADER = struct.Struct("<I")  # uint32 LE frame length
 _MAX_MSG_SIZE = 10_000_000  # 10MB sanity limit
+
+log = logging.getLogger("p2p.crypto")
 
 
 class DecryptionError(Exception):
@@ -60,7 +63,9 @@ def derive_session_key(session_code: str) -> bytes:
         salt=_SALT,
         info=_INFO,
     )
-    return hkdf.derive(normalized.encode("utf-8"))
+    key = hkdf.derive(normalized.encode("utf-8"))
+    log.debug("Key derived for session ...%s", normalized[-4:])
+    return key
 
 
 # ── AES-256-GCM primitives ───────────────────────────────────
@@ -99,6 +104,7 @@ def send_encrypted_msg(sock: socket.socket, key: bytes, msg: dict) -> None:
     plaintext = json.dumps(msg, separators=(",", ":")).encode("utf-8")
     nonce, ct = encrypt(key, plaintext)
     frame = nonce + ct
+    log.debug("TX encrypted msg: %d bytes plaintext, type=%s", len(plaintext), msg.get("type"))
     sock.sendall(_TCP_HEADER.pack(len(frame)) + frame)
 
 
@@ -109,20 +115,27 @@ def recv_encrypted_msg(sock: socket.socket, key: bytes) -> dict | None:
     """
     header = _recv_exact(sock, _TCP_HEADER.size)
     if header is None:
+        log.debug("RX: EOF reading header")
         return None
     (length,) = _TCP_HEADER.unpack(header)
     if length > _MAX_MSG_SIZE or length < _NONCE_LENGTH + _TAG_LENGTH:
+        log.warning("RX: invalid frame length %d (min=%d, max=%d)",
+                     length, _NONCE_LENGTH + _TAG_LENGTH, _MAX_MSG_SIZE)
         return None
     frame = _recv_exact(sock, length)
     if frame is None:
+        log.debug("RX: EOF reading frame body (%d bytes expected)", length)
         return None
     nonce = frame[:_NONCE_LENGTH]
     ct = frame[_NONCE_LENGTH:]
     try:
         plaintext = decrypt(key, nonce, ct)
     except DecryptionError:
+        log.warning("RX: decryption failed (frame=%d bytes)", length)
         return None
-    return json.loads(plaintext.decode("utf-8"))
+    msg = json.loads(plaintext.decode("utf-8"))
+    log.debug("RX decrypted msg: %d bytes, type=%s", len(plaintext), msg.get("type") if isinstance(msg, dict) else "?")
+    return msg
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
@@ -163,7 +176,9 @@ def encrypt_audio_frame(
     aesgcm = AESGCM(key)
     ct = aesgcm.encrypt(nonce, payload, None)
     header = _UDP_HEADER.pack(_UDP_MAGIC, node_id[:16].ljust(16, b"\x00"), seq)
-    return header + nonce + ct
+    datagram = header + nonce + ct
+    log.debug("UDP TX: encrypted frame seq=%d, %d bytes PCM, %d bytes datagram", seq, len(pcm_bytes), len(datagram))
+    return datagram
 
 
 def decrypt_audio_frame(
@@ -176,9 +191,11 @@ def decrypt_audio_frame(
     """
     min_size = _UDP_HEADER.size + _NONCE_LENGTH + _TAG_LENGTH + 8  # 8 for timestamp
     if len(datagram) < min_size:
+        log.debug("UDP RX: datagram too small (%d < %d bytes)", len(datagram), min_size)
         return None
     magic, node_id, seq = _UDP_HEADER.unpack_from(datagram)
     if magic != _UDP_MAGIC:
+        log.debug("UDP RX: bad magic %r", magic)
         return None
     offset = _UDP_HEADER.size
     nonce = datagram[offset : offset + _NONCE_LENGTH]
@@ -187,7 +204,9 @@ def decrypt_audio_frame(
     try:
         payload = aesgcm.decrypt(nonce, ct, None)
     except Exception:
+        log.warning("UDP RX: decrypt failed for seq=%d", seq)
         return None
     timestamp = struct.unpack("<d", payload[:8])[0]
     pcm_bytes = payload[8:]
+    log.debug("UDP RX: decrypted frame seq=%d, %d bytes PCM", seq, len(pcm_bytes))
     return node_id.rstrip(b"\x00"), pcm_bytes, seq, timestamp

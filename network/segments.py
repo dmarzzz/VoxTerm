@@ -11,10 +11,13 @@ per peer at most).
 from __future__ import annotations
 
 import bisect
+import logging
 import threading
 from dataclasses import dataclass, field
 
 from network.clock import ClockSync
+
+log = logging.getLogger("p2p.segments")
 
 
 @dataclass
@@ -82,6 +85,8 @@ class TranscriptAssembler:
             if node_id in self._partials and self._partials[node_id].seq == seq:
                 del self._partials[node_id]
 
+        log.debug("Final segment: node=%s seq=%d speaker=%s, %d chars, adjusted_start=%.3f",
+                   node_id[:8], seq, speaker_name, len(text), adjusted)
         return seg
 
     def on_partial(
@@ -109,6 +114,8 @@ class TranscriptAssembler:
         )
         with self._lock:
             self._partials[node_id] = seg
+        log.debug("Partial segment: node=%s seq=%d speaker=%s, %d chars",
+                   node_id[:8], seq, speaker_name, len(text))
         return seg
 
     def get_finals(self) -> list[MergedSegment]:
@@ -125,6 +132,7 @@ class TranscriptAssembler:
         """Remove pending partials for a disconnected peer."""
         with self._lock:
             self._partials.pop(node_id, None)
+        log.debug("Cleared partials for peer %s", node_id[:8])
 
     @property
     def final_count(self) -> int:

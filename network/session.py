@@ -179,6 +179,7 @@ class SessionManager:
         # Send BYE to all connected peers (outside lock)
         with self._lock:
             peers_snapshot = list(self._peers.values())
+        log.debug("Sending BYE to %d peers", len(peers_snapshot))
         for peer in peers_snapshot:
             self._send_to_peer(peer, build_bye(self._node_id))
 
@@ -192,18 +193,25 @@ class SessionManager:
         if self._server_sock:
             try:
                 self._server_sock.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Server socket close error: %s", exc)
             self._server_sock = None
 
         # Wait for threads
+        log.debug("Waiting for threads to finish...")
         if self._accept_thread and self._accept_thread.is_alive():
             self._accept_thread.join(timeout=2.0)
+            if self._accept_thread.is_alive():
+                log.warning("Thread %s did not exit within 2s timeout", self._accept_thread.name)
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=2.0)
+            if self._heartbeat_thread.is_alive():
+                log.warning("Thread %s did not exit within 2s timeout", self._heartbeat_thread.name)
         for t in list(self._read_threads.values()):
             if t.is_alive():
                 t.join(timeout=2.0)
+                if t.is_alive():
+                    log.warning("Thread %s did not exit within 2s timeout", t.name)
         self._read_threads.clear()
 
         self._in_session = False
@@ -244,6 +252,7 @@ class SessionManager:
     def _send_to_peer(self, peer: PeerConnection, msg: dict) -> bool:
         """Send a message to a single peer, holding the send lock."""
         if not peer.sock or peer.state != "connected":
+            log.debug("Skipping send to %s (state=%s)", peer.display_name, peer.state)
             return False
         try:
             with peer.send_lock:
@@ -260,6 +269,7 @@ class SessionManager:
             return
         with self._lock:
             peers_snapshot = list(self._peers.values())
+        log.debug("Broadcasting %s to %d peers", msg.get("type"), len(peers_snapshot))
         for peer in peers_snapshot:
             self._send_to_peer(peer, msg)
 
@@ -304,11 +314,13 @@ class SessionManager:
         try:
             conn.settimeout(5.0)
             if not self._do_handshake_server(conn):
+                log.info("Incoming handshake failed from %s:%d", addr[0], addr[1])
                 conn.close()
                 return
             conn.settimeout(None)
 
             # Exchange HELLOs
+            log.debug("Incoming: sending HELLO, waiting for peer HELLO")
             my_hello = build_hello(
                 self._node_id, self._display_name,
                 proto_v=P2P_PROTO_VERSION,
@@ -319,9 +331,12 @@ class SessionManager:
             their_hello = recv_encrypted_msg(conn, self._session_key)
 
             if not their_hello or their_hello.get("type") != MSG_HELLO:
+                log.info("Incoming: peer sent invalid HELLO (type=%s) from %s:%d",
+                         their_hello.get("type") if their_hello else None, addr[0], addr[1])
                 conn.close()
                 return
 
+            log.debug("Incoming: HELLO exchange completed with %s", their_hello["display_name"])
             peer = PeerConnection(
                 node_id=their_hello["node_id"],
                 display_name=their_hello["display_name"],
@@ -334,7 +349,7 @@ class SessionManager:
             self._register_peer(peer)
 
         except Exception as exc:
-            log.debug("Incoming connection failed: %s", exc)
+            log.info("Incoming connection failed from %s:%d: %s", addr[0], addr[1], exc)
             try:
                 conn.close()
             except Exception:
@@ -342,12 +357,14 @@ class SessionManager:
 
     def _connect_to_peer(self, ip: str, port: int) -> bool:
         """Initiate an outgoing TCP connection to a peer."""
+        log.debug("Connecting to %s:%d", ip, port)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5.0)
             sock.connect((ip, port))
 
             if not self._do_handshake_client(sock):
+                log.info("Handshake failed with %s:%d", ip, port)
                 sock.close()
                 return False
             sock.settimeout(None)
@@ -363,6 +380,8 @@ class SessionManager:
             their_hello = recv_encrypted_msg(sock, self._session_key)
 
             if not their_hello or their_hello.get("type") != MSG_HELLO:
+                log.info("HELLO exchange failed with %s:%d (got type=%s)",
+                         ip, port, their_hello.get("type") if their_hello else None)
                 sock.close()
                 return False
 
@@ -379,7 +398,7 @@ class SessionManager:
             return True
 
         except Exception as exc:
-            log.debug("Failed to connect to %s:%d: %s", ip, port, exc)
+            log.info("Connection to %s:%d failed: %s", ip, port, exc)
             return False
 
     # ── encryption handshake ──────────────────────────────────
@@ -387,21 +406,31 @@ class SessionManager:
     def _do_handshake_server(self, conn: socket.socket) -> bool:
         """Server side: receive encrypted hello, send ack."""
         try:
+            log.debug("Server handshake: waiting for encrypted hello")
             msg = recv_encrypted_msg(conn, self._session_key)
             if msg is None or msg.get("handshake") != "hello":
+                log.debug("Server handshake: invalid hello (got %r)", msg)
                 return False
             send_encrypted_msg(conn, self._session_key, {"handshake": "ack"})
+            log.debug("Server handshake: completed, sent ack")
             return True
-        except Exception:
+        except Exception as exc:
+            log.debug("Server handshake failed: %s", exc)
             return False
 
     def _do_handshake_client(self, sock: socket.socket) -> bool:
         """Client side: send encrypted hello, expect ack."""
         try:
+            log.debug("Client handshake: sending encrypted hello")
             send_encrypted_msg(sock, self._session_key, {"handshake": "hello"})
             msg = recv_encrypted_msg(sock, self._session_key)
-            return msg is not None and msg.get("handshake") == "ack"
-        except Exception:
+            if msg is None or msg.get("handshake") != "ack":
+                log.debug("Client handshake: invalid ack (got %r)", msg)
+                return False
+            log.debug("Client handshake: completed")
+            return True
+        except Exception as exc:
+            log.debug("Client handshake failed: %s", exc)
             return False
 
     # ── peer management ───────────────────────────────────────
@@ -411,6 +440,7 @@ class SessionManager:
         with self._lock:
             if peer.node_id in self._peers:
                 # Already connected — close the old connection
+                log.info("Replacing existing connection for %s (%s)", peer.display_name, peer.node_id[:8])
                 old = self._peers[peer.node_id]
                 old.close()
             self._peers[peer.node_id] = peer
@@ -457,11 +487,14 @@ class SessionManager:
         while self._running and peer.state == "connected":
             try:
                 msg = recv_encrypted_msg(peer.sock, self._session_key)
-            except Exception:
+            except Exception as exc:
+                log.warning("Read loop error for %s: %s", peer.display_name, exc)
                 msg = None
 
             if msg is None:
                 # EOF or decryption failure
+                log.debug("Read loop exiting for %s (running=%s, state=%s)",
+                          peer.display_name, self._running, peer.state)
                 break
 
             peer.stats.tcp_rx += 1
@@ -483,20 +516,24 @@ class SessionManager:
 
         elif msg_type == MSG_FINAL:
             peer.stats.finals_rx += 1
+            log.debug("RX FINAL from %s: seq=%s, %d chars",
+                       peer.display_name, msg.get("seq"), len(msg.get("text", "")))
             if self.on_final_received:
                 self.on_final_received(peer.node_id, msg)
 
         elif msg_type == MSG_PARTIAL:
             peer.stats.partials_rx += 1
+            log.debug("RX PARTIAL from %s: seq=%s, %d chars",
+                       peer.display_name, msg.get("seq"), len(msg.get("text", "")))
             if self.on_partial_received:
                 self.on_partial_received(peer.node_id, msg)
 
         elif msg_type == MSG_BYE:
             log.info("Received BYE from %s: %s", peer.display_name, msg.get("reason"))
-            peer.state = "disconnected"
+            peer.set_state("disconnected")
 
         else:
-            log.debug("Unknown message type from %s: %s", peer.display_name, msg_type)
+            log.warning("Unknown message type from %s: %s", peer.display_name, msg_type)
 
     # ── heartbeat ─────────────────────────────────────────────
 
@@ -551,3 +588,6 @@ class SessionManager:
         t2 = msg["local_ts"]  # their receive/respond time
         t3 = time.monotonic()  # now
         peer.clock.add_sample(t1, t2, t3)
+        log.debug("Clock sample from %s: rtt=%.1fms offset=%.1fms (n=%d)",
+                   peer.display_name, peer.clock.rtt * 1000, peer.clock.offset * 1000,
+                   peer.clock.sample_count)

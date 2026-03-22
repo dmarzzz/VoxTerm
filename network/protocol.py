@@ -6,7 +6,10 @@ message types, plain dicts for messages, JSON serialization.
 
 from __future__ import annotations
 
+import logging
 import time
+
+log = logging.getLogger("p2p.protocol")
 
 # ── message types ─────────────────────────────────────────────
 
@@ -125,8 +128,14 @@ def build_bye(node_id: str, reason: str = "user_quit") -> dict:
 def validate_message(msg: dict) -> bool:
     """Check that a message dict has all required fields for its type."""
     if not isinstance(msg, dict):
+        log.warning("Message validation: not a dict (got %s)", type(msg).__name__)
         return False
     msg_type = msg.get("type")
     if msg_type not in _REQUIRED_FIELDS:
+        log.warning("Message validation: unknown type %r", msg_type)
         return False
-    return _REQUIRED_FIELDS[msg_type].issubset(msg.keys())
+    missing = _REQUIRED_FIELDS[msg_type] - msg.keys()
+    if missing:
+        log.warning("Message validation: type=%s missing fields: %s", msg_type, missing)
+        return False
+    return True
