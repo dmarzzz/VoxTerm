@@ -167,6 +167,7 @@ def write_crash_dump(
             "recording", "is_transcribing", "transcribe_count",
             "model", "model_loaded", "diarizer_loaded", "diarizer_mode",
             "language", "had_speech", "silence_chunks", "sys_capture",
+            "p2p_in_session", "p2p_session_code", "p2p_peer_count", "p2p_peers",
         ):
             if key in state:
                 lines.append(f"{key + ':':18s}{state[key]}")
@@ -239,6 +240,32 @@ def _write_app_crash_dump(app, context: str, exc: BaseException | None = None):
             "speakers": app.diarizer.num_speakers if app._diarizer_loaded else 0,
             "gc_counts": str(gc.get_count()),
         }
+
+        # P2P state
+        if hasattr(app, '_session_mgr') and app._session_mgr:
+            mgr = app._session_mgr
+            p2p_state = {
+                "p2p_in_session": mgr.is_in_session,
+                "p2p_session_code": mgr.session_code[-4:] if mgr.session_code else None,
+                "p2p_peer_count": mgr.peer_count,
+            }
+            try:
+                peers = mgr.peers
+                p2p_state["p2p_peers"] = str([
+                    {
+                        "name": p.display_name,
+                        "state": p.state,
+                        "tcp_rx": p.stats.tcp_rx,
+                        "tcp_tx": p.stats.tcp_tx,
+                        "clock_samples": p.clock.sample_count,
+                        "rtt_ms": round(p.clock.rtt * 1000, 1) if p.clock.sample_count > 0 else None,
+                    }
+                    for p in peers.values()
+                ])
+            except Exception:
+                p2p_state["p2p_peers"] = "error collecting"
+            state.update(p2p_state)
+
         write_crash_dump(context, exc, state)
     except Exception:
         # Last resort — write minimal dump
