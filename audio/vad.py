@@ -10,6 +10,8 @@ Requires: pip install silero-vad onnxruntime
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from config import SAMPLE_RATE, VAD_THRESHOLD
@@ -33,6 +35,7 @@ class SileroVAD:
         self._state: np.ndarray = np.zeros(_STATE_SHAPE, dtype=np.float32)
         self._context: np.ndarray = np.zeros((1, _CONTEXT_SIZE), dtype=np.float32)
         self._loaded = False
+        self._lock = threading.Lock()  # A4: protects _state and _context
 
         try:
             self._load()
@@ -90,15 +93,16 @@ class SileroVAD:
         if chunk.ndim > 1:
             chunk = chunk[:, 0]
 
-        # Process in 512-sample sub-chunks
-        max_prob = 0.0
-        for offset in range(0, len(chunk), _CHUNK_SAMPLES):
-            sub = chunk[offset:offset + _CHUNK_SAMPLES]
-            if len(sub) < _CHUNK_SAMPLES:
-                break  # skip incomplete tail
-            prob = self._infer(sub)
-            if prob > max_prob:
-                max_prob = prob
+        with self._lock:
+            # Process in 512-sample sub-chunks
+            max_prob = 0.0
+            for offset in range(0, len(chunk), _CHUNK_SAMPLES):
+                sub = chunk[offset:offset + _CHUNK_SAMPLES]
+                if len(sub) < _CHUNK_SAMPLES:
+                    break  # skip incomplete tail
+                prob = self._infer(sub)
+                if prob > max_prob:
+                    max_prob = prob
 
         return max_prob
 
@@ -127,23 +131,24 @@ class SileroVAD:
         if audio.ndim > 1:
             audio = audio[:, 0]
 
-        # Save and reset state for independent batch processing
-        saved_state = self._state.copy()
-        saved_context = self._context.copy()
-        self._state = np.zeros(_STATE_SHAPE, dtype=np.float32)
-        self._context = np.zeros((1, _CONTEXT_SIZE), dtype=np.float32)
+        with self._lock:
+            # Save and reset state for independent batch processing
+            saved_state = self._state.copy()
+            saved_context = self._context.copy()
+            self._state = np.zeros(_STATE_SHAPE, dtype=np.float32)
+            self._context = np.zeros((1, _CONTEXT_SIZE), dtype=np.float32)
 
-        # Get per-frame probabilities (512 samples = 32ms per frame)
-        probs: list[float] = []
-        for offset in range(0, len(audio), _CHUNK_SAMPLES):
-            sub = audio[offset:offset + _CHUNK_SAMPLES]
-            if len(sub) < _CHUNK_SAMPLES:
-                break
-            probs.append(self._infer(sub))
+            # Get per-frame probabilities (512 samples = 32ms per frame)
+            probs: list[float] = []
+            for offset in range(0, len(audio), _CHUNK_SAMPLES):
+                sub = audio[offset:offset + _CHUNK_SAMPLES]
+                if len(sub) < _CHUNK_SAMPLES:
+                    break
+                probs.append(self._infer(sub))
 
-        # Restore state
-        self._state = saved_state
-        self._context = saved_context
+            # Restore state
+            self._state = saved_state
+            self._context = saved_context
 
         if not probs:
             return [(0, len(audio))]
@@ -200,8 +205,9 @@ class SileroVAD:
 
     def reset(self) -> None:
         """Reset internal model state (call between recording sessions)."""
-        self._state = np.zeros(_STATE_SHAPE, dtype=np.float32)
-        self._context = np.zeros((1, _CONTEXT_SIZE), dtype=np.float32)
+        with self._lock:
+            self._state = np.zeros(_STATE_SHAPE, dtype=np.float32)
+            self._context = np.zeros((1, _CONTEXT_SIZE), dtype=np.float32)
 
     def _infer(self, sub_chunk: np.ndarray) -> float:
         """Run ONNX inference on a single 512-sample sub-chunk."""

@@ -65,9 +65,10 @@ def test_crash_callback_invoked(proxy, sample_audio):
 
 
 @pytest.mark.timeout(30)
-def test_fallback_after_max_restarts(proxy, sample_audio):
-    """After DIARIZER_MAX_RESTARTS crashes within the window, proxy falls back
-    to in-process mode."""
+def test_disabled_after_max_restarts(proxy, sample_audio):
+    """After DIARIZER_MAX_RESTARTS crashes within the window, proxy disables
+    diarization and returns safe defaults (PyTorch is never imported into
+    the MLX process)."""
     audio = sample_audio(duration_sec=2.5)
 
     # Shrink the restart window so all crashes count
@@ -84,9 +85,14 @@ def test_fallback_after_max_restarts(proxy, sample_audio):
             # Brief pause so respawn sleep (1s) completes before next kill
             time.sleep(0.1)
 
-        assert proxy._mode == "inprocess", (
-            f"Expected inprocess mode after {DIARIZER_MAX_RESTARTS} crashes, "
+        assert proxy._mode == "disabled", (
+            f"Expected disabled mode after {DIARIZER_MAX_RESTARTS} crashes, "
             f"got {proxy._mode}"
         )
+
+        # Verify it still returns safe defaults rather than crashing
+        label, sid = proxy.identify(audio)
+        assert label == "Speaker 1"
+        assert sid == 1
     finally:
         proxy_mod.DIARIZER_RESTART_WINDOW = orig_window

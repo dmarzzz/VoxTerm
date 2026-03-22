@@ -26,7 +26,7 @@ SUBPROCESSES
 │  ├─ Loads CAM++ model (~28MB, downloads on first use from ModelScope)
 │  ├─ Receives audio over pipe, returns speaker ID + embedding
 │  ├─ Owns all session state (centroids, names, embeddings)
-│  └─ Auto-restarts on crash; falls back to in-process if repeated failures
+│  └─ Auto-restarts on crash; disables diarization if repeated failures
 │
 └─ System audio subprocess (Swift/ScreenCaptureKit)
    ├─ Compiled on first use from _macos_sck.swift
@@ -112,8 +112,9 @@ Press `D` in the TUI to toggle debug mode. Shows in the transcript panel:
 3. Crash dumps include: peak RSS, audio buffer duration, style cache stats, transcript entry count, speaker count, GC counters, model state
 
 ### Known issues
-- **MLX/PyTorch segfault**: These C++ runtimes conflict in the same process. Fixed by running diarizer in a subprocess. If subprocess isolation fails, falls back to in-process mode with `threading.Lock` + `OMP_NUM_THREADS=1` + `torch.set_num_threads(1)`.
-- **Shutdown segfault**: Python's GC collects C extension objects (PortAudio, PyTorch, SpeechBrain) in random order during shutdown, causing segfaults. Mitigated with `os._exit(0)` via atexit handler and finally block.
+- **MLX/PyTorch segfault**: These C++ runtimes conflict in the same process. Fixed by running diarizer in a subprocess. If subprocess isolation fails repeatedly, diarization is disabled (returns safe defaults) — PyTorch is never imported into the MLX process.
+- **MLX concurrency**: All MLX operations (transcription + model loading) are serialized via `_mlx_lock` to prevent concurrent Metal command buffer access. MLX releases the GIL during Metal compute, so the GIL alone does not prevent races.
+- **Shutdown segfault**: Python's GC collects C extension objects (PortAudio, PyTorch, SpeechBrain) in random order during shutdown, causing segfaults. Mitigated with `os._exit(0)` via atexit handler (registered before model loading) and `signal.alarm(2)` as a GIL-independent force-exit backstop.
 - **Resource tracker warning**: SpeechBrain/PyTorch create semaphores that aren't cleaned up before forced exit. Harmless — suppressed with `warnings.filterwarnings`.
 
 ## How to run

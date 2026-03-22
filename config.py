@@ -54,7 +54,7 @@ BIN_DIR = __import__("pathlib").Path.home() / "Documents" / "voxterm" / ".bin"
 
 # Diarizer subprocess
 DIARIZER_TIMEOUT = 5.0        # seconds to wait for subprocess response
-DIARIZER_MAX_RESTARTS = 3     # max restarts before falling back to in-process
+DIARIZER_MAX_RESTARTS = 3     # max restarts before disabling diarization
 DIARIZER_RESTART_WINDOW = 60  # seconds — restart counter resets after this
 
 # Crash reporting

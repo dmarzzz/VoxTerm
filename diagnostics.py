@@ -26,6 +26,11 @@ CRASH_DIR = Path.home() / "Documents" / "voxterm" / ".crashes"
 
 def _ensure_crash_dir() -> None:
     CRASH_DIR.mkdir(parents=True, exist_ok=True)
+    # C1: tighten permissions — crash logs contain operational metadata
+    try:
+        CRASH_DIR.chmod(0o700)
+    except OSError:
+        pass
 
 
 # ── faulthandler ──────────────────────────────────────────────
