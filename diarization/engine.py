@@ -38,6 +38,7 @@ class DiarizationEngine:
         self._model = None
         self._segmentation = None  # pyannote segmentation for overlap-aware embeddings
         self._loaded = False
+        self._is_mock = False
         self._speaker_centroids: dict[int, np.ndarray] = {}
         self._next_id = 1
         self._last_speaker_id = 1
@@ -80,6 +81,7 @@ class DiarizationEngine:
         import os
         if os.environ.get("VOXTERM_MOCK_ENGINE"):
             self._model = _MockEmbeddingModel()
+            self._is_mock = True
             self._loaded = True
             return
 
@@ -333,6 +335,16 @@ class DiarizationEngine:
             return None
         if len(audio) < _MIN_SPEECH_SAMPLES:
             return None
+
+        if self._is_mock:
+            # Mock path: derive embedding from raw audio, bypassing
+            # _compute_fbank/torchaudio to avoid torch global state pollution
+            # across tests (see issue #28).
+            seed = int(abs(audio[:min(len(audio), 4000)].sum()) * 1000) % 2**31
+            rng = np.random.RandomState(seed)
+            emb = rng.randn(512).astype(np.float32)
+            emb /= np.linalg.norm(emb) + 1e-10
+            return emb
 
         feats = self._compute_fbank(audio, sample_rate)
         if feats is None:

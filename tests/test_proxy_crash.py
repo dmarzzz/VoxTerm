@@ -77,12 +77,17 @@ def test_fallback_after_max_restarts(proxy, sample_audio):
 
     try:
         for i in range(DIARIZER_MAX_RESTARTS):
+            # Wait for subprocess to be alive before killing it
+            for _ in range(30):
+                if proxy._proc is not None and proxy._proc.poll() is None:
+                    break
+                time.sleep(0.1)
             if proxy._proc is not None:
                 proxy._proc.kill()
             # Trigger crash handling by calling a method
             proxy.identify(audio)
-            # Brief pause so respawn sleep (1s) completes before next kill
-            time.sleep(0.1)
+            # Wait for respawn sleep (1s) + subprocess startup to complete
+            time.sleep(1.5)
 
         assert proxy._mode == "inprocess", (
             f"Expected inprocess mode after {DIARIZER_MAX_RESTARTS} crashes, "
