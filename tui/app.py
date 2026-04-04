@@ -341,6 +341,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]N[/]       [#c0c0c0]Party mode — join / leave[/]\n"
                 "[bold #00e5ff]V[/]       [#c0c0c0]Toggle merged transcript view[/]\n"
+                "[bold #00e5ff]U[/]       [#c0c0c0]Summarize transcript (local LLM)[/]\n"
                 "[bold #00e5ff]C[/]       [#c0c0c0]Clear transcript[/]\n"
                 "[bold #00e5ff]D[/]       [#c0c0c0]Toggle debug mode[/]\n"
                 "[bold #00e5ff]Q[/]       [#c0c0c0]Quit[/]",
@@ -428,6 +429,7 @@ class VoxTerm(App):
         Binding("l", "switch_language", "Language"),
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
+        Binding("u", "summarize", "Summarize"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("n", "toggle_party", "Party"),
@@ -1628,6 +1630,49 @@ class VoxTerm(App):
         self.query_one(TranscriptPanel).system_message(
             f"discarded {entry_count} entries"
         )
+
+    # ── Summarization (local LLM) ────────────────────────────
+
+    def action_summarize(self):
+        """Summarize the current transcript using local LLM."""
+        transcript = self.query_one(TranscriptPanel)
+        if not transcript.get_entries():
+            transcript.system_message("nothing to summarize")
+            return
+        transcript.system_message("summarizing via local LLM...")
+        self._run_summarize()
+
+    @work(thread=True, group="summarize")
+    def _run_summarize(self):
+        """Background worker: call local llama-server and display summary."""
+        from summarizer.engine import summarize, SummarizerError, is_server_available
+
+        transcript = self.query_one(TranscriptPanel)
+        md = transcript.get_markdown(
+            self._model_name,
+            session_start=self._session_start,
+            language=self._language or "",
+        )
+
+        if not is_server_available():
+            self.call_from_thread(
+                transcript.system_message,
+                "LLM server not running — start it with: nix run .#llm-server",
+            )
+            return
+
+        strength = _get_config().get("summarization_strength") or "medium"
+        try:
+            summary = summarize(md, strength=strength)
+        except SummarizerError as exc:
+            self.call_from_thread(transcript.system_message, f"summarize failed: {exc}")
+            return
+
+        self.call_from_thread(transcript.system_message, "--- SUMMARY ---")
+        for line in summary.splitlines():
+            if line.strip():
+                self.call_from_thread(transcript.system_message, line)
+        self.call_from_thread(transcript.system_message, "--- END SUMMARY ---")
 
     def _start_new_session(self):
         """Clear transcript and reset for a new session."""

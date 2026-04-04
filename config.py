@@ -2,6 +2,7 @@
 
 VERSION = "0.0.0"
 
+import importlib.util
 import sys
 
 # Audio
@@ -28,11 +29,10 @@ if sys.platform == "darwin":
     WHISPER_MODEL = "mlx-community/whisper-small-mlx"
     FASTER_WHISPER_MODELS: set[str] = set()
 elif sys.platform.startswith("linux"):
-    # Linux: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
-    DEFAULT_MODEL = "qwen3-0.6b"
+    # Linux: faster-whisper (default) + Qwen3-ASR (optional, needs qwen-asr pip pkg)
+    _has_qwen_asr = importlib.util.find_spec("qwen_asr") is not None
+    DEFAULT_MODEL = "fw-small"
     AVAILABLE_MODELS = {
-        "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
-        "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",
         "fw-tiny":           "tiny",
         "fw-base":           "base",
         "fw-small":          "small",
@@ -40,7 +40,11 @@ elif sys.platform.startswith("linux"):
         "fw-large-v3":       "large-v3",
         "fw-distil-large-v3": "distil-large-v3",
     }
-    QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
+    QWEN3_MODELS: set[str] = set()
+    if _has_qwen_asr:
+        AVAILABLE_MODELS["qwen3-0.6b"] = "Qwen/Qwen3-ASR-0.6B"
+        AVAILABLE_MODELS["qwen3-1.7b"] = "Qwen/Qwen3-ASR-1.7B"
+        QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
     WHISPER_MODEL = None
     FASTER_WHISPER_MODELS = {"fw-tiny", "fw-base", "fw-small", "fw-medium", "fw-large-v3", "fw-distil-large-v3"}
 else:
