@@ -7,6 +7,10 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    {
+      nixosModules.llm-server = ./nix/module.nix;
+    }
+    //
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -92,15 +96,49 @@
           ++ pkgs.lib.optionals isDarwin darwinDeps
           ++ pkgs.lib.optionals isLinux linuxDeps;
 
-        # -- Local LLM server (llama.cpp + pinned model) --
+        # -- Local LLM inference (llama-swap + llama-server + pinned model) --
 
-        # Qwen2.5-3B-Instruct Q4_K_M — good balance of size (~2GB) and
-        # capability for transcript summarization.
+        llama-swap = pkgs.buildGoModule.override { go = pkgs.go_1_26; } {
+          pname = "llama-swap";
+          version = "199";
+          src = pkgs.fetchFromGitHub {
+            owner = "mostlygeek";
+            repo = "llama-swap";
+            rev = "v199";
+            hash = "sha256-5dGILqoQWMn+PGxgKdMn3LvWB2U5YrgKy3kE8O+RVeM=";
+          };
+          vendorHash = "sha256-XiDYlw/byu8CWvg4KSPC7m8PGCZXtp08Y1velx4BR8U=";
+          subPackages = [ "." ];
+          preBuild = "mkdir -p proxy/ui_dist && touch proxy/ui_dist/placeholder.txt";
+          ldflags = [ "-X main.version=199" "-X main.commit=v199" ];
+          meta.description = "Hot-swap proxy for local LLM inference servers";
+          meta.mainProgram = "llama-swap";
+        };
+
+        # Qwen2.5-3B-Instruct Q4_K_M — hash-pinned, auditable provenance.
         llmModel = pkgs.fetchurl {
           url = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf";
           hash = "sha256-YmtKZni4ZEIkDjPfgZ4AEy07p93f4c3E+7GOCpYVxi0=";
           name = "qwen2.5-3b-instruct-q4_k_m.gguf";
         };
+
+        # llama-swap config with the pinned model
+        llmConfig = pkgs.writeText "llama-swap-config.yaml" (builtins.toJSON {
+          healthCheckTimeout = 120;
+          logLevel = "info";
+          models = {
+            "qwen2.5-3b" = {
+              cmd = builtins.concatStringsSep " " [
+                "${pkgsCuda.llama-cpp}/bin/llama-server"
+                "--model" (toString llmModel)
+                "--port" "\${PORT}"
+                "--ctx-size" "8192"
+                "--flash-attn" "auto"
+              ];
+              aliases = [ "summarizer" ];
+            };
+          };
+        });
 
       in
       {
@@ -144,27 +182,22 @@
             };
           };
 
-          # Local LLM server — wraps llama-server with the pinned model.
+          # Local LLM server — llama-swap managing llama-server backends.
           # Usage: nix run .#llm-server
           # Exposes OpenAI-compatible API on 127.0.0.1:8081
+          # Models are hot-swapped on demand based on the "model" field in requests.
           llm-server = pkgs.writeShellApplication {
             name = "voxterm-llm-server";
-            runtimeInputs = [ pkgsCuda.llama-cpp ];
+            runtimeInputs = [ llama-swap ];
             text = ''
               port="''${VOXTERM_LLM_PORT:-8081}"
-              ctx="''${VOXTERM_LLM_CTX:-8192}"
-              echo "Starting local LLM server on 127.0.0.1:$port"
-              echo "Model: ${llmModel.name}"
-              echo "Context: $ctx tokens"
-              exec llama-server \
-                --model "${llmModel}" \
-                --host 127.0.0.1 \
-                --port "$port" \
-                --ctx-size "$ctx" \
-                --flash-attn auto
+              echo "Starting llama-swap on 127.0.0.1:$port"
+              echo "Models: qwen2.5-3b (aliases: summarizer)"
+              exec llama-swap --listen "127.0.0.1:$port" --config "${llmConfig}"
             '';
           };
 
+          inherit llama-swap;
           llm-model = llmModel;
         };
 
