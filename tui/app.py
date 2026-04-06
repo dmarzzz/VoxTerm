@@ -342,6 +342,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]N[/]       [#c0c0c0]Party mode — join / leave[/]\n"
                 "[bold #00e5ff]V[/]       [#c0c0c0]Toggle merged transcript view[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Summarize transcript (local LLM)[/]\n"
+                "[bold #00e5ff]X[/]       [#c0c0c0]Toggle command mode (voice commands)[/]\n"
                 "[bold #00e5ff]C[/]       [#c0c0c0]Clear transcript[/]\n"
                 "[bold #00e5ff]D[/]       [#c0c0c0]Toggle debug mode[/]\n"
                 "[bold #00e5ff]Q[/]       [#c0c0c0]Quit[/]",
@@ -430,6 +431,7 @@ class VoxTerm(App):
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize", "Summarize"),
+        Binding("x", "toggle_command_mode", "Cmd Mode"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("n", "toggle_party", "Party"),
@@ -478,6 +480,8 @@ class VoxTerm(App):
         self._prompt_confirmations: dict[int, int] = {}  # speaker_id → confirm count
         self._last_prompt_time: float = 0.0
         self._onboarding_shown = False
+        # Voice command mode — when True, utterances are interpreted as commands
+        self._command_mode = False
         # P2P party manager — owns all P2P state and logic
         self._party = PartyManager(self, _get_config())
         self._wire_party_callbacks()
@@ -1090,6 +1094,13 @@ class VoxTerm(App):
         self, text: str, speaker: str = "", speaker_id: int = 0,
         confidence: str = "", overlap: bool = False,
     ):
+        # Command mode: interpret utterance as a voice command
+        if self._command_mode and text.strip():
+            transcript = self.query_one(TranscriptPanel)
+            transcript.system_message(f"[cmd] heard: {text}")
+            self._execute_voice_command(text)
+            return
+
         self.query_one(TranscriptPanel).add_transcript(
             text, speaker, speaker_id, confidence=confidence,
             overlap=overlap,
@@ -1673,6 +1684,64 @@ class VoxTerm(App):
             if line.strip():
                 self.call_from_thread(transcript.system_message, line)
         self.call_from_thread(transcript.system_message, "--- END SUMMARY ---")
+
+    # ── Voice command mode ────────────────────────────────────
+
+    def action_toggle_command_mode(self):
+        """Toggle between transcription and command mode."""
+        self._command_mode = not self._command_mode
+        transcript = self.query_one(TranscriptPanel)
+        if self._command_mode:
+            transcript.border_title = "COMMAND MODE // LISTENING"
+            transcript.system_message("command mode ON -- speak a command")
+        else:
+            transcript.border_title = "TRANSCRIPT // LIVE"
+            transcript.system_message("command mode OFF -- back to transcription")
+
+    @work(thread=True, group="voice_command")
+    def _execute_voice_command(self, utterance: str):
+        """Background worker: interpret and execute a voice command."""
+        from commands.interpreter import interpret, Command
+        from commands.executor import execute
+        from summarizer.engine import SummarizerError, is_server_available
+
+        transcript = self.query_one(TranscriptPanel)
+
+        if not is_server_available():
+            self.call_from_thread(
+                transcript.system_message,
+                "[cmd] LLM server not running -- start it with: nix run .#llm-server",
+            )
+            return
+
+        try:
+            cmd = interpret(utterance)
+        except SummarizerError as exc:
+            self.call_from_thread(transcript.system_message, f"[cmd] error: {exc}")
+            return
+
+        self.call_from_thread(
+            transcript.system_message,
+            f"[cmd] {cmd.action}: {cmd.speech or cmd.params}",
+        )
+
+        # Handle delegate actions that need TUI context
+        if cmd.action == "summarize":
+            self.call_from_thread(self.action_summarize)
+            return
+
+        if cmd.action == "save_transcript":
+            md = transcript.get_markdown(
+                self._model_name,
+                session_start=self._session_start,
+                language=self._language or "",
+            )
+            result = execute(cmd.action, cmd.params, {"transcript_markdown": md})
+        else:
+            result = execute(cmd.action, cmd.params)
+
+        if result:
+            self.call_from_thread(transcript.system_message, f"[cmd] {result}")
 
     def _start_new_session(self):
         """Clear transcript and reset for a new session."""

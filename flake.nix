@@ -158,7 +158,7 @@
               mkdir -p $out/lib/voxterm
               cp -r \
                 audio config.py config_store.py diagnostics.py paths.py \
-                tui dictation network summarizer \
+                tui dictation network summarizer commands \
                 $out/lib/voxterm/
 
               mkdir -p $out/bin
