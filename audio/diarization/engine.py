@@ -227,10 +227,13 @@ class DiarizationEngine:
             speaker_id – integer key (1-based)
         """
         if not self._loaded:
+            log.warning("identify() called but diarization model not loaded — returning Speaker 1")
             return "Speaker 1", 1
         if self._backend == "pytorch" and self._model is None:
+            log.warning("identify() called but PyTorch model is None — returning Speaker 1")
             return "Speaker 1", 1
         if self._backend == "onnx" and self._onnx_embedder is None:
+            log.warning("identify() called but ONNX embedder is None — returning Speaker 1")
             return "Speaker 1", 1
 
         # Ensure mono float32
@@ -598,6 +601,7 @@ class DiarizationEngine:
         Falls back to single identify() when audio is too short for SCD.
         """
         if not self._loaded:
+            log.warning("identify_segments() called but model not loaded — returning Speaker 1")
             return [("Speaker 1", 1, 0, len(audio))]
 
         # Ensure mono float32

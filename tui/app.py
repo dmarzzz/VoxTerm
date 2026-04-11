@@ -940,8 +940,11 @@ class VoxTerm(App):
 
     @work(thread=True, group="transcription")
     def _transcribe_audio(self, audio: np.ndarray, local_audio: np.ndarray | None = None):
-        # Use local-only audio for diarization to avoid peer audio corrupting embeddings
-        diarize_audio = local_audio if local_audio is not None and len(local_audio) > 0 else audio
+        # Use local-only audio for diarization to avoid peer audio corrupting embeddings.
+        # If local_audio is unavailable (party mode with no local capture), we cannot
+        # diarize reliably — merged mono audio makes all speakers look identical.
+        has_local_audio = local_audio is not None and len(local_audio) > 0
+        diarize_audio = local_audio if has_local_audio else audio
         try:
             if self._debug:
                 duration = len(audio) / SAMPLE_RATE
@@ -969,10 +972,13 @@ class VoxTerm(App):
             is_overlap = False
             if text and self._diarizer_loaded:
                 try:
+                    # Skip diarization if we only have merged party audio —
+                    # mono blend makes all speakers look identical
+                    if not has_local_audio and local_audio is not None:
+                        speaker_label, speaker_id = "Speaker 1", 1
+                        segments = [("Speaker 1", 1, 0, len(diarize_audio))]
                     # Use speaker-change detection for buffers >= 3s
-                    # Diarize on local-only audio to prevent peer audio from
-                    # corrupting speaker embeddings in P2P mode
-                    if len(diarize_audio) >= 48000:
+                    elif len(diarize_audio) >= 48000:
                         segments = self.diarizer.identify_segments(
                             diarize_audio.copy()
                         )

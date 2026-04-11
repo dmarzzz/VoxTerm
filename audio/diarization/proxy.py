@@ -434,5 +434,12 @@ class DiarizationProxy:
         try:
             self._engine.load()
             self._loaded = True
-        except Exception:
+            log.info("Diarization fallback to in-process mode succeeded")
+        except Exception as e:
             self._loaded = False
+            log.error(
+                "Diarization FAILED in all modes (direct, subprocess, inprocess): %s. "
+                "All speakers will be labeled 'Speaker 1'. "
+                "Check that the ONNX model exists at ~/.cache/3dspeaker/",
+                e,
+            )
