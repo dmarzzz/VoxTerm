@@ -105,6 +105,15 @@ from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILA
 
 from config import ConfigStore
 
+_log_path = Path.home() / "Documents" / "voxterm" / "voxterm.log"
+_log_path.parent.mkdir(parents=True, exist_ok=True)
+_root_log = logging.getLogger()
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(_log_path) for h in _root_log.handlers):
+    _fh = logging.FileHandler(_log_path, mode="a")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _root_log.addHandler(_fh)
+    _root_log.setLevel(logging.INFO)
+
 log = logging.getLogger(__name__)
 
 # Module-level config store instance (lazy init for import safety)
@@ -801,7 +810,22 @@ class VoxTerm(App):
             waveform.tick()
             return
 
-        for chunk in chunks:
+        # Build a mic-only stream aligned 1:1 with `chunks` so the
+        # diarizer sees only the local microphone, never the system-audio
+        # mix. _mix_chunks emits: n=min(len(mic),len(sys)) summed entries,
+        # then any mic tail, then any sys tail. Pad sys-only tail with
+        # silence so indices line up with `chunks`.
+        if sys_chunks:
+            n = min(len(mic_chunks), len(sys_chunks))
+            mic_only_chunks: list[np.ndarray] = list(mic_chunks[:n])
+            mic_only_chunks.extend(mic_chunks[n:])
+            for sc in sys_chunks[n:]:
+                mic_only_chunks.append(np.zeros_like(sc))
+        else:
+            mic_only_chunks = list(chunks)
+
+        for idx, chunk in enumerate(chunks):
+            mic_only_chunk = mic_only_chunks[idx]
             waveform.push_samples(chunk)
 
             # Speech detection: Silero VAD (neural) with RMS fallback
@@ -825,17 +849,17 @@ class VoxTerm(App):
                 for mc in merged_chunks:
                     if self._had_speech or is_speech:
                         self.audio_buffer.append(mc)
-                # Keep local-only audio for diarization (peer audio corrupts embeddings)
+                # Diarizer sees raw mic only — never system audio or peer audio,
+                # both of which acoustically blend speakers into one cluster.
                 if self._had_speech or is_speech:
-                    self._local_audio_buffer.append(chunk)
+                    self._local_audio_buffer.append(mic_only_chunk)
             else:
-                # No merger — original behavior
                 if is_speech:
                     self.audio_buffer.append(chunk)
-                    self._local_audio_buffer.append(chunk)
+                    self._local_audio_buffer.append(mic_only_chunk)
                 elif self._had_speech:
                     self.audio_buffer.append(chunk)
-                    self._local_audio_buffer.append(chunk)
+                    self._local_audio_buffer.append(mic_only_chunk)
 
         waveform.tick()
 
@@ -1019,6 +1043,9 @@ class VoxTerm(App):
                         self._try_cross_session_match(seg_sid)
 
                 except Exception as _diar_err:
+                    import traceback as _tb
+                    log.error("Diarizer exception: %s\n%s", _diar_err,
+                              "".join(_tb.format_exception(_diar_err)))
                     if self._debug:
                         self.call_from_thread(
                             self.query_one(TranscriptPanel).system_message,
@@ -1140,6 +1167,10 @@ class VoxTerm(App):
         self, text: str, speaker: str = "", speaker_id: int = 0,
         confidence: str = "", overlap: bool = False,
     ):
+        if not speaker:
+            import traceback
+            log.warning("Empty speaker label for text=%r, stack:\n%s",
+                        text[:80], "".join(traceback.format_stack()[-4:]))
         self.query_one(TranscriptPanel).add_transcript(
             text, speaker, speaker_id, confidence=confidence,
             overlap=overlap,

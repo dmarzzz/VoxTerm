@@ -126,12 +126,28 @@ class DiarizationEngine:
         self._loaded = True
 
     def _load_onnx(self) -> None:
-        """Load 3D-Speaker model via ONNX Runtime (no PyTorch)."""
+        """Load 3D-Speaker model via ONNX Runtime (no PyTorch).
+
+        Falls back to the vendored PyTorch CAM++ path if the ONNX
+        model is missing or unloadable. The published GitHub release
+        for eres2net_large ships only the graph half (.onnx) without
+        the external-weights sidecar (.onnx.data), so onnxruntime
+        raises on session init for any fresh install.
+        """
         from config import SPEAKER_MODEL_NAME
         from .onnx_embedder import OnnxSpeakerEmbedder
 
         self._onnx_embedder = OnnxSpeakerEmbedder(model_name=SPEAKER_MODEL_NAME)
-        self._onnx_embedder.load()
+        try:
+            self._onnx_embedder.load()
+        except Exception as e:
+            log.warning(
+                "ONNX embedder load failed (%s) — falling back to vendored "
+                "PyTorch CAM++ legacy backend.", e,
+            )
+            self._onnx_embedder = None
+            self._load_pytorch()
+            return
         self._backend = "onnx"
         log.info("Diarization engine using ONNX backend (%s)", SPEAKER_MODEL_NAME)
 
@@ -466,7 +482,8 @@ class DiarizationEngine:
 
         import torch
         feats_t = torch.tensor(feats, dtype=torch.float32).unsqueeze(0)
-        embedding = self._model(feats_t).squeeze().cpu().numpy()
+        with torch.no_grad():
+            embedding = self._model(feats_t).squeeze().cpu().detach().numpy()
         return embedding
 
     def _compute_fbank(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
@@ -529,7 +546,8 @@ class DiarizationEngine:
 
         import torch
         feats_t = torch.tensor(feats, dtype=torch.float32).unsqueeze(0)
-        embedding = self._model(feats_t).squeeze().cpu().numpy()
+        with torch.no_grad():
+            embedding = self._model(feats_t).squeeze().cpu().detach().numpy()
         return embedding
 
     def _extract_overlap_aware(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
