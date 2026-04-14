@@ -29,10 +29,8 @@ if sys.platform == "darwin":
     FASTER_WHISPER_MODELS: set[str] = set()
 elif sys.platform.startswith("linux"):
     # Linux: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
-    DEFAULT_MODEL = "qwen3-0.6b"
+    _HAS_QWEN_ASR = __import__("importlib.util", fromlist=["find_spec"]).find_spec("qwen_asr") is not None
     AVAILABLE_MODELS = {
-        "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
-        "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",
         "fw-tiny":           "tiny",
         "fw-base":           "base",
         "fw-small":          "small",
@@ -40,9 +38,13 @@ elif sys.platform.startswith("linux"):
         "fw-large-v3":       "large-v3",
         "fw-distil-large-v3": "distil-large-v3",
     }
-    QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
+    FASTER_WHISPER_MODELS = set(AVAILABLE_MODELS)
+    if _HAS_QWEN_ASR:
+        AVAILABLE_MODELS["qwen3-0.6b"] = "Qwen/Qwen3-ASR-0.6B"
+        AVAILABLE_MODELS["qwen3-1.7b"] = "Qwen/Qwen3-ASR-1.7B"
+    QWEN3_MODELS = set(AVAILABLE_MODELS) - FASTER_WHISPER_MODELS
+    DEFAULT_MODEL = "qwen3-0.6b" if _HAS_QWEN_ASR else "fw-small"
     WHISPER_MODEL = None
-    FASTER_WHISPER_MODELS = {"fw-tiny", "fw-base", "fw-small", "fw-medium", "fw-large-v3", "fw-distil-large-v3"}
 elif sys.platform == "win32":
     # Windows: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
     DEFAULT_MODEL = "qwen3-0.6b"
