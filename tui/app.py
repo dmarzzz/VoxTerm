@@ -1944,7 +1944,7 @@ class VoxTerm(App):
 
 
 
-if __name__ == "__main__":
+def main():
     import argparse
     import config as _config_mod
 
@@ -2093,8 +2093,6 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-
-
     # Prevent segfault: PortAudio/PyTorch/SpeechBrain C threads crash
     # during Python's shutdown when native objects are GC'd in random order.
     # atexit fires before finalizers; the finally block catches SystemExit.
@@ -2123,3 +2121,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         os._exit(0)
+
+
+if __name__ == "__main__":
+    main()
