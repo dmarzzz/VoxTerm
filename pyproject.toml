@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voxterm"
+version = "0.1.0"
+description = "Local real-time voice transcription TUI with speaker diarization"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=42.0.0",
+    "numpy>=2.0.0",
+    "onnxruntime>=1.16.0",
+    "scipy>=1.10.0",
+    "silero-vad>=5.1",
+    "sounddevice>=0.5.0",
+    "textual>=8.0.0",
+    "zeroconf>=0.131.0",
+    # macOS: MLX-based transcription
+    "mlx-qwen3-asr>=0.1.0; sys_platform == 'darwin'",
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
+    "rumps>=0.4.0; sys_platform == 'darwin'",
+    # Linux: PyTorch/faster-whisper transcription
+    "faster-whisper>=1.0.0; sys_platform == 'linux'",
+    "Pillow>=10.0.0; sys_platform == 'linux'",
+    "pystray>=0.19.0; sys_platform == 'linux'",
+    "python-xlib>=0.33; sys_platform == 'linux'",
+    "qwen-asr>=0.0.6; sys_platform == 'linux'",
+    "torch>=2.0.0; sys_platform == 'linux'",
+    # Windows: PyTorch/faster-whisper transcription
+    "faster-whisper>=1.0.0; sys_platform == 'win32'",
+    "Pillow>=10.0.0; sys_platform == 'win32'",
+    "pystray>=0.19.0; sys_platform == 'win32'",
+    "qwen-asr>=0.0.6; sys_platform == 'win32'",
+    "torch>=2.0.0; sys_platform == 'win32'",
+]
+
+[project.scripts]
+voxterm = "tui.app:main"
+voxterm-dictate = "dictation.app:main"
+
+[project.urls]
+Homepage = "https://github.com/dmarzzz/VoxTerm"
+Repository = "https://github.com/dmarzzz/VoxTerm"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "audio",
+    "config.py",
+    "diagnostics.py",
+    "dictation",
+    "network",
+    "tui",
+]
