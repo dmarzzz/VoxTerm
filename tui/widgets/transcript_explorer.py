@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
-import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -15,17 +13,7 @@ from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
-
-def _clipboard_cmd() -> list[str] | None:
-    if sys.platform == "darwin":
-        return ["pbcopy"]
-    if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard"]
-    if shutil.which("xsel"):
-        return ["xsel", "--clipboard", "--input"]
-    if shutil.which("wl-copy"):
-        return ["wl-copy"]
-    return None
+from tui.clipboard import clipboard_cmd
 
 
 class TranscriptExplorerScreen(ModalScreen):
@@ -158,17 +146,17 @@ class TranscriptExplorerScreen(ModalScreen):
                 self.dismiss({"error": "could not read transcript"})
                 return
 
-            cmd = _clipboard_cmd()
+            cmd = clipboard_cmd()
             if cmd is None:
-                self.dismiss({"error": "no clipboard tool found"})
+                self.dismiss({"error": "no clipboard tool found (install xclip, xsel, or wl-copy)"})
                 return
 
             try:
                 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
                 proc.communicate(content.encode("utf-8"))
                 self.dismiss({"copied": path.stem})
-            except Exception:
-                self.dismiss({"error": "clipboard copy failed"})
+            except Exception as e:
+                self.dismiss({"error": f"clipboard copy failed: {e}"})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
