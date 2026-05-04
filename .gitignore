@@ -16,6 +16,7 @@ __pycache__/
 !README.md
 !CHANGELOG.md
 !docs/**/*.md
+!AGENTS.md
 
 # Session state and crash dumps
 .crashes/

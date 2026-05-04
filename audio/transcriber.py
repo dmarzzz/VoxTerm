@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import io
 import json
+import queue
 import re
 import struct
+import threading
 import urllib.request
 import urllib.error
 
@@ -95,6 +97,77 @@ _ISO_TO_LANG = {
 }
 
 
+class _MlxQwenWorker:
+    """Owns all MLX Qwen model work on one thread.
+
+    MLX streams are thread-local. Loading a model on one Python thread and then
+    sampling from it on a different Textual worker can raise
+    ``RuntimeError: There is no Stream(gpu, N) in current thread``. Keeping load
+    and inference on this worker avoids crossing those stream boundaries.
+    """
+
+    def __init__(self, model_id: str):
+        self._model_id = model_id
+        self._jobs: queue.Queue[tuple[str, tuple, dict, threading.Event, dict]] = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="mlx-qwen3-asr",
+        )
+        self._thread.start()
+
+    def load(self) -> None:
+        self._call("load")
+
+    def transcribe(self, audio: np.ndarray, language: str | None) -> str:
+        return self._call("transcribe", audio, language)
+
+    def _call(self, op: str, *args):
+        done = threading.Event()
+        result: dict = {}
+        self._jobs.put((op, args, {}, done, result))
+        done.wait()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _run(self) -> None:
+        model = None
+        load_model = None
+        transcribe = None
+        while True:
+            op, args, _kwargs, done, result = self._jobs.get()
+            try:
+                if load_model is None or transcribe is None:
+                    from mlx_qwen3_asr import load_model as _load_model
+                    from mlx_qwen3_asr import transcribe as _transcribe
+
+                    load_model = _load_model
+                    transcribe = _transcribe
+
+                if op == "load":
+                    if model is None:
+                        model, _config = load_model(self._model_id)
+                    result["value"] = None
+                elif op == "transcribe":
+                    if model is None:
+                        model, _config = load_model(self._model_id)
+                    audio, language = args
+                    output = transcribe(
+                        audio,
+                        model=model,
+                        language=language,
+                        verbose=False,
+                    )
+                    result["value"] = str(output.text).strip() if hasattr(output, "text") else ""
+                else:
+                    raise RuntimeError(f"unknown MLX worker operation: {op}")
+            except BaseException as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+
 class Qwen3Transcriber(_DeduplicatorMixin):
     """Qwen3-ASR transcriber — MLX on macOS, qwen-asr (PyTorch) on Linux."""
 
@@ -102,6 +175,7 @@ class Qwen3Transcriber(_DeduplicatorMixin):
         self.model_id = model
         self._language = language
         self._model = None
+        self._mlx_worker: _MlxQwenWorker | None = None
         self._loaded = False
         self._use_mlx = CURRENT_PLATFORM == Platform.MACOS
         self._init_dedup()
@@ -109,9 +183,8 @@ class Qwen3Transcriber(_DeduplicatorMixin):
     def load(self):
         """Pre-load the model (downloads on first run)."""
         if self._use_mlx:
-            from mlx_qwen3_asr import load_model
-            model, _config = load_model(self.model_id)
-            self._model = model
+            self._mlx_worker = _MlxQwenWorker(self.model_id)
+            self._mlx_worker.load()
         else:
             from qwen_asr import Qwen3ASRModel
             import torch
@@ -136,14 +209,9 @@ class Qwen3Transcriber(_DeduplicatorMixin):
             return {"text": "", "speaker": "", "speaker_id": 0}
 
         if self._use_mlx:
-            from mlx_qwen3_asr import transcribe
-            result = transcribe(
-                audio,
-                model=self._model if self._model else self.model_id,
-                language=self._language,
-                verbose=False,
-            )
-            text = str(result.text).strip() if hasattr(result, 'text') else ""
+            if self._mlx_worker is None:
+                self._mlx_worker = _MlxQwenWorker(self.model_id)
+            text = self._mlx_worker.transcribe(audio, self._language)
         else:
             lang = _ISO_TO_LANG.get(self._language, self._language) if self._language else None
             results = self._model.transcribe(
