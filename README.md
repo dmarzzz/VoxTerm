@@ -29,6 +29,27 @@ Then run:
 voxterm
 ```
 
+For full-screen ShaderClaw transcript visuals:
+
+```bash
+voxterm --display
+```
+
+Display mode is optional and uses a local ShaderClaw checkout. Install it once:
+
+```bash
+cd ~
+git clone https://github.com/G3993/ShaderClaw3.git shader-claw3
+cd shader-claw3
+npm install
+```
+
+VoxTerm auto-detects `~/shader-claw3` or a sibling `../shader-claw3` checkout. If ShaderClaw lives somewhere else:
+
+```bash
+export VOXTERM_SHADERCLAW_DIR=/path/to/shader-claw3
+```
+
 Requires macOS with Apple Silicon (M1+) and Python 3.9+. Models download automatically on first use.
 
 <details>
@@ -53,6 +74,7 @@ python3 -m tui.app
 | `N` | Party mode — join or leave P2P sessions |
 | `T` | Tag/name speakers |
 | `P` | Speaker profiles |
+| `X` | Open ShaderClaw display mode |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
