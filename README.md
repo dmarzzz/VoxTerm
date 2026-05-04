@@ -31,6 +31,27 @@ voxterm
 
 Runs on macOS and Linux, Python 3.12+. Apple Silicon Macs use MLX models; Intel Macs and Linux use the CPU-compatible faster-whisper / Qwen3-ASR (PyTorch) backends. Models download automatically on first use.
 
+Optional full-screen ShaderClaw transcript visuals:
+
+```bash
+voxterm --display
+```
+
+Display mode uses a local ShaderClaw checkout. Install it once:
+
+```bash
+cd ~
+git clone https://github.com/G3993/ShaderClaw3.git shader-claw3
+cd shader-claw3
+npm install
+```
+
+VoxTerm auto-detects `~/shader-claw3` or a sibling `../shader-claw3` checkout. If ShaderClaw lives somewhere else:
+
+```bash
+export VOXTERM_SHADERCLAW_DIR=/path/to/shader-claw3
+```
+
 <details>
 <summary>Manual setup (for developers)</summary>
 
@@ -53,6 +74,8 @@ python3 -m tui.app
 | `N` | Party mode — join or leave P2P sessions |
 | `T` | Tag/name speakers |
 | `P` | Speaker profiles |
+| `G` | Launch web GUI |
+| `Shift+G` | Open ShaderClaw display mode |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
