@@ -34,6 +34,8 @@ from config import (
     DEFAULT_MODEL,
     FASTER_WHISPER_MODELS,
     QWEN3_MODELS,
+    SPECTROGRAM_MODELS,
+    LLAMA_SERVER_URL,
 )
 
 logging.basicConfig(
@@ -92,13 +94,19 @@ def _load_transcriber(model_name: str, model_repo: str, language: str):
     from audio.transcriber import (
         FasterWhisperTranscriber,
         Qwen3Transcriber,
+        SpectrogramTranscriber,
         WhisperTranscriber,
     )
 
     print(f"VOXTERM DICTATION // loading model ({model_name}) lang={language}...")
     print("(first run downloads the model, please wait)\n")
 
-    if model_name in QWEN3_MODELS:
+    if model_name in SPECTROGRAM_MODELS:
+        server_url = LLAMA_SERVER_URL or "http://localhost:8080"
+        transcriber = SpectrogramTranscriber(
+            server_url=server_url, model=model_repo, language=language,
+        )
+    elif model_name in QWEN3_MODELS:
         transcriber = Qwen3Transcriber(model=model_repo, language=language)
     elif model_name in FASTER_WHISPER_MODELS:
         transcriber = FasterWhisperTranscriber(model=model_repo, language=language)

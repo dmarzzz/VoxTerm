@@ -23,8 +23,10 @@ if sys.platform == "darwin":
         "large-v3":    "mlx-community/whisper-large-v3-mlx",
         "turbo":       "mlx-community/whisper-large-v3-turbo",
         "distil-v3":   "distil-whisper/distil-large-v3",
+        "spec-3.5":    "qwen2.5-vl-3b",
     }
     QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
+    SPECTROGRAM_MODELS: set[str] = {"spec-3.5"}
     WHISPER_MODEL = "mlx-community/whisper-small-mlx"
     FASTER_WHISPER_MODELS: set[str] = set()
 elif sys.platform.startswith("linux"):
@@ -57,8 +59,10 @@ elif sys.platform == "win32":
         "fw-medium":         "medium",
         "fw-large-v3":       "large-v3",
         "fw-distil-large-v3": "distil-large-v3",
+        "spec-3.5":            "qwen2.5-vl-3b",
     }
     QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
+    SPECTROGRAM_MODELS: set[str] = {"spec-3.5"}
     WHISPER_MODEL = None
     FASTER_WHISPER_MODELS = {"fw-tiny", "fw-base", "fw-small", "fw-medium", "fw-large-v3", "fw-distil-large-v3"}
 else:

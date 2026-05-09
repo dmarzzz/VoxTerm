@@ -70,7 +70,7 @@ from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
 from audio.transcriber import (
     Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber,
-    LlamaServerTranscriber, discover_llama_audio_models,
+    LlamaServerTranscriber, SpectrogramTranscriber, discover_llama_audio_models,
 )
 from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
@@ -79,7 +79,7 @@ from config import (
     SAMPLE_RATE, CHUNK_SIZE, WAVEFORM_FPS,
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
     MAX_BUFFER_SECONDS, MIN_BUFFER_SECONDS,
-    DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS,
+    DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS, SPECTROGRAM_MODELS,
     DEFAULT_LANGUAGE, AVAILABLE_LANGUAGES,
     LIVE_DIR,
     LLAMA_SERVER_URL, LLAMA_SERVER_MODEL, LLAMA_SERVER_MODELS,
@@ -1353,7 +1353,12 @@ class VoxTerm(App):
                         _posixsubprocess._vt_patched = True
 
                 model_repo = AVAILABLE_MODELS[self._model_name]
-                if self._model_name in LLAMA_SERVER_MODELS:
+                if self._model_name in SPECTROGRAM_MODELS:
+                    server_url = LLAMA_SERVER_URL or "http://localhost:8080"
+                    self.transcriber = SpectrogramTranscriber(
+                        server_url=server_url, model=model_repo, language=self._language,
+                    )
+                elif self._model_name in LLAMA_SERVER_MODELS:
                     server_url = LLAMA_SERVER_URL
                     self.transcriber = LlamaServerTranscriber(
                         server_url=server_url, model=model_repo, language=self._language,
@@ -1722,7 +1727,13 @@ class VoxTerm(App):
     def _do_swap(self, model_key: str):
         repo = AVAILABLE_MODELS[model_key]
         try:
-            if model_key in LLAMA_SERVER_MODELS:
+            if model_key in SPECTROGRAM_MODELS:
+                cfg = _get_config()
+                server_url = cfg.get("llama_server_url") or LLAMA_SERVER_URL or "http://localhost:8080"
+                new_transcriber = SpectrogramTranscriber(
+                    server_url=server_url, model=repo, language=self._language,
+                )
+            elif model_key in LLAMA_SERVER_MODELS:
                 cfg = _get_config()
                 server_url = cfg.get("llama_server_url") or LLAMA_SERVER_URL
                 new_transcriber = LlamaServerTranscriber(

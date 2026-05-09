@@ -343,6 +343,182 @@ def discover_llama_audio_models(server_url: str) -> list[str] | None:
     return audio_models
 
 
+def _audio_to_spectrogram_base64(audio: np.ndarray, sample_rate: int = 16000,
+                                   n_fft: int = 1024, hop_length: int = 256,
+                                   n_mels: int = 128) -> str:
+    """Convert float32 audio to a mel spectrogram PNG image, returned as base64.
+
+    Uses pure numpy + scipy for the STFT and mel filterbank — no librosa needed.
+    The resulting image is a grayscale PNG with time on the x-axis and frequency
+    on the y-axis (low frequencies at the bottom).
+    """
+    # Pad audio to at least one full FFT frame
+    if len(audio) < n_fft:
+        audio = np.pad(audio, (0, n_fft - len(audio)))
+
+    # ── STFT via scipy ──────────────────────────────────────────
+    from scipy.signal import stft as scipy_stft
+    _freqs, _times, Zxx = scipy_stft(
+        audio, fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop_length,
+        boundary=None, padded=False,
+    )
+    magnitude = np.abs(Zxx)  # (n_fft//2+1, time_frames)
+
+    # ── Mel filterbank (numpy) ──────────────────────────────────
+    n_freqs = magnitude.shape[0]
+    fmin, fmax = 0.0, sample_rate / 2.0
+
+    def _hz_to_mel(hz):
+        return 2595.0 * np.log10(1.0 + hz / 700.0)
+
+    def _mel_to_hz(mel):
+        return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+    mel_min = _hz_to_mel(fmin)
+    mel_max = _hz_to_mel(fmax)
+    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
+    hz_points = _mel_to_hz(mel_points)
+    fft_freqs = np.linspace(0, sample_rate / 2.0, n_freqs)
+
+    filterbank = np.zeros((n_mels, n_freqs))
+    for i in range(n_mels):
+        lo, mid, hi = hz_points[i], hz_points[i + 1], hz_points[i + 2]
+        for j, f in enumerate(fft_freqs):
+            if lo <= f <= mid and mid > lo:
+                filterbank[i, j] = (f - lo) / (mid - lo)
+            elif mid < f <= hi and hi > mid:
+                filterbank[i, j] = (hi - f) / (hi - mid)
+
+    # ── Mel spectrogram in dB ───────────────────────────────────
+    mel_spec = filterbank @ magnitude  # (n_mels, time_frames)
+    mel_spec_db = 10.0 * np.log10(np.maximum(mel_spec, 1e-10))
+
+    # Normalize to 0–255 for image
+    db_min, db_max = mel_spec_db.min(), mel_spec_db.max()
+    if db_max - db_min > 0:
+        mel_norm = (mel_spec_db - db_min) / (db_max - db_min)
+    else:
+        mel_norm = np.zeros_like(mel_spec_db)
+
+    # Flip vertically so low frequencies are at the bottom
+    img_array = np.flipud((mel_norm * 255).astype(np.uint8))
+
+    # ── Encode as PNG ───────────────────────────────────────────
+    import zlib
+
+    height, width = img_array.shape
+
+    def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+        chunk = chunk_type + data
+        return struct.pack(">I", len(data)) + chunk + struct.pack(">I", zlib.crc32(chunk) & 0xFFFFFFFF)
+
+    raw_rows = b""
+    for row in img_array:
+        raw_rows += b"\x00" + row.tobytes()
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+    png += _png_chunk(b"IDAT", zlib.compress(raw_rows))
+    png += _png_chunk(b"IEND", b"")
+
+    return base64.b64encode(png).decode("ascii")
+
+
+class SpectrogramTranscriber(_DeduplicatorMixin):
+    """Transcriber that converts audio to mel spectrogram images and sends them
+    to a multimodal vision model (e.g. Qwen2.5-VL, Qwen3.5-VL) via a
+    llama-swap/llama.cpp server's /v1/chat/completions endpoint.
+
+    The model "reads" the spectrogram and produces a transcription.
+    """
+
+    def __init__(self, server_url: str = "http://localhost:8080",
+                 model: str = "", language: str | None = "en"):
+        self.server_url = server_url.rstrip("/")
+        self.model = model
+        self._language = language
+        self._loaded = False
+        self._init_dedup()
+
+    def load(self):
+        """Verify the llama.cpp server is reachable."""
+        try:
+            req = urllib.request.Request(f"{self.server_url}/health", method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except Exception as e:
+            raise ConnectionError(f"Cannot reach llama server at {self.server_url}: {e}")
+        self._loaded = True
+
+    def transcribe(self, audio: np.ndarray, **kwargs) -> dict:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        spectrogram_b64 = _audio_to_spectrogram_base64(audio)
+
+        lang_hint = ""
+        if self._language:
+            from config import AVAILABLE_LANGUAGES
+            lang_name = AVAILABLE_LANGUAGES.get(self._language, self._language)
+            lang_hint = f" The speech is in {lang_name}."
+
+        prompt_text = (
+            "This is a mel spectrogram of human speech. The x-axis is time and the "
+            "y-axis is frequency (low at bottom, high at top). Transcribe the spoken "
+            "words exactly as said. Output ONLY the transcription text, nothing else. "
+            "Do not describe the image or add commentary."
+            f"{lang_hint}"
+        )
+
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{spectrogram_b64}",
+                        },
+                    },
+                ],
+            }],
+            "temperature": 0.1,
+            "max_tokens": 512,
+        }
+        if self.model:
+            payload["model"] = self.model
+        endpoint = f"{self.server_url}/v1/chat/completions"
+
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.URLError as e:
+            raise ConnectionError(f"Llama server request failed: {e}") from e
+
+        text = ((result.get("choices") or [{}])[0]
+                .get("message", {}).get("content", "")).strip()
+
+        if _is_hallucination(text, self._language):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        if self._is_duplicate(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        return {"text": text, "speaker": "", "speaker_id": 0}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
 class LlamaServerTranscriber(_DeduplicatorMixin):
     """Transcriber that delegates to a llama-swap/llama.cpp server via /v1/chat/completions.
 
