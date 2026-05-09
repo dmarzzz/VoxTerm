@@ -154,6 +154,26 @@ def main() -> None:
         action="store_true",
         help="List available models and exit",
     )
+    parser.add_argument(
+        "--hivemind",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Hivemind transcript-sink mode (default: auto).",
+    )
+    parser.add_argument(
+        "--hivemind-sink-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Skip mDNS discovery and POST to this swf-node hivemind sink.",
+    )
+    parser.add_argument(
+        "--hivemind-location",
+        type=str,
+        default="",
+        metavar="LABEL",
+        help="Optional location tag attached to every transcript batch.",
+    )
     args = parser.parse_args()
 
     if args.list_models:
@@ -192,10 +212,33 @@ def main() -> None:
         language=args.language,
     )
 
+    # Configure hivemind transcript sink (spec §4.3 in
+    # SHAPE-ROTATOR-OS-SPEC.md). Returns None when --hivemind=off or
+    # when AUTO mode finds no sink; the dictation loop handles None.
+    hivemind_client = None
+    try:
+        from network.hivemind import HivemindMode, configure as _hivemind_configure
+        hivemind_client = _hivemind_configure(
+            mode=HivemindMode.parse(args.hivemind),
+            sink_url=args.hivemind_sink_url,
+            location=args.hivemind_location,
+        )
+        if hivemind_client is not None:
+            sink = hivemind_client.active_sink()
+            if sink is not None:
+                log.info("hivemind sink: %s", sink.transcripts_url)
+    except RuntimeError as exc:
+        # mode=on with nothing discovered — fail loudly.
+        print(f"VOXTERM DICTATION // hivemind error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except Exception:
+        log.warning("hivemind configure failed", exc_info=True)
+
     loop = DictationLoop(
         transcriber=transcriber,
         injector=injector,
         on_state_change=indicator.set_state,
+        hivemind_client=hivemind_client,
     )
 
     def toggle_dictation():
@@ -211,6 +254,11 @@ def main() -> None:
         loop.stop()
         hotkey.stop()
         indicator.stop()
+        if hivemind_client is not None:
+            try:
+                hivemind_client.close()
+            except Exception:
+                log.warning("hivemind close failed", exc_info=True)
 
     indicator._on_quit = quit_all
 

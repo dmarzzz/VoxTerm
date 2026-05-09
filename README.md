@@ -75,6 +75,40 @@ Multiple people in the same room can share transcripts over the local network. E
 
 See [docs/party-mode-design.md](docs/party-mode-design.md) for the full design.
 
+## Hivemind mode (transcript streaming to swf-node)
+
+Voxterm can stream transcript batches to a "convent box" running
+`swf-node --full --hivemind-sink`. The sink wraps each batch in a
+signed bundle and propagates it on the LAN.
+
+By default voxterm auto-discovers sinks via mDNS. To override:
+```
+voxterm --hivemind-sink-url=http://convent.local:7777
+```
+
+Or disable entirely:
+```
+voxterm --hivemind=off
+```
+
+Mode flag: `--hivemind=auto|on|off`
+- `auto` (default): mDNS-discover; fall back to local logging only.
+- `on`: require a sink (fails to start if discovery times out after 5s).
+- `off`: never POST; everything stays local.
+
+Your voxterm device gets a persistent UUID stored at
+`~/Library/Application Support/voxterm/device_id` (macOS) or
+`~/.config/voxterm/device_id` (Linux); it appears in every batch as
+`origin_device`. (It is a stable identifier, not a cryptographic
+identity — the convent sink signs the bundle.)
+
+Cadence: voxterm flushes a batch every ~60s, every 30 segments, or on
+exit, whichever comes first. Batches POST to
+`<sink>/hivemind/transcripts` per spec §4.3.
+
+See `SHAPE-ROTATOR-OS-SPEC.md` §3.5 and §4.3 in
+`shape-rotator-wrld-knwldge-viz` for the wire format.
+
 ## Voice Tagging
 
 VoxTerm learns and remembers speaker voices across sessions:

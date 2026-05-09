@@ -254,6 +254,12 @@ _DEFAULTS: dict[str, Any] = {
     "summarization_model": "",
     "summarization_strength": "medium",
     "p2p_display_name": "",
+    # Hivemind transcript-sink (spec §4.3 of SHAPE-ROTATOR-OS-SPEC.md).
+    # `hivemind_mode` is one of "auto" | "on" | "off"; when set on the
+    # CLI it persists so the next launch picks the same default.
+    "hivemind_mode": "auto",
+    "hivemind_sink_url": "",
+    "hivemind_location": "",
 }
 
 # Expected types per key (for validation)
@@ -265,6 +271,9 @@ _TYPES: dict[str, type] = {
     "summarization_model": str,
     "summarization_strength": str,
     "p2p_display_name": str,
+    "hivemind_mode": str,
+    "hivemind_sink_url": str,
+    "hivemind_location": str,
 }
 
 
