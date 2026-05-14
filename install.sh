@@ -160,7 +160,14 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip 2>/dev/null
-"$VENV_DIR/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
+    "$VENV_DIR/bin/pip" install --quiet -e "$INSTALL_DIR"
+elif [ -f "$INSTALL_DIR/requirements.txt" ]; then
+    "$VENV_DIR/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+else
+    err "neither pyproject.toml nor requirements.txt found in $INSTALL_DIR"
+    exit 1
+fi
 
 done_ "dependencies installed"
 
@@ -174,6 +181,31 @@ mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/voxterm" << 'LAUNCHER'
 #!/bin/bash
 INSTALL_DIR="$HOME/.local/share/voxterm"
+INSTALL_URL="https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh"
+
+case "${1:-}" in
+    update)
+        shift
+        if [ $# -gt 0 ]; then
+            # voxterm update <version>  → pin to a specific tag
+            exec bash -c "curl -fsSL '$INSTALL_URL' | bash -s -- --version '$1'"
+        else
+            exec bash -c "curl -fsSL '$INSTALL_URL' | bash"
+        fi
+        ;;
+    uninstall)
+        exec bash -c "curl -fsSL '$INSTALL_URL' | bash -s -- --uninstall"
+        ;;
+    version|-V)
+        if [ -f "$INSTALL_DIR/.installed-version" ]; then
+            cat "$INSTALL_DIR/.installed-version"
+        else
+            echo "unknown"
+        fi
+        exit 0
+        ;;
+esac
+
 cd "$INSTALL_DIR"
 export PYTHONWARNINGS="ignore::UserWarning"
 "$INSTALL_DIR/.venv/bin/python" -m tui.app "$@"
@@ -201,7 +233,8 @@ echo ""
 echo -e "${GREEN}${BOLD}voxterm $REQUESTED_VERSION installed!${RESET}"
 echo ""
 echo "  run it:      voxterm"
-echo "  update:      curl -fsSL $REPO_URL/raw/main/install.sh | bash"
-echo "  uninstall:   curl -fsSL $REPO_URL/raw/main/install.sh | bash -s -- --uninstall"
-echo "  pin version: curl -fsSL $REPO_URL/raw/main/install.sh | bash -s -- --version v0.1.0"
+echo "  update:      voxterm update"
+echo "  uninstall:   voxterm uninstall"
+echo "  pin version: voxterm update v0.1.0"
+echo "  show version: voxterm version"
 echo ""
