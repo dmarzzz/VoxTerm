@@ -78,6 +78,12 @@ def _make_client(
     location: str = "",
     record_id: str | None = "transcript-test",
     mode: HivemindMode = HivemindMode.AUTO,
+    # The push gate defaults to False in production (user opts in via
+    # the `h` menu); the happy-path tests below want push enabled so
+    # the helper opts in by default. Tests that exercise the gate
+    # itself can override.
+    push_enabled: bool = True,
+    pinned_sink_pubkey: str = "",
 ) -> tuple[HivemindClient, _CapturingPoster, _FakeClock]:
     poster = poster or _CapturingPoster()
     clock = clock or _FakeClock()
@@ -91,6 +97,8 @@ def _make_client(
         mode=mode,
         flush_seconds=flush_seconds,
         flush_segments=flush_segments,
+        push_enabled=push_enabled,
+        pinned_sink_pubkey=pinned_sink_pubkey,
         clock=clock,
         poster=poster,
     )
@@ -256,6 +264,7 @@ def test_post_batch_to_sink(http_capture):
         location="test-room",
         sink=sink,
         mode=HivemindMode.AUTO,
+        push_enabled=True,
     )
 
     client.add_segment(0.0, "alice", "hello")
@@ -403,6 +412,7 @@ def test_origin_device_in_payload(tmp_path):
         record_id="transcript-x",
         sink=sink,
         poster=poster,
+        push_enabled=True,
     )
     client.add_segment(0.0, "alice", "hi")
     client.flush_now()
@@ -421,6 +431,7 @@ def test_no_sink_logs_and_drops(caplog):
         sink=None,
         browser=None,
         mode=HivemindMode.AUTO,
+        push_enabled=True,
         poster=poster,
     )
 
@@ -550,3 +561,99 @@ def test_batch_index_monotonic_across_flushes():
     client.close()
     indexes = [call[1]["batch_index"] for call in poster.calls]
     assert indexes == [0, 1, 2]
+
+
+# ── push gate (h-menu opt-in) ──────────────────────────────────────────
+
+
+def test_push_disabled_drops_silently_and_logs_once(caplog):
+    """Default behavior: push_enabled=False means buffered segments
+    don't POST. The first drop logs INFO; subsequent drops at DEBUG."""
+    client, poster, _ = _make_client(push_enabled=False)
+
+    with caplog.at_level("INFO", logger="voxterm.hivemind"):
+        client.add_segment(0.0, "alice", "ghost")
+        flushed_a = client.flush_now()
+        client.add_segment(0.0, "alice", "another")
+        flushed_b = client.flush_now()
+
+    assert flushed_a is False
+    assert flushed_b is False
+    assert poster.calls == []
+    info_recs = [r for r in caplog.records if "push not enabled" in r.message]
+    assert len(info_recs) == 1
+
+
+def test_enable_push_fires_state_change_callback():
+    """The TUI registers a callback so it can persist toggles."""
+    saved: list[tuple[bool, str]] = []
+    client = HivemindClient(
+        device_id="55555555-5555-4555-8555-555555555555",
+        sink=Sink(host="127.0.0.1", port=7777, pubkey="ed25519:abc123"),
+        push_enabled=False,
+        on_state_change=lambda enabled, pubkey: saved.append((enabled, pubkey)),
+    )
+    client.enable_push(sink_pubkey="ed25519:abc123")
+    assert client.push_enabled is True
+    assert client.pinned_sink_pubkey == "ed25519:abc123"
+    assert saved == [(True, "ed25519:abc123")]
+
+    # Idempotent re-enable: no extra callback fire.
+    client.enable_push(sink_pubkey="ed25519:abc123")
+    assert saved == [(True, "ed25519:abc123")]
+
+    client.disable_push()
+    assert client.push_enabled is False
+    assert saved == [(True, "ed25519:abc123"), (False, "ed25519:abc123")]
+
+
+def test_pinned_pubkey_mismatch_drops_batch():
+    """A discovered sink with the wrong pubkey shouldn't get our
+    transcripts even if push is enabled."""
+    poster = _CapturingPoster()
+    client = HivemindClient(
+        device_id="66666666-6666-4666-8666-666666666666",
+        sink=Sink(host="127.0.0.1", port=7777, pubkey="ed25519:wrong"),
+        push_enabled=True,
+        pinned_sink_pubkey="ed25519:right",
+        poster=poster,
+    )
+    client.add_segment(0.0, "alice", "hi")
+    assert client.flush_now() is False
+    assert poster.calls == []
+    assert client.batches_dropped == 1
+
+
+def test_configure_auto_with_explicit_url_force_enables_push(tmp_path):
+    """If the user passed --hivemind-sink-url, they obviously want
+    push regardless of persisted opt-in."""
+    client = configure(
+        mode=HivemindMode.AUTO,
+        sink_url="http://127.0.0.1:7777",
+        device_id_path=tmp_path / "device_id",
+        push_enabled=False,  # persisted "no"
+    )
+    try:
+        assert client is not None
+        assert client.push_enabled is True
+    finally:
+        if client is not None:
+            client.close()
+
+
+def test_configure_auto_respects_persisted_push_enabled(tmp_path):
+    """auto mode + persisted push_enabled=True → push on from boot."""
+    client = configure(
+        mode=HivemindMode.AUTO,
+        sink_url="http://127.0.0.1:7777",
+        device_id_path=tmp_path / "device_id",
+        push_enabled=True,
+        pinned_sink_pubkey="ed25519:abc",
+    )
+    try:
+        assert client is not None
+        assert client.push_enabled is True
+        assert client.pinned_sink_pubkey == "ed25519:abc"
+    finally:
+        if client is not None:
+            client.close()

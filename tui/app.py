@@ -482,6 +482,7 @@ class VoxTerm(App):
         Binding("e", "explore_transcripts", "History"),
         Binding("p", "toggle_party", "Party"),
         Binding("v", "toggle_merged_view", "View"),
+        Binding("h", "show_hivemind", "Hivemind"),
         Binding("?", "show_help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", show=False),
@@ -1998,6 +1999,14 @@ class VoxTerm(App):
     def action_show_help(self):
         self.push_screen(HelpScreen())
 
+    def action_show_hivemind(self):
+        """Open the hivemind discovery + opt-in menu."""
+        try:
+            from tui.widgets.hivemind_screen import HivemindScreen
+            self.push_screen(HivemindScreen(self._hivemind))
+        except Exception:
+            log.warning("could not open hivemind screen", exc_info=True)
+
     def action_toggle_debug(self):
         self._debug = not self._debug
         state = "ON" if self._debug else "OFF"
@@ -2288,15 +2297,42 @@ def main():
                 f"VOXTERM // hivemind: searching for sink on "
                 f"{HIVEMIND_SERVICE_TYPE} (mDNS, mode={_hm_mode.value})..."
             )
+
+        # Read the user's persisted opt-in state. configure() folds
+        # this in so a returning user gets push enabled automatically
+        # without having to re-toggle every launch.
+        _persisted_push_enabled = bool(_cfg.get("hivemind_push_enabled") or False)
+        _persisted_pinned_pubkey = str(_cfg.get("hivemind_pinned_sink_pubkey") or "")
+
+        def _on_hivemind_state_change(enabled: bool, pubkey: str) -> None:
+            """Save the user's `h`-menu toggle to ConfigStore."""
+            try:
+                _cfg.update({
+                    "hivemind_push_enabled": bool(enabled),
+                    "hivemind_pinned_sink_pubkey": str(pubkey or ""),
+                })
+            except Exception:
+                log.warning("hivemind state persist failed", exc_info=True)
+
         hivemind_client = _hivemind_configure(
             mode=_hm_mode,
             sink_url=args.hivemind_sink_url,
             location=args.hivemind_location,
+            push_enabled=_persisted_push_enabled,
+            pinned_sink_pubkey=_persisted_pinned_pubkey,
+            on_state_change=_on_hivemind_state_change,
         )
         if hivemind_client is not None:
             sink = hivemind_client.active_sink()
+            push_on = hivemind_client.push_enabled
+            push_state = (
+                "[pushing]" if push_on else "[not pushing — press 'h' to enable]"
+            )
             if sink is not None:
-                print(f"VOXTERM // hivemind sink: {sink.transcripts_url}")
+                print(
+                    f"VOXTERM // hivemind sink: {sink.transcripts_url} "
+                    f"{push_state}"
+                )
             else:
                 print(
                     "VOXTERM // hivemind: no sink yet (auto-discovery still "
