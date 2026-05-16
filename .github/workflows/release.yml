@@ -50,14 +50,21 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # Attach install.sh as a release asset. The embedded voxterm
+          # launcher fetches `releases/latest/download/install.sh` (see
+          # PR #124), so every release MUST upload this file or
+          # `voxterm update` 404s on the next launch. Auto-attaching
+          # here removes the manual `gh release upload` step.
+          files: |
+            install.sh
           body: |
             ## Install
 
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh | bash
+            curl -fsSL https://github.com/dmarzzz/VoxTerm/releases/latest/download/install.sh | bash
             ```
 
             Or install this specific version:
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh | bash -s -- --version ${{ steps.version.outputs.version }}
+            curl -fsSL https://github.com/dmarzzz/VoxTerm/releases/download/${{ steps.version.outputs.version }}/install.sh | bash
             ```
