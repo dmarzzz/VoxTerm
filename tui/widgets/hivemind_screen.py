@@ -195,6 +195,31 @@ class HivemindScreen(ModalScreen):
         # disable. Otherwise enable (and pin to this sink).
         if self._client.push_enabled and self._client.pinned_sink_pubkey == target.pubkey:
             self._client.disable_push()
+            self._announce(f"hivemind: disconnected from {target.transcripts_url}")
         else:
             self._client.enable_push(sink_pubkey=target.pubkey)
+            self._announce(f"hivemind: connected to {target.transcripts_url}")
         self._refresh_view()
+
+    def _announce(self, msg: str) -> None:
+        """Surface a hivemind state change in the TUI itself.
+
+        Two channels:
+          - ``self.app.notify`` for a toast that floats above whatever
+            the user is looking at right now (visible even with the
+            HivemindScreen modal still open).
+          - A SYS system_message in the transcript panel so a user
+            scrolling back later still sees the connection event.
+        """
+        try:
+            self.app.notify(msg, severity="information", timeout=6)
+        except Exception:
+            pass
+        try:
+            from tui.widgets.transcript import Log, TranscriptPanel
+            tp = self.app.query_one(TranscriptPanel)
+            tp.system_message(msg, Log.SYS)
+        except Exception:
+            # Screen can be used in tests / without a TranscriptPanel
+            # parent (e.g., the dictation app); best-effort.
+            pass
