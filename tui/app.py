@@ -2277,9 +2277,19 @@ def main():
     # comes up empty — that's the contract.
     hivemind_client = None
     try:
-        from network.hivemind import HivemindMode, configure as _hivemind_configure
+        from network.hivemind import (
+            HivemindMode,
+            HIVEMIND_SERVICE_TYPE,
+            configure as _hivemind_configure,
+        )
+        _hm_mode = HivemindMode.parse(args.hivemind)
+        if _hm_mode != HivemindMode.OFF and not args.hivemind_sink_url:
+            print(
+                f"VOXTERM // hivemind: searching for sink on "
+                f"{HIVEMIND_SERVICE_TYPE} (mDNS, mode={_hm_mode.value})..."
+            )
         hivemind_client = _hivemind_configure(
-            mode=HivemindMode.parse(args.hivemind),
+            mode=_hm_mode,
             sink_url=args.hivemind_sink_url,
             location=args.hivemind_location,
         )
@@ -2288,9 +2298,13 @@ def main():
             if sink is not None:
                 print(f"VOXTERM // hivemind sink: {sink.transcripts_url}")
             else:
-                print("VOXTERM // hivemind: no sink yet (auto-discovery in progress)")
+                print(
+                    "VOXTERM // hivemind: no sink yet (auto-discovery still "
+                    "running; tail ~/Documents/voxterm/voxterm.log with "
+                    "VOXTERM_LOG_LEVEL=INFO to see when one appears)"
+                )
     except RuntimeError as exc:
-        # mode=on with no sink discovered — fail loudly per task spec.
+        # mode=on with no sink discovered; fail loudly per task spec.
         print(f"VOXTERM // hivemind error: {exc}", file=sys.stderr)
         sys.exit(2)
     except Exception:

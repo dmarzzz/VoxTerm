@@ -513,6 +513,7 @@ def test_configure_on_mode_raises_when_no_sink(tmp_path, monkeypatch):
     """ON mode with no explicit URL and no mDNS hits should raise fast."""
     # Patch HivemindBrowser to a no-op so wait_for_sink returns None.
     class _NoOpBrowser:
+        def __init__(self, *args, **kwargs): pass
         def start(self): pass
         def stop(self): pass
         def active_sink(self): return None

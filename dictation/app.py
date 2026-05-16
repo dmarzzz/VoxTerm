@@ -225,18 +225,34 @@ def main() -> None:
     # when AUTO mode finds no sink; the dictation loop handles None.
     hivemind_client = None
     try:
-        from network.hivemind import HivemindMode, configure as _hivemind_configure
+        from network.hivemind import (
+            HivemindMode,
+            HIVEMIND_SERVICE_TYPE,
+            configure as _hivemind_configure,
+        )
+        _hm_mode = HivemindMode.parse(args.hivemind)
+        if _hm_mode != HivemindMode.OFF and not args.hivemind_sink_url:
+            print(
+                f"VOXTERM DICTATION // hivemind: searching for sink on "
+                f"{HIVEMIND_SERVICE_TYPE} (mDNS, mode={_hm_mode.value})..."
+            )
         hivemind_client = _hivemind_configure(
-            mode=HivemindMode.parse(args.hivemind),
+            mode=_hm_mode,
             sink_url=args.hivemind_sink_url,
             location=args.hivemind_location,
         )
         if hivemind_client is not None:
             sink = hivemind_client.active_sink()
             if sink is not None:
+                print(f"VOXTERM DICTATION // hivemind sink: {sink.transcripts_url}")
                 log.info("hivemind sink: %s", sink.transcripts_url)
+            else:
+                print(
+                    "VOXTERM DICTATION // hivemind: no sink yet "
+                    "(auto-discovery still running)"
+                )
     except RuntimeError as exc:
-        # mode=on with nothing discovered — fail loudly.
+        # mode=on with nothing discovered; fail loudly.
         print(f"VOXTERM DICTATION // hivemind error: {exc}", file=sys.stderr)
         sys.exit(2)
     except Exception:
