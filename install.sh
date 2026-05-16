@@ -146,6 +146,7 @@ if [ -d "$VENV_DIR" ]; then
 fi
 
 # Preserve voice data symlinks or local state
+mkdir -p "$(dirname "$INSTALL_DIR")"
 rm -rf "$INSTALL_DIR"
 mv "$TMPDIR_DL" "$INSTALL_DIR"
 
