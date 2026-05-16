@@ -15,7 +15,7 @@ set -Eeuo pipefail
 
 # Installer revision — bump on every edit to this file. Printed at startup
 # so users can confirm they aren't running a stale copy.
-INSTALLER_REV="2026-05-16.2"
+INSTALLER_REV="2026-05-16.3"
 
 REPO="dmarzzz/VoxTerm"
 REPO_URL="https://github.com/$REPO"
@@ -269,14 +269,63 @@ done_ "installed to $BIN_DIR/voxterm"
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
+        # Detect the user's login shell and give shell-specific advice.
+        # $SHELL is the login shell (set by the OS at session start) and
+        # survives the curl|bash sub-invocation, so it's the right signal
+        # for what the user actually uses interactively.
+        shell_name=$(basename "${SHELL:-sh}")
         echo ""
-        echo -e "${CYAN}▸${RESET} add this to your shell profile (~/.zshrc or ~/.bashrc):"
+        echo -e "${CYAN}▸${RESET} add $BIN_DIR to your PATH"
         echo ""
-        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-        echo ""
-        echo "  then restart your terminal, or run:"
-        echo ""
-        echo "    source ~/.zshrc"
+        case "$shell_name" in
+            zsh)
+                echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+                echo "    source ~/.zshrc"
+                ;;
+            bash)
+                # macOS login bash sources ~/.bash_profile; most Linux distros
+                # use ~/.bashrc for interactive shells.
+                if [ "$(uname -s)" = "Darwin" ]; then
+                    rc_file="~/.bash_profile"
+                else
+                    rc_file="~/.bashrc"
+                fi
+                echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $rc_file"
+                echo "    source $rc_file"
+                ;;
+            fish)
+                # fish_add_path writes to a universal variable — persists
+                # across all future fish sessions, no config edit needed.
+                echo "    fish_add_path \$HOME/.local/bin"
+                echo ""
+                echo -e "  ${DIM}(persists automatically — no restart or sourcing needed)${RESET}"
+                ;;
+            ksh|mksh|pdksh|ksh93)
+                echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.kshrc"
+                echo "    . ~/.kshrc"
+                ;;
+            dash|ash|sh)
+                echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.profile"
+                echo "    . ~/.profile"
+                ;;
+            tcsh|csh)
+                echo "    echo 'setenv PATH \$HOME/.local/bin:\$PATH' >> ~/.${shell_name}rc"
+                echo "    source ~/.${shell_name}rc"
+                ;;
+            nu)
+                echo "    use std/util 'path add'; path add \$env.HOME/.local/bin"
+                echo ""
+                echo -e "  ${DIM}for persistence, add the same line to ~/.config/nushell/config.nu${RESET}"
+                ;;
+            *)
+                # Unknown shell — print POSIX form and a hint.
+                echo -e "  ${DIM}shell detected: $shell_name (no preset — using POSIX form)${RESET}"
+                echo ""
+                echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+                echo ""
+                echo -e "  ${DIM}add the above (or your shell's equivalent) to your shell's startup file${RESET}"
+                ;;
+        esac
         echo ""
         ;;
 esac
