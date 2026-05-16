@@ -20,7 +20,7 @@ VoxTerm is **local first and private by default**. Everything runs on your machi
 One command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh | bash
+curl -fsSL https://github.com/dmarzzz/VoxTerm/releases/latest/download/install.sh | bash
 ```
 
 Then run:

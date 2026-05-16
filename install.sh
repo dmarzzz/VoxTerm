@@ -3,23 +3,23 @@ set -Eeuo pipefail
 
 # ── VoxTerm Installer ──────────────────────────────────────
 #
-# Always re-fetch — don't run a saved copy of this file:
-#   Install:    curl -fsSL https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh | bash
+#   Install:    curl -fsSL https://github.com/dmarzzz/VoxTerm/releases/latest/download/install.sh | bash
 #   Specific:   curl ... | bash -s -- --version v0.1.0
 #   Uninstall:  curl ... | bash -s -- --uninstall
 #
-# If a repeat install hits the same error after a fix has landed, the most
-# likely cause is a stale install.sh — either a local file you saved earlier
-# or a CDN edge cache. Force a fresh fetch with a cache-buster:
-#   curl -fsSL "https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh?t=$(date +%s)" | bash
+# This URL is served with `Cache-Control: no-cache` at every hop, so it
+# always resolves to the latest release's install.sh — no CDN/proxy
+# staleness, no manual cache-busting needed. The old raw.githubusercontent
+# URL still works but can be cached by intermediaries (corp/school proxies,
+# some ISPs), which has bitten us in the wild.
 
 # Installer revision — bump on every edit to this file. Printed at startup
 # so users can confirm they aren't running a stale copy.
-INSTALLER_REV="2026-05-16.1"
+INSTALLER_REV="2026-05-16.2"
 
 REPO="dmarzzz/VoxTerm"
 REPO_URL="https://github.com/$REPO"
-RAW_URL="https://raw.githubusercontent.com/$REPO/main/install.sh"
+INSTALL_URL="https://github.com/$REPO/releases/latest/download/install.sh"
 INSTALL_DIR="$HOME/.local/share/voxterm"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -228,24 +228,22 @@ mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/voxterm" << 'LAUNCHER'
 #!/bin/bash
 INSTALL_DIR="$HOME/.local/share/voxterm"
-INSTALL_URL="https://raw.githubusercontent.com/dmarzzz/VoxTerm/main/install.sh"
-
-# Cache-bust the install URL on every update — defeats stale CDN edges or
-# corp proxies that might otherwise serve a yesterday's install.sh.
-bust() { printf '%s?t=%s' "$INSTALL_URL" "$(date +%s)"; }
+# Release-asset URL: served Cache-Control: no-cache end-to-end and
+# resolves to the latest release's install.sh — no CDN/proxy staleness.
+INSTALL_URL="https://github.com/dmarzzz/VoxTerm/releases/latest/download/install.sh"
 
 case "${1:-}" in
     update)
         shift
         if [ $# -gt 0 ]; then
             # voxterm update <version>  → pin to a specific tag
-            exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$(bust)' | bash -s -- --version '$1'"
+            exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$INSTALL_URL' | bash -s -- --version '$1'"
         else
-            exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$(bust)' | bash"
+            exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$INSTALL_URL' | bash"
         fi
         ;;
     uninstall)
-        exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$(bust)' | bash -s -- --uninstall"
+        exec bash -c "curl -fsSL --retry 3 --retry-delay 2 '$INSTALL_URL' | bash -s -- --uninstall"
         ;;
     version|-V)
         if [ -f "$INSTALL_DIR/.installed-version" ]; then
