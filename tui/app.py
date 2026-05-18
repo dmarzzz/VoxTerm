@@ -71,6 +71,7 @@ from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
 from audio.transcriber import (
     Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber,
+    parse_custom_keywords,
 )
 from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
@@ -490,7 +491,7 @@ class VoxTerm(App):
 
     def __init__(self, transcriber=None, model_name="qwen3-0.6b", language="en",
                  p2p_name=None, p2p_create=False, p2p_join_code=None,
-                 hivemind_client=None):
+                 hivemind_client=None, custom_keywords=None):
         super().__init__()
         self._p2p_auto_name = p2p_name
         self._p2p_auto_create = p2p_create
@@ -508,6 +509,7 @@ class VoxTerm(App):
         self.speaker_store = SpeakerStore()
         self._model_name = model_name
         self._language = language
+        self._custom_keywords = list(custom_keywords or [])
         self._is_qwen3 = model_name in QWEN3_MODELS
         self._recording = False
         self._had_speech = False
@@ -1435,7 +1437,11 @@ class VoxTerm(App):
 
                 model_repo = AVAILABLE_MODELS[self._model_name]
                 if self._model_name in QWEN3_MODELS:
-                    self.transcriber = Qwen3Transcriber(model=model_repo, language=self._language)
+                    self.transcriber = Qwen3Transcriber(
+                        model=model_repo,
+                        language=self._language,
+                        custom_keywords=self._custom_keywords,
+                    )
                 elif self._model_name in FASTER_WHISPER_MODELS:
                     self.transcriber = FasterWhisperTranscriber(model=model_repo, language=self._language)
                 else:
@@ -1803,7 +1809,11 @@ class VoxTerm(App):
         repo = AVAILABLE_MODELS[model_key]
         try:
             if model_key in QWEN3_MODELS:
-                new_transcriber = Qwen3Transcriber(model=repo, language=self._language)
+                new_transcriber = Qwen3Transcriber(
+                    model=repo,
+                    language=self._language,
+                    custom_keywords=self._custom_keywords,
+                )
             elif model_key in FASTER_WHISPER_MODELS:
                 new_transcriber = FasterWhisperTranscriber(model=repo, language=self._language)
             else:
@@ -2179,6 +2189,23 @@ def main():
         help="List available models and exit",
     )
     parser.add_argument(
+        "--keywords",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help=(
+            "Comma- or newline-separated custom transcription keywords. "
+            "Repeat to add more."
+        ),
+    )
+    parser.add_argument(
+        "--keywords-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to a comma- or newline-separated custom keyword list.",
+    )
+    parser.add_argument(
         "--name",
         type=str,
         default=None,
@@ -2242,6 +2269,11 @@ def main():
                 backend = " [whisper]"
             print(f"  {name:20s} → {repo}{backend}{tag}")
         sys.exit(0)
+
+    try:
+        custom_keywords = parse_custom_keywords(args.keywords, args.keywords_file)
+    except OSError as exc:
+        parser.error(f"could not read --keywords-file: {exc}")
 
     model_repo = AVAILABLE_MODELS[args.model]
     model_name = args.model
@@ -2365,6 +2397,7 @@ def main():
         p2p_create=args.session_create,
         p2p_join_code=args.session_join,
         hivemind_client=hivemind_client,
+        custom_keywords=custom_keywords,
     )
 
     # Global exception hooks — dump diagnostics on any uncaught crash

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
 
@@ -89,12 +91,60 @@ _ISO_TO_LANG = {
 }
 
 
+def parse_custom_keywords(
+    values: Iterable[str] | None = None,
+    keyword_file: str | Path | None = None,
+) -> list[str]:
+    """Parse comma/newline-separated custom ASR keywords.
+
+    Preserves user-provided casing while removing duplicates case-insensitively.
+    """
+    chunks: list[str] = []
+    if values:
+        chunks.extend(str(value) for value in values if value is not None)
+    if keyword_file:
+        path = Path(keyword_file).expanduser()
+        chunks.append(path.read_text(encoding="utf-8"))
+
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for chunk in chunks:
+        for item in re.split(r"[,\n\r]+", chunk):
+            keyword = item.strip()
+            if not keyword:
+                continue
+            key = keyword.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            keywords.append(keyword)
+    return keywords
+
+
+def build_keyword_context(keywords: Iterable[str] | None = None) -> str:
+    """Build the Qwen3-ASR context string for domain vocabulary."""
+    parsed = parse_custom_keywords(keywords)
+    if not parsed:
+        return ""
+    return "Custom vocabulary: " + "; ".join(parsed)
+
+
 class Qwen3Transcriber(_DeduplicatorMixin):
     """Qwen3-ASR transcriber — MLX on macOS, qwen-asr (PyTorch) on Linux."""
 
-    def __init__(self, model: str = "Qwen/Qwen3-ASR-0.6B", language: str | None = "en"):
+    def __init__(
+        self,
+        model: str = "Qwen/Qwen3-ASR-0.6B",
+        language: str | None = "en",
+        custom_keywords: Iterable[str] | None = None,
+        context: str = "",
+    ):
         self.model_id = model
         self._language = language
+        keyword_context = build_keyword_context(custom_keywords)
+        self._context = "\n".join(
+            part for part in (context.strip(), keyword_context) if part
+        )
         self._model = None
         self._loaded = False
         self._use_mlx = CURRENT_PLATFORM == Platform.MACOS
@@ -135,6 +185,7 @@ class Qwen3Transcriber(_DeduplicatorMixin):
                 audio,
                 model=self._model if self._model else self.model_id,
                 language=self._language,
+                context=self._context,
                 verbose=False,
             )
             text = str(result.text).strip() if hasattr(result, 'text') else ""
@@ -143,6 +194,7 @@ class Qwen3Transcriber(_DeduplicatorMixin):
             results = self._model.transcribe(
                 audio=(audio, 16000),
                 language=lang,
+                context=self._context,
             )
             text = results[0].text.strip() if results else ""
 

@@ -19,7 +19,7 @@ dependencies = [
     "textual>=8.0.0",
     "zeroconf>=0.131.0",
     # macOS: MLX-based transcription
-    "mlx-qwen3-asr>=0.1.0; sys_platform == 'darwin'",
+    "mlx-qwen3-asr>=0.3.0; sys_platform == 'darwin'",
     "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
     "rumps>=0.4.0; sys_platform == 'darwin'",
     # Linux: PyTorch/faster-whisper transcription

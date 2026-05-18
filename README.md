@@ -128,6 +128,19 @@ Press `P` to manage your speaker profile library (rename, delete, wipe all data)
 
 Models download automatically on first use.
 
+### Custom transcription keywords
+
+Qwen3-ASR models can use domain vocabulary hints for names, acronyms, and
+technical phrases:
+
+```bash
+voxterm --keywords "Flashbots, MEV-Boost, SUAVE"
+voxterm --keywords-file ~/podcast-terms.txt
+voxterm-dictate --keywords-file ~/podcast-terms.txt
+```
+
+Keyword files can be comma- or newline-separated.
+
 ## Project Structure
 
 ```

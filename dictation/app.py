@@ -88,7 +88,13 @@ def _check_linux_tools() -> bool:
     return False
 
 
-def _load_transcriber(model_name: str, model_repo: str, language: str, mlx_executor: ThreadPoolExecutor):
+def _load_transcriber(
+    model_name: str,
+    model_repo: str,
+    language: str,
+    mlx_executor: ThreadPoolExecutor,
+    custom_keywords: list[str] | None = None,
+):
     """Load the transcription model (same logic as app.py __main__).
 
     Loads on `mlx_executor` so the same thread owns the MLX state used for
@@ -101,10 +107,16 @@ def _load_transcriber(model_name: str, model_repo: str, language: str, mlx_execu
     )
 
     print(f"VOXTERM DICTATION // loading model ({model_name}) lang={language}...")
+    if custom_keywords and model_name in QWEN3_MODELS:
+        print(f"Custom keywords: {len(custom_keywords)} loaded")
     print("(first run downloads the model, please wait)\n")
 
     if model_name in QWEN3_MODELS:
-        transcriber = Qwen3Transcriber(model=model_repo, language=language)
+        transcriber = Qwen3Transcriber(
+            model=model_repo,
+            language=language,
+            custom_keywords=custom_keywords,
+        )
     elif model_name in FASTER_WHISPER_MODELS:
         transcriber = FasterWhisperTranscriber(model=model_repo, language=language)
     else:
@@ -160,6 +172,23 @@ def main() -> None:
         help="List available models and exit",
     )
     parser.add_argument(
+        "--keywords",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help=(
+            "Comma- or newline-separated custom transcription keywords. "
+            "Repeat to add more."
+        ),
+    )
+    parser.add_argument(
+        "--keywords-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to a comma- or newline-separated custom keyword list.",
+    )
+    parser.add_argument(
         "--hivemind",
         choices=["auto", "on", "off"],
         default="auto",
@@ -188,6 +217,12 @@ def main() -> None:
             print(f"  {name:20s} -> {repo}{tag}")
         sys.exit(0)
 
+    from audio.transcriber import parse_custom_keywords
+    try:
+        custom_keywords = parse_custom_keywords(args.keywords, args.keywords_file)
+    except OSError as exc:
+        parser.error(f"could not read --keywords-file: {exc}")
+
     # ---- Platform checks ----
     if CURRENT_PLATFORM == Platform.MACOS:
         if not _check_accessibility_macos():
@@ -204,7 +239,13 @@ def main() -> None:
     # MLX per-thread streams stay valid (see audio/transcriber.py + tui/app.py).
     mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
     model_repo = AVAILABLE_MODELS[args.model]
-    transcriber = _load_transcriber(args.model, model_repo, args.language, mlx_executor)
+    transcriber = _load_transcriber(
+        args.model,
+        model_repo,
+        args.language,
+        mlx_executor,
+        custom_keywords=custom_keywords,
+    )
 
     # ---- Create components ----
     from dictation.injector import get_injector
