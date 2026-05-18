@@ -1,4 +1,4 @@
-"""Tests for custom ASR keyword context plumbing."""
+"""Tests for ASR keyword context plumbing."""
 
 import sys
 from types import SimpleNamespace
@@ -14,16 +14,16 @@ sys.modules.setdefault(
 
 from audio.transcriber import (
     Qwen3Transcriber,
-    build_keyword_context,
-    parse_custom_keywords,
+    build_keywords_context,
+    parse_keywords,
 )
 
 
-def test_parse_custom_keywords_from_text_and_file(tmp_path):
+def test_parse_keywords_from_text_and_file(tmp_path):
     keyword_file = tmp_path / "keywords.txt"
     keyword_file.write_text("GammaTerm\nBeta Phrase\ngammaterm\n", encoding="utf-8")
 
-    keywords = parse_custom_keywords(
+    keywords = parse_keywords(
         ["AlphaTerm, Beta Phrase", "Delta Code"],
         keyword_file,
     )
@@ -31,10 +31,10 @@ def test_parse_custom_keywords_from_text_and_file(tmp_path):
     assert keywords == ["AlphaTerm", "Beta Phrase", "Delta Code", "GammaTerm"]
 
 
-def test_build_keyword_context():
-    context = build_keyword_context(["AlphaTerm", "Beta Phrase"])
+def test_build_keywords_context():
+    context = build_keywords_context(["AlphaTerm", "Beta Phrase"])
 
-    assert context == "Custom vocabulary: AlphaTerm; Beta Phrase"
+    assert context == "Keywords: AlphaTerm; Beta Phrase"
 
 
 def test_qwen_mlx_transcriber_passes_keyword_context(monkeypatch):
@@ -50,14 +50,14 @@ def test_qwen_mlx_transcriber_passes_keyword_context(monkeypatch):
         SimpleNamespace(transcribe=fake_transcribe),
     )
 
-    transcriber = Qwen3Transcriber(custom_keywords=["AlphaTerm", "Beta Phrase"])
+    transcriber = Qwen3Transcriber(keywords=["AlphaTerm", "Beta Phrase"])
     transcriber._use_mlx = True
     transcriber._model = object()
 
     result = transcriber.transcribe(np.ones(16000, dtype=np.float32))
 
     assert result["text"] == "AlphaTerm"
-    assert calls["context"] == "Custom vocabulary: AlphaTerm; Beta Phrase"
+    assert calls["context"] == "Keywords: AlphaTerm; Beta Phrase"
 
 
 def test_qwen_pytorch_transcriber_passes_keyword_context():
@@ -68,11 +68,11 @@ def test_qwen_pytorch_transcriber_passes_keyword_context():
             calls.update(kwargs)
             return [SimpleNamespace(text="Beta Phrase")]
 
-    transcriber = Qwen3Transcriber(custom_keywords=["AlphaTerm", "Beta Phrase"])
+    transcriber = Qwen3Transcriber(keywords=["AlphaTerm", "Beta Phrase"])
     transcriber._use_mlx = False
     transcriber._model = FakeModel()
 
     result = transcriber.transcribe(np.ones(16000, dtype=np.float32))
 
     assert result["text"] == "Beta Phrase"
-    assert calls["context"] == "Custom vocabulary: AlphaTerm; Beta Phrase"
+    assert calls["context"] == "Keywords: AlphaTerm; Beta Phrase"

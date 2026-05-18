@@ -93,7 +93,7 @@ def _load_transcriber(
     model_repo: str,
     language: str,
     mlx_executor: ThreadPoolExecutor,
-    custom_keywords: list[str] | None = None,
+    keywords: list[str] | None = None,
 ):
     """Load the transcription model (same logic as app.py __main__).
 
@@ -107,15 +107,15 @@ def _load_transcriber(
     )
 
     print(f"VOXTERM DICTATION // loading model ({model_name}) lang={language}...")
-    if custom_keywords and model_name in QWEN3_MODELS:
-        print(f"Custom keywords: {len(custom_keywords)} loaded")
+    if keywords and model_name in QWEN3_MODELS:
+        print(f"Keywords: {len(keywords)} loaded")
     print("(first run downloads the model, please wait)\n")
 
     if model_name in QWEN3_MODELS:
         transcriber = Qwen3Transcriber(
             model=model_repo,
             language=language,
-            custom_keywords=custom_keywords,
+            keywords=keywords,
         )
     elif model_name in FASTER_WHISPER_MODELS:
         transcriber = FasterWhisperTranscriber(model=model_repo, language=language)
@@ -177,7 +177,7 @@ def main() -> None:
         default=[],
         metavar="TEXT",
         help=(
-            "Comma- or newline-separated custom transcription keywords. "
+            "Comma- or newline-separated transcription keywords. "
             "Repeat to add more."
         ),
     )
@@ -186,7 +186,7 @@ def main() -> None:
         type=str,
         default=None,
         metavar="PATH",
-        help="Path to a comma- or newline-separated custom keyword list.",
+        help="Path to a comma- or newline-separated keyword list.",
     )
     parser.add_argument(
         "--hivemind",
@@ -217,9 +217,9 @@ def main() -> None:
             print(f"  {name:20s} -> {repo}{tag}")
         sys.exit(0)
 
-    from audio.transcriber import parse_custom_keywords
+    from audio.transcriber import parse_keywords
     try:
-        custom_keywords = parse_custom_keywords(args.keywords, args.keywords_file)
+        keywords = parse_keywords(args.keywords, args.keywords_file)
     except OSError as exc:
         parser.error(f"could not read --keywords-file: {exc}")
 
@@ -244,7 +244,7 @@ def main() -> None:
         model_repo,
         args.language,
         mlx_executor,
-        custom_keywords=custom_keywords,
+        keywords=keywords,
     )
 
     # ---- Create components ----

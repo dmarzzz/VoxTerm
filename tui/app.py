@@ -71,7 +71,7 @@ from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
 from audio.transcriber import (
     Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber,
-    parse_custom_keywords,
+    parse_keywords,
 )
 from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
@@ -491,7 +491,7 @@ class VoxTerm(App):
 
     def __init__(self, transcriber=None, model_name="qwen3-0.6b", language="en",
                  p2p_name=None, p2p_create=False, p2p_join_code=None,
-                 hivemind_client=None, custom_keywords=None):
+                 hivemind_client=None, keywords=None):
         super().__init__()
         self._p2p_auto_name = p2p_name
         self._p2p_auto_create = p2p_create
@@ -509,7 +509,7 @@ class VoxTerm(App):
         self.speaker_store = SpeakerStore()
         self._model_name = model_name
         self._language = language
-        self._custom_keywords = list(custom_keywords or [])
+        self._keywords = list(keywords or [])
         self._is_qwen3 = model_name in QWEN3_MODELS
         self._recording = False
         self._had_speech = False
@@ -1440,7 +1440,7 @@ class VoxTerm(App):
                     self.transcriber = Qwen3Transcriber(
                         model=model_repo,
                         language=self._language,
-                        custom_keywords=self._custom_keywords,
+                        keywords=self._keywords,
                     )
                 elif self._model_name in FASTER_WHISPER_MODELS:
                     self.transcriber = FasterWhisperTranscriber(model=model_repo, language=self._language)
@@ -1812,7 +1812,7 @@ class VoxTerm(App):
                 new_transcriber = Qwen3Transcriber(
                     model=repo,
                     language=self._language,
-                    custom_keywords=self._custom_keywords,
+                    keywords=self._keywords,
                 )
             elif model_key in FASTER_WHISPER_MODELS:
                 new_transcriber = FasterWhisperTranscriber(model=repo, language=self._language)
@@ -2194,7 +2194,7 @@ def main():
         default=[],
         metavar="TEXT",
         help=(
-            "Comma- or newline-separated custom transcription keywords. "
+            "Comma- or newline-separated transcription keywords. "
             "Repeat to add more."
         ),
     )
@@ -2203,7 +2203,7 @@ def main():
         type=str,
         default=None,
         metavar="PATH",
-        help="Path to a comma- or newline-separated custom keyword list.",
+        help="Path to a comma- or newline-separated keyword list.",
     )
     parser.add_argument(
         "--name",
@@ -2271,7 +2271,7 @@ def main():
         sys.exit(0)
 
     try:
-        custom_keywords = parse_custom_keywords(args.keywords, args.keywords_file)
+        keywords = parse_keywords(args.keywords, args.keywords_file)
     except OSError as exc:
         parser.error(f"could not read --keywords-file: {exc}")
 
@@ -2397,7 +2397,7 @@ def main():
         p2p_create=args.session_create,
         p2p_join_code=args.session_join,
         hivemind_client=hivemind_client,
-        custom_keywords=custom_keywords,
+        keywords=keywords,
     )
 
     # Global exception hooks — dump diagnostics on any uncaught crash

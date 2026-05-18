@@ -91,11 +91,11 @@ _ISO_TO_LANG = {
 }
 
 
-def parse_custom_keywords(
+def parse_keywords(
     values: Iterable[str] | None = None,
     keyword_file: str | Path | None = None,
 ) -> list[str]:
-    """Parse comma/newline-separated custom ASR keywords.
+    """Parse comma/newline-separated ASR keywords.
 
     Preserves user-provided casing while removing duplicates case-insensitively.
     """
@@ -121,12 +121,12 @@ def parse_custom_keywords(
     return keywords
 
 
-def build_keyword_context(keywords: Iterable[str] | None = None) -> str:
-    """Build the Qwen3-ASR context string for domain vocabulary."""
-    parsed = parse_custom_keywords(keywords)
+def build_keywords_context(keywords: Iterable[str] | None = None) -> str:
+    """Build the Qwen3-ASR context string for keywords."""
+    parsed = parse_keywords(keywords)
     if not parsed:
         return ""
-    return "Custom vocabulary: " + "; ".join(parsed)
+    return "Keywords: " + "; ".join(parsed)
 
 
 class Qwen3Transcriber(_DeduplicatorMixin):
@@ -136,12 +136,12 @@ class Qwen3Transcriber(_DeduplicatorMixin):
         self,
         model: str = "Qwen/Qwen3-ASR-0.6B",
         language: str | None = "en",
-        custom_keywords: Iterable[str] | None = None,
+        keywords: Iterable[str] | None = None,
         context: str = "",
     ):
         self.model_id = model
         self._language = language
-        keyword_context = build_keyword_context(custom_keywords)
+        keyword_context = build_keywords_context(keywords)
         self._context = "\n".join(
             part for part in (context.strip(), keyword_context) if part
         )
