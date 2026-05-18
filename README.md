@@ -134,9 +134,9 @@ Qwen3-ASR models can use domain vocabulary hints for names, acronyms, and
 technical phrases:
 
 ```bash
-voxterm --keywords "Flashbots, MEV-Boost, SUAVE"
-voxterm --keywords-file ~/podcast-terms.txt
-voxterm-dictate --keywords-file ~/podcast-terms.txt
+voxterm --keywords "term one, term two, phrase three"
+voxterm --keywords-file ~/custom-keywords.txt
+voxterm-dictate --keywords-file ~/custom-keywords.txt
 ```
 
 Keyword files can be comma- or newline-separated.

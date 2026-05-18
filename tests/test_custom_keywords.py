@@ -21,20 +21,20 @@ from audio.transcriber import (
 
 def test_parse_custom_keywords_from_text_and_file(tmp_path):
     keyword_file = tmp_path / "keywords.txt"
-    keyword_file.write_text("SUAVE\nMEV-Boost\nsuave\n", encoding="utf-8")
+    keyword_file.write_text("GammaTerm\nBeta Phrase\ngammaterm\n", encoding="utf-8")
 
     keywords = parse_custom_keywords(
-        ["Flashbots, MEV-Boost", "orderflow auction"],
+        ["AlphaTerm, Beta Phrase", "Delta Code"],
         keyword_file,
     )
 
-    assert keywords == ["Flashbots", "MEV-Boost", "orderflow auction", "SUAVE"]
+    assert keywords == ["AlphaTerm", "Beta Phrase", "Delta Code", "GammaTerm"]
 
 
 def test_build_keyword_context():
-    context = build_keyword_context(["Flashbots", "MEV-Boost"])
+    context = build_keyword_context(["AlphaTerm", "Beta Phrase"])
 
-    assert context == "Custom vocabulary: Flashbots; MEV-Boost"
+    assert context == "Custom vocabulary: AlphaTerm; Beta Phrase"
 
 
 def test_qwen_mlx_transcriber_passes_keyword_context(monkeypatch):
@@ -42,7 +42,7 @@ def test_qwen_mlx_transcriber_passes_keyword_context(monkeypatch):
 
     def fake_transcribe(audio, **kwargs):
         calls.update(kwargs)
-        return SimpleNamespace(text="Flashbots")
+        return SimpleNamespace(text="AlphaTerm")
 
     monkeypatch.setitem(
         sys.modules,
@@ -50,14 +50,14 @@ def test_qwen_mlx_transcriber_passes_keyword_context(monkeypatch):
         SimpleNamespace(transcribe=fake_transcribe),
     )
 
-    transcriber = Qwen3Transcriber(custom_keywords=["Flashbots", "MEV-Boost"])
+    transcriber = Qwen3Transcriber(custom_keywords=["AlphaTerm", "Beta Phrase"])
     transcriber._use_mlx = True
     transcriber._model = object()
 
     result = transcriber.transcribe(np.ones(16000, dtype=np.float32))
 
-    assert result["text"] == "Flashbots"
-    assert calls["context"] == "Custom vocabulary: Flashbots; MEV-Boost"
+    assert result["text"] == "AlphaTerm"
+    assert calls["context"] == "Custom vocabulary: AlphaTerm; Beta Phrase"
 
 
 def test_qwen_pytorch_transcriber_passes_keyword_context():
@@ -66,13 +66,13 @@ def test_qwen_pytorch_transcriber_passes_keyword_context():
     class FakeModel:
         def transcribe(self, **kwargs):
             calls.update(kwargs)
-            return [SimpleNamespace(text="MEV-Boost")]
+            return [SimpleNamespace(text="Beta Phrase")]
 
-    transcriber = Qwen3Transcriber(custom_keywords=["Flashbots", "MEV-Boost"])
+    transcriber = Qwen3Transcriber(custom_keywords=["AlphaTerm", "Beta Phrase"])
     transcriber._use_mlx = False
     transcriber._model = FakeModel()
 
     result = transcriber.transcribe(np.ones(16000, dtype=np.float32))
 
-    assert result["text"] == "MEV-Boost"
-    assert calls["context"] == "Custom vocabulary: Flashbots; MEV-Boost"
+    assert result["text"] == "Beta Phrase"
+    assert calls["context"] == "Custom vocabulary: AlphaTerm; Beta Phrase"
