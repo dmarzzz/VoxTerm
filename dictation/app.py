@@ -200,6 +200,12 @@ def main() -> None:
         sys.exit(1)
 
     # ---- Load model ----
+    # Bound the MLX GPU cache before any model loads — dictation runs the
+    # same MLX transcribers in a long-lived loop and has the same unbounded
+    # allocator growth as the TUI.
+    from audio.transcriber import configure_mlx_memory
+    configure_mlx_memory()
+
     # Single-thread executor shared between load + every transcribe call so
     # MLX per-thread streams stay valid (see audio/transcriber.py + tui/app.py).
     mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")

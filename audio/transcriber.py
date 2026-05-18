@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 
 import numpy as np
 
 from audio.platform import CURRENT_PLATFORM, Platform
+
+
+def configure_mlx_memory() -> None:
+    """Bound MLX's Metal allocator so the GPU buffer cache can't grow unbounded.
+
+    MLX keeps freed buffers in a reuse cache that, by default, grows toward
+    the device working-set size. With variable-length audio chunks every
+    transcription caches new buffer sizes, so RSS climbs monotonically over
+    a session. A cache ceiling caps that without measurably hurting latency
+    (the model's live working set is well under the limit). Tunable via
+    VOXTERM_MLX_CACHE_MB (0 disables the cap).
+
+    Process-wide and idempotent — called from every entry point that loads
+    an MLX transcriber (TUI and dictation) so both are capped.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+    try:
+        cache_mb = int(os.environ.get("VOXTERM_MLX_CACHE_MB", "512"))
+    except ValueError:
+        cache_mb = 512
+    if cache_mb <= 0:
+        return
+    try:
+        mx.set_cache_limit(cache_mb * 1024 * 1024)
+    except Exception:
+        # Older/newer MLX without set_cache_limit — non-fatal.
+        pass
 
 
 class _DeduplicatorMixin:
