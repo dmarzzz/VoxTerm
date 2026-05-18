@@ -782,8 +782,20 @@ class VoxTerm(App):
             return  # Windows — can't check memory, skip watchdog
         if rss_mb > 6000:
             self._write_crash_dump(f"memory_watchdog: {rss_mb:.0f}MB")
+            # Actively reclaim instead of only warning: force a Metal cache
+            # flush on the MLX thread, ungated by the usual skip-if-busy
+            # check (under this much pressure we want it to run even if it
+            # has to queue behind the current transcription).
+            gc.collect()
+            if sys.platform == "darwin":
+                try:
+                    import mlx.core as mx
+                    self._cache_clear_future = self._mlx_executor.submit(mx.clear_cache)
+                except Exception:
+                    pass
             self.query_one(TranscriptPanel).system_message(
-                f"high memory usage ({rss_mb:.0f}MB) — consider saving and restarting", Log.SYS
+                f"high memory usage ({rss_mb:.0f}MB) — flushing GPU cache; "
+                f"save and restart if it persists", Log.SYS
             )
         elif rss_mb > 4000 and self._debug:
             self.query_one(TranscriptPanel).system_message(
@@ -1075,6 +1087,16 @@ class VoxTerm(App):
             self._transcribe_count += 1
             if self._transcribe_count % 20 == 0:
                 gc.collect()
+                # Reclaim the MLX buffer cache on the thread that owns it.
+                # Unlike the 60s _periodic_gc timer (which is skipped while
+                # the executor is busy), this runs inline on the cadence of
+                # actual transcription, so it can't be starved under load.
+                if sys.platform == "darwin":
+                    try:
+                        import mlx.core as mx
+                        self._mlx_executor.submit(mx.clear_cache).result()
+                    except Exception:
+                        pass
 
             text = result.get("text", "")
 
@@ -1821,10 +1843,35 @@ class VoxTerm(App):
             )
 
     def _on_swap_done(self, transcriber, model_key):
+        old_transcriber = self.transcriber
         self.transcriber = transcriber
         self._model_name = model_key
         self._is_qwen3 = model_key in QWEN3_MODELS
         self._model_loaded = True
+        # Drop the previous model and flush Metal so a swap doesn't strand
+        # a whole model (~0.6–1.5GB) in the GPU cache. The reclaim runs on
+        # the MLX-owning thread; fire-and-forget so the event loop isn't
+        # blocked, reusing _cache_clear_future to avoid pile-up.
+        if old_transcriber is not None and old_transcriber is not transcriber:
+            def _reclaim_old(_old=old_transcriber):
+                try:
+                    unload = getattr(_old, "unload", None)
+                    if callable(unload):
+                        unload()
+                except Exception:
+                    pass
+                del _old
+                gc.collect()
+                if sys.platform == "darwin":
+                    try:
+                        import mlx.core as mx
+                        mx.clear_cache()
+                    except Exception:
+                        pass
+            try:
+                self._cache_clear_future = self._mlx_executor.submit(_reclaim_old)
+            except Exception:
+                pass
         _get_config().update({"last_model": model_key, "last_language": self._language})
         self.query_one(TranscriptPanel).system_message(f"model loaded: {model_key}", Log.SYS, {model_key: "rainbow"})
         self._update_telemetry()
@@ -2151,6 +2198,35 @@ class VoxTerm(App):
 
 
 
+def _configure_mlx_memory():
+    """Bound MLX's Metal allocator so the GPU buffer cache can't grow unbounded.
+
+    MLX keeps freed buffers in a reuse cache that, by default, grows toward
+    the device working-set size. With variable-length audio chunks every
+    transcription caches new buffer sizes, so RSS climbs monotonically over
+    a session. A cache ceiling caps that without measurably hurting latency
+    (the model's live working set is well under the limit). Tunable via
+    VOXTERM_MLX_CACHE_MB (0 disables the cap).
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+    try:
+        cache_mb = int(os.environ.get("VOXTERM_MLX_CACHE_MB", "512"))
+    except ValueError:
+        cache_mb = 512
+    if cache_mb <= 0:
+        return
+    try:
+        mx.set_cache_limit(cache_mb * 1024 * 1024)
+    except Exception:
+        # Older/newer MLX without set_cache_limit — non-fatal.
+        pass
+
+
 def main():
     import argparse
 
@@ -2357,6 +2433,10 @@ def main():
         })
     except Exception:
         pass
+
+    # Bound the MLX GPU cache before any model loads (root-cause fix for
+    # unbounded RSS growth during long sessions).
+    _configure_mlx_memory()
 
     # Launch TUI immediately — model loads in the background
     app = VoxTerm(
