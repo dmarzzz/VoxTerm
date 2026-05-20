@@ -3,7 +3,11 @@ import queue
 import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
-from config import SAMPLE_RATE, CHUNK_SIZE, DTYPE
+from audio.noise_filter import HighPassFilter
+from config import (
+    SAMPLE_RATE, CHUNK_SIZE, DTYPE,
+    NOISE_FILTER_ENABLED, NOISE_FILTER_CUTOFF_HZ, NOISE_FILTER_ORDER,
+)
 
 
 class AudioCapture:
@@ -19,6 +23,13 @@ class AudioCapture:
         # _device_error is set from the audio callback, read from the audio loop.
         self._device_error: str | None = None
         self._zero_chunks = 0  # consecutive all-silence chunks (heartbeat)
+        # Streaming high-pass filter for AC hum / fan rumble / HVAC noise.
+        # Cuts the low-frequency noise floor so VAD's RMS gate isn't held open
+        # by background noise.
+        self._noise_filter = (
+            HighPassFilter(NOISE_FILTER_CUTOFF_HZ, SAMPLE_RATE, NOISE_FILTER_ORDER)
+            if NOISE_FILTER_ENABLED else None
+        )
 
     def _callback(self, indata, frames, time_info, status):
         # Surface portaudio status flags (input overflow, device loss, etc.)
@@ -34,6 +45,12 @@ class AudioCapture:
         if self._resample_up is not None:
             mono = resample_poly(mono, self._resample_up, self._resample_down)
         chunk = mono.astype(np.float32)
+
+        # High-pass filter applied after resampling so the cutoff is meaningful
+        # in the final SAMPLE_RATE domain (VAD + transcriber see filtered audio).
+        # Runs before the zero-RMS heartbeat so a dead mic still reads as zero.
+        if self._noise_filter is not None:
+            chunk = self._noise_filter.filter(chunk)
 
         # Heartbeat: a healthy mic has noise floor > ~1e-6 even in a quiet
         # room. Sustained literal-zero RMS suggests the device is dead or
@@ -61,6 +78,9 @@ class AudioCapture:
     def start(self):
         self._device_error = None
         self._zero_chunks = 0
+        # Reset filter state to avoid a click on resume.
+        if self._noise_filter is not None:
+            self._noise_filter.reset()
         dev_info = sd.query_devices(kind='input')
         self._device_name = dev_info['name']
         native_channels = dev_info['max_input_channels']

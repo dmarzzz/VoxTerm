@@ -179,6 +179,17 @@ LID_AUTO_SWITCH = False        # auto-switch transcription language on detection
 # Crash reporting
 CRASH_LOG_MAX_COUNT = 50      # max crash logs to keep (rotated on startup)
 
+# ── Background-noise high-pass filter ────────────────────────
+# Applied to mic input before VAD/transcription. Attenuates AC hum, fan rumble,
+# and HVAC noise (all below ~150 Hz) that otherwise inflate apparent RMS and
+# hold SILENCE_THRESHOLD open. Speech intelligibility lives at 1-3 kHz, so a
+# 100 Hz cutoff leaves voice essentially intact.
+# Toggle with VOXTERM_NOISE_FILTER=0 if you're recording in a quiet space and
+# need the lowest male fundamentals (~80 Hz) fully preserved.
+NOISE_FILTER_ENABLED = _os.environ.get("VOXTERM_NOISE_FILTER", "1").lower() in ("1", "true", "yes")
+NOISE_FILTER_CUTOFF_HZ = float(_os.environ.get("VOXTERM_NOISE_FILTER_CUTOFF", "100"))
+NOISE_FILTER_ORDER = int(_os.environ.get("VOXTERM_NOISE_FILTER_ORDER", "2"))
+
 # Dictation mode
 DICTATION_HOTKEY_MACOS = ("cmd", "shift", "d")
 DICTATION_HOTKEY_LINUX = ("super", "shift", "d")
