@@ -7,7 +7,7 @@ Backends (selected by the ``summarization_model`` string):
                  ``ollama:`` prefix, e.g. ``ollama:qwen3:0.6b`` or
                  ``ollama:llama3.2@http://192.168.1.5:11434``. Works on any
                  platform (it's just HTTP), so it's also the escape hatch
-                 for Linux/Windows where MLX is unavailable.
+                 where MLX is unavailable.
 
 The factory ``get_summarizer()`` reads ConfigStore for the active model.
 Backends are loaded lazily — importing this module does not load any LLM.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 import threading
 import urllib.error
@@ -249,9 +250,9 @@ def get_summarizer(model_name: str = "") -> Summarizer:
 
     Backend dispatch is by prefix on ``model_name``:
       - ``ollama:<model>[@host]`` → Ollama HTTP backend (any platform).
-      - anything else             → MLX backend (macOS only).
+      - anything else             → MLX backend (Apple Silicon macOS only).
 
-    An empty string selects the MLX default model on macOS.
+    An empty string selects the MLX default model on Apple Silicon macOS.
     """
     key = model_name or MLXSummarizer.DEFAULT_MODEL
     with _cache_lock:
@@ -263,10 +264,10 @@ def get_summarizer(model_name: str = "") -> Summarizer:
             backend: Summarizer = OllamaSummarizer(
                 model_name=model_name[len(OLLAMA_PREFIX):]
             )
-        elif sys.platform != "darwin":
+        elif sys.platform != "darwin" or platform.machine() != "arm64":
             raise SummarizerError(
-                "MLX summarization is only supported on macOS. On "
-                "Linux/Windows, run a local Ollama server and set the "
+                "MLX summarization is only supported on Apple Silicon macOS. "
+                "Run a local Ollama server and set the "
                 "summarization model to e.g. 'ollama:qwen3:0.6b'."
             )
         else:

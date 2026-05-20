@@ -43,7 +43,7 @@ class SummaryScreen(ModalScreen):
 
     Dismisses with a dict or None:
         {"template_id": str, "custom_prompt": str, "summary_model": str}
-            — proceed ("summary_model": blank = on-device MLX, or
+            — proceed ("summary_model": blank = on-device MLX on Apple Silicon, or
               an "ollama:<model>[@host]" string)
         None — cancelled
     """
@@ -150,13 +150,13 @@ class SummaryScreen(ModalScreen):
 
             yield Static(
                 "[#607080]summary model[/] "
-                "[#405060](blank = on-device MLX, or "
+                "[#405060](blank = Apple Silicon MLX, or "
                 "ollama:model or ollama:model@host)[/]",
                 id="summary-model-label",
                 markup=True,
             )
             yield Input(
-                placeholder="blank = on-device MLX  ·  e.g. "
+                placeholder="blank = Apple Silicon MLX  ·  e.g. "
                 "ollama:qwen3.5:35b",
                 id="summary-model",
                 value=self._default_model,

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+import summarizer.engine as summarizer_engine
 from summarizer.engine import (
     OllamaSummarizer,
     SummarizerError,
@@ -21,6 +22,15 @@ from summarizer.prompts import resolve_template
 def test_factory_dispatches_ollama_prefix():
     s = get_summarizer("ollama:qwen3:0.6b")
     assert isinstance(s, OllamaSummarizer)
+
+
+def test_factory_rejects_default_mlx_on_intel_macos(monkeypatch):
+    monkeypatch.setattr(summarizer_engine.sys, "platform", "darwin")
+    monkeypatch.setattr(summarizer_engine.platform, "machine", lambda: "x86_64")
+    summarizer_engine._cache.clear()
+
+    with pytest.raises(SummarizerError, match="Apple Silicon macOS"):
+        get_summarizer("")
 
 
 def test_factory_caches_by_key():

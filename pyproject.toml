@@ -18,11 +18,13 @@ dependencies = [
     "sounddevice>=0.5.0",
     "textual>=8.0.0",
     "zeroconf>=0.131.0",
-    # macOS: MLX-based transcription
-    "mlx-qwen3-asr>=0.3.5; sys_platform == 'darwin'",
-    "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
-    "mlx-lm>=0.19.0; sys_platform == 'darwin'",
+    # macOS Apple Silicon: MLX-based transcription
+    "mlx-qwen3-asr>=0.3.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-whisper>=0.4.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.19.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "rumps>=0.4.0; sys_platform == 'darwin'",
+    # macOS Intel: MLX is unavailable, use the cross-platform Whisper backend.
+    "faster-whisper>=1.0.0; sys_platform == 'darwin' and platform_machine != 'arm64'",
     # Linux: PyTorch/faster-whisper transcription
     "faster-whisper>=1.0.0; sys_platform == 'linux'",
     "Pillow>=10.0.0; sys_platform == 'linux'",

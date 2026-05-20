@@ -3,6 +3,7 @@
 VERSION = "0.2.1"
 
 import sys
+import platform
 
 # Audio
 SAMPLE_RATE = 16000
@@ -11,7 +12,7 @@ CHANNELS = 1
 DTYPE = "float32"
 
 # Transcription — platform-aware model registry
-if sys.platform == "darwin":
+if sys.platform == "darwin" and platform.machine() == "arm64":
     # macOS: Qwen3-ASR (primary, MLX) + mlx-whisper (fallback)
     DEFAULT_MODEL = "qwen3-0.6b"
     AVAILABLE_MODELS = {
@@ -27,6 +28,20 @@ if sys.platform == "darwin":
     QWEN3_MODELS = {"qwen3-0.6b", "qwen3-1.7b"}
     WHISPER_MODEL = "mlx-community/whisper-small-mlx"
     FASTER_WHISPER_MODELS: set[str] = set()
+elif sys.platform == "darwin":
+    # macOS Intel: MLX has no x86_64 wheels, so use faster-whisper.
+    AVAILABLE_MODELS = {
+        "fw-tiny":           "tiny",
+        "fw-base":           "base",
+        "fw-small":          "small",
+        "fw-medium":         "medium",
+        "fw-large-v3":       "large-v3",
+        "fw-distil-large-v3": "distil-large-v3",
+    }
+    DEFAULT_MODEL = "fw-small"
+    QWEN3_MODELS = set()
+    WHISPER_MODEL = None
+    FASTER_WHISPER_MODELS = set(AVAILABLE_MODELS)
 elif sys.platform.startswith("linux"):
     # Linux: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
     _HAS_QWEN_ASR = __import__("importlib.util", fromlist=["find_spec"]).find_spec("qwen_asr") is not None

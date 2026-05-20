@@ -2,7 +2,7 @@
 
 Local real-time voice transcription TUI with speaker diarization and P2P collaborative transcription. Runs entirely offline — no cloud APIs, no audio stored.
 
-![platform](https://img.shields.io/badge/platform-macOS_(Apple_Silicon)-black)
+![platform](https://img.shields.io/badge/platform-macOS-black)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 
 ## Privacy & Storage Policy
@@ -29,7 +29,7 @@ Then run:
 voxterm
 ```
 
-Requires macOS with Apple Silicon (M1+) and Python 3.12+. Models download automatically on first use.
+Requires macOS and Python 3.12+. Apple Silicon Macs use MLX models; Intel Macs use the CPU-compatible faster-whisper backend. Models download automatically on first use.
 
 <details>
 <summary>Manual setup (for developers)</summary>
@@ -122,8 +122,9 @@ Press `P` to manage your speaker profile library (rename, delete, wipe all data)
 
 ## Models
 
-- **qwen3-0.6b** (default) — fast, good for most use
+- **qwen3-0.6b** — fast, good for most use
 - **qwen3-1.7b** — more accurate, larger
+- **fw-small** (Intel Mac default) — CPU-compatible faster-whisper backend
 - Whisper variants (tiny through large-v3) available via `M` menu
 
 Models download automatically on first use.

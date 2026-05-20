@@ -2491,10 +2491,10 @@ def main():
         default=None,
         metavar="MODEL",
         help=(
-            "Model for transcript summaries (U key). Blank = on-device "
+            "Model for transcript summaries (U key). Blank = Apple Silicon "
             "MLX; or 'ollama:<model>[@host]' e.g. ollama:qwen3.5:35b. "
             "Persisted, so you only need to set it once "
-            f"(current: {_saved_summary_model or 'on-device MLX'})."
+            f"(current: {_saved_summary_model or 'Apple Silicon MLX'})."
         ),
     )
     parser.add_argument(
@@ -2550,7 +2550,7 @@ def main():
 
     # --summary-model is sticky: persist it once so the user never has to
     # hand-edit the (triple-hidden) state JSON. None = flag not passed
-    # (leave the saved value alone); "" = explicitly reset to on-device MLX.
+    # (leave the saved value alone); "" = explicitly reset to Apple Silicon MLX.
     if args.summary_model is not None:
         _cfg.set("summarization_model", args.summary_model.strip())
 
