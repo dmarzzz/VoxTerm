@@ -77,6 +77,7 @@ SUBPROCESSES (fallback only — not used when ONNX models available)
 | `widgets/header.py` | Recording indicator header bar |
 | `widgets/tag_screen.py` | Speaker tagging modal (T key) |
 | `widgets/profile_screen.py` | Speaker profile management modal (P key) |
+| `tui/events.py` | Optional JSONL event stream for out-of-process consumers (gated by `VOXTERM_EVENTS=1`) |
 
 ## Data and debug paths
 
@@ -160,6 +161,30 @@ python -m dictation.app            # dictation mode
 > - Always verify `.venv/bin/python` exists before running. If it doesn't, run the dev setup above.
 
 **Keybindings**: R(record) T(tag speakers) P(profiles) M(model) L(language) S(save) C(clear) D(debug) ?(help) Q(quit)
+
+## Optional event stream for out-of-process consumers
+
+VoxTerm can emit a JSONL event stream that companion tools (LED matrices, OBS overlays, dashboards) can subscribe to via file-tail. **Off by default** — no file is opened, no overhead. Enable with `VOXTERM_EVENTS=1`.
+
+```sh
+VOXTERM_EVENTS=1 ./voxterm
+# events land at: ~/Documents/voxterm-transcripts/.live/<session>-events.jsonl
+```
+
+Each line is one JSON object: `{"t": <unix_seconds>, "kind": "<name>", ...fields}`. Documented kinds (one per line in the stream, in order of arrival):
+
+| kind | fields | notes |
+|---|---|---|
+| `session` | `phase` ("start"\|"end"), `model`, `language` | bracket the run |
+| `recording` | `on` (bool) | R-key toggles |
+| `party` | `on` (bool) | P2P session join/leave |
+| `vad` | `on` (bool) | edge-triggered |
+| `amplitude` | `rms` (float 0..1) | every audio chunk, ~15 Hz |
+| `speaker` | `speaker_id`, `label`, `color` (TUI hex like `#00ffcc`) | edge-triggered |
+| `text` | `speaker`, `speaker_id`, `color`, `text`, `confidence`, `overlap` | per finalised transcription |
+| `peer_text` | `peer`, `speaker`, `text` | from party mode |
+
+The `color` field on speaker/text events is the same hex the TUI uses, so consumers can render with a palette identical to what you see on screen. Module: `tui/events.py`.
 
 ## Speaker profile database schema
 

@@ -190,6 +190,13 @@ NOISE_FILTER_ENABLED = _os.environ.get("VOXTERM_NOISE_FILTER", "1").lower() in (
 NOISE_FILTER_CUTOFF_HZ = float(_os.environ.get("VOXTERM_NOISE_FILTER_CUTOFF", "100"))
 NOISE_FILTER_ORDER = int(_os.environ.get("VOXTERM_NOISE_FILTER_ORDER", "2"))
 
+# ── Event stream for out-of-process consumers ─────────────────
+# When enabled, VoxTerm appends a JSONL event stream to LIVE_DIR so external
+# tools (LED matrices, OBS overlays, dashboards) can subscribe via file-tail.
+# Off by default — set VOXTERM_EVENTS=1 to enable. One {"t": ..., "kind":
+# ..., ...fields} object per line; see tui/events.py for the documented kinds.
+EVENTS_ENABLED = _os.environ.get("VOXTERM_EVENTS", "0").lower() in ("1", "true", "yes")
+
 # Dictation mode
 DICTATION_HOTKEY_MACOS = ("cmd", "shift", "d")
 DICTATION_HOTKEY_LINUX = ("super", "shift", "d")

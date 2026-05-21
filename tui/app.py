@@ -85,8 +85,10 @@ from config import (
     DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS,
     DEFAULT_LANGUAGE, AVAILABLE_LANGUAGES,
     LIVE_DIR,
+    EVENTS_ENABLED,
 )
 from config import SESSIONS_DIR, STATE_FILE as _STATE_FILE
+from tui.events import EventLogger, NullEventLogger
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -622,6 +624,19 @@ class VoxTerm(App):
         self._wire_party_callbacks()
         self._recording_pulse: RecordingPulse | None = None
 
+        # Event stream — emits JSONL to LIVE_DIR for external consumers
+        # (LED matrices, overlays, dashboards). No-op when VOXTERM_EVENTS unset.
+        if EVENTS_ENABLED:
+            ts = self._session_start.strftime("%Y-%m-%d_%H%M%S")
+            self._events = EventLogger(LIVE_DIR / f"{ts}-events.jsonl")
+        else:
+            self._events = NullEventLogger()
+        # Tracks last value emitted, so we only emit on state change for the
+        # high-cardinality signals (VAD transitions, speaker swaps, recording).
+        self._last_event_vad: bool | None = None
+        self._last_event_speaker_id: int | None = None
+        self._last_event_party: bool | None = None
+
     def compose(self) -> ComposeResult:
         yield CyberHeader()
         with Vertical(id="main-container"):
@@ -689,6 +704,10 @@ class VoxTerm(App):
                     local_name=p.display_name or "you",
                     peer_names=p.get_peer_names(),
                 )
+            self._events.emit(
+                "peer_text",
+                peer=peer_display_name, speaker=speaker, text=text,
+            )
 
         def _on_partial_received():
             self._refresh_merged_if_active()
@@ -742,6 +761,10 @@ class VoxTerm(App):
             self.speaker_store.backup()
         except Exception:
             log.warning("speaker store init failed, running in ephemeral mode", exc_info=True)
+
+        # Open the event stream and announce the session.
+        self._events.open()
+        self._events.emit("session", phase="start", model=self._model_name, language=self._language)
 
         if self._model_loaded:
             transcript = self.query_one(TranscriptPanel)
@@ -935,6 +958,14 @@ class VoxTerm(App):
     def _process_audio_inner(self):
         waveform = self.query_one(WaveformWidget)
 
+        # Party-session join/leave is visible to consumers even outside recording.
+        # Gated on events being enabled so the default-off path is truly free.
+        if self._events.enabled:
+            in_party = bool(self._party.session_mgr and self._party.session_mgr.is_in_session)
+            if in_party != self._last_event_party:
+                self._events.emit("party", on=in_party)
+                self._last_event_party = in_party
+
         if not self._recording:
             waveform.tick()
             return
@@ -999,6 +1030,14 @@ class VoxTerm(App):
             else:
                 rms = float(np.sqrt(np.mean(chunk ** 2)))
                 is_speech = rms >= SILENCE_THRESHOLD
+
+            # Emit per-chunk amplitude (~15 Hz) and VAD edge events.
+            if self._events.enabled:
+                rms_val = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float32))))
+                self._events.emit("amplitude", rms=rms_val)
+                if is_speech != self._last_event_vad:
+                    self._events.emit("vad", on=is_speech)
+                    self._last_event_vad = is_speech
 
             if is_speech:
                 self._silence_chunks = 0
@@ -1398,6 +1437,24 @@ class VoxTerm(App):
 
         self._update_telemetry()
 
+        # Event stream: emit speaker change (with the TUI's hex colour so the
+        # external consumer renders the same palette) and the finalised text.
+        if self._events.enabled:
+            color = ""
+            if self._diarizer_loaded and speaker_id:
+                try:
+                    color = self.diarizer.get_speaker_color(speaker_id)
+                except Exception:
+                    color = ""
+            if speaker_id != self._last_event_speaker_id:
+                self._events.emit("speaker", speaker_id=speaker_id, label=speaker, color=color)
+                self._last_event_speaker_id = speaker_id
+            self._events.emit(
+                "text",
+                speaker=speaker, speaker_id=speaker_id, color=color,
+                text=text, confidence=confidence, overlap=overlap,
+            )
+
         # Broadcast to P2P peers if in a session (via bounded queue, not per-call threads)
         _pm = self._party
         if _pm.session_mgr and _pm.session_mgr.is_in_session and _pm.send_queue:
@@ -1646,6 +1703,7 @@ class VoxTerm(App):
             if self._recording_pulse:
                 self._recording_pulse.stop()
             transcript.system_message("recording stopped", Log.REC, {"stopped": "#ff4466"})
+            self._events.emit("recording", on=False)
         else:
             self._recording = True
             self._mic_error_shown = False
@@ -1661,12 +1719,14 @@ class VoxTerm(App):
                 transcript.system_message("recording started", Log.REC, {"started": "#00ff88"})
                 if self._debug:
                     transcript.system_message(f"mic: {mic_name}", Log.SYS)
+                self._events.emit("recording", on=True)
             except Exception as e:
                 self._recording = False
                 waveform.set_recording(False)
                 header.set_recording(False)
                 if self._recording_pulse:
                     self._recording_pulse.stop()
+                self._events.emit("recording", on=False)
                 transcript.system_message(
                     f"microphone error: {e} — grant Terminal mic access in System Settings > Privacy",
                     Log.REC,
@@ -2437,6 +2497,12 @@ class VoxTerm(App):
                 self._hivemind.close()
             except Exception:
                 log.warning("hivemind close failed", exc_info=True)
+
+        try:
+            self._events.emit("session", phase="end")
+            self._events.close()
+        except Exception:
+            pass
 
         # Kill the resource tracker process if it somehow spawned —
         # prevents leaked-semaphore warning printed to terminal after exit.
