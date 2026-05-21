@@ -243,14 +243,16 @@ class TestPeriodicMerge:
 
 
 class TestThresholdConstants:
-    """Verify Phase 1 threshold values."""
+    """Verify diarization-engine threshold values. Tuned for the CAM++ legacy
+    backend after ONNX ERes2Net became fallback-only — CAM++ produces less
+    separated embeddings, so NEW_SPEAKER and MERGE thresholds are lower."""
 
     def test_similarity_threshold(self):
         assert DiarizationEngine.MATCH_THRESHOLD == 0.55
-        assert DiarizationEngine.NEW_SPEAKER_THRESHOLD == 0.45
+        assert DiarizationEngine.NEW_SPEAKER_THRESHOLD == 0.40
 
     def test_merge_threshold(self):
-        assert DiarizationEngine.MERGE_THRESHOLD == 0.65
+        assert DiarizationEngine.MERGE_THRESHOLD == 0.55
 
     def test_min_speech_samples(self):
         from audio.diarization.engine import _MIN_SPEECH_SAMPLES
