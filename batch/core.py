@@ -21,7 +21,7 @@ from config import (
     AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS, AVAILABLE_LANGUAGES,
 )
 from audio.transcriber import (
-    Qwen3Transcriber, FasterWhisperTranscriber, WhisperTranscriber,
+    Qwen3Transcriber, FasterWhisperTranscriber, WhisperTranscriber, CloudTranscriber,
 )
 from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
@@ -54,7 +54,13 @@ def load_audio_16k_mono(path: Path) -> np.ndarray:
     return data
 
 
+# Remote (OpenAI-compatible) models — no local compute. NEAR AI Cloud whisper.
+CLOUD_MODELS = {"near-whisper": "openai/whisper-large-v3"}
+
+
 def make_transcriber(model_name: str, language: str | None):
+    if model_name in CLOUD_MODELS:
+        return CloudTranscriber(model=CLOUD_MODELS[model_name], language=language)
     repo = AVAILABLE_MODELS[model_name]
     if model_name in QWEN3_MODELS:
         return Qwen3Transcriber(model=repo, language=language)

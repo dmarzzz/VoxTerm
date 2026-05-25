@@ -60,8 +60,11 @@ def import_recordings(
 ) -> list[tuple[Path, str, str | None]]:
     """Copy new recordings off the device, then transcribe.
 
-    Returns (source_path, action, transcript_path) per file, where action is
-    "import" or "skip" (already imported, by hash).
+    Dedup is by content hash, tracked separately from transcription: a file
+    that was copied (e.g. via --no-transcribe) but not yet transcribed will be
+    transcribed on a later run. Action per file is one of "import" (copied +
+    transcribed), "copy" (copied only), "transcribe" (already copied, now
+    transcribed), or "skip" (nothing to do).
     """
     recordings = find_rode_recordings()
     manifest = _load_manifest()
@@ -72,28 +75,31 @@ def import_recordings(
 
     for src in recordings:
         digest = _sha256(src)
-        if digest in manifest:
-            results.append((src, "skip", manifest[digest].get("transcript")))
-            continue
+        entry = manifest.get(digest)
+        copied = entry is not None
 
-        dest = IMPORT_DIR / src.name
-        if dest.exists():
-            dest = IMPORT_DIR / f"{digest[:8]}_{src.name}"
-        shutil.copy2(src, dest)
+        if not copied:
+            dest = IMPORT_DIR / src.name
+            if dest.exists():
+                dest = IMPORT_DIR / f"{digest[:8]}_{src.name}"
+            shutil.copy2(src, dest)
+            entry = {
+                "name": src.name,
+                "size": src.stat().st_size,
+                "imported_at": datetime.now().isoformat(timespec="seconds"),
+                "local": str(dest),
+                "transcript": None,
+            }
+            manifest[digest] = entry
+            MANIFEST.write_text(json.dumps(manifest, indent=2))
 
-        entry = {
-            "name": src.name,
-            "size": src.stat().st_size,
-            "imported_at": datetime.now().isoformat(timespec="seconds"),
-            "local": str(dest),
-        }
-        transcript = None
-        if transcribe:
-            transcript = str(transcribe_file(dest, pipeline=pipeline))
-            entry["transcript"] = transcript
+        if transcribe and not entry.get("transcript"):
+            entry["transcript"] = str(transcribe_file(entry["local"], pipeline=pipeline))
+            MANIFEST.write_text(json.dumps(manifest, indent=2))
+            action = "import" if not copied else "transcribe"
+        else:
+            action = "copy" if not copied else "skip"
 
-        manifest[digest] = entry
-        MANIFEST.write_text(json.dumps(manifest, indent=2))
-        results.append((src, "import", transcript))
+        results.append((src, action, entry.get("transcript")))
 
     return results

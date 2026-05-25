@@ -329,3 +329,97 @@ class FasterWhisperTranscriber(_DeduplicatorMixin):
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+
+# NEAR AI Cloud — OpenAI-compatible gateway, serves openai/whisper-large-v3.
+NEAR_AI_BASE_URL = "https://cloud-api.near.ai/v1"
+
+
+def _load_cloud_api_key() -> str | None:
+    """API key from NEAR_AI_API_KEY env, else DATA_DIR/near_ai.key."""
+    key = os.environ.get("NEAR_AI_API_KEY")
+    if key:
+        return key.strip()
+    from config import DATA_DIR
+    key_file = DATA_DIR / "near_ai.key"
+    return key_file.read_text().strip() if key_file.exists() else None
+
+
+class CloudTranscriber(_DeduplicatorMixin):
+    """Remote transcription via an OpenAI-compatible /audio/transcriptions endpoint.
+
+    Defaults to NEAR AI Cloud (openai/whisper-large-v3) but works with any
+    OpenAI-compatible speech-to-text API. Each numpy chunk is encoded as an
+    in-memory WAV and POSTed; VAD and diarization still run locally.
+    """
+
+    def __init__(self, model: str = "openai/whisper-large-v3", language: str | None = "en",
+                 base_url: str | None = None, api_key: str | None = None):
+        self.model_id = model
+        self._language = language
+        self._base_url = (base_url or os.environ.get("NEAR_AI_BASE_URL", NEAR_AI_BASE_URL)).rstrip("/")
+        self._api_key = api_key or _load_cloud_api_key()
+        self._loaded = False
+        self._init_dedup()
+
+    def load(self):
+        if not self._api_key:
+            from config import DATA_DIR
+            raise RuntimeError(
+                "No cloud API key — set NEAR_AI_API_KEY or write it to "
+                f"{DATA_DIR / 'near_ai.key'}"
+            )
+        self._loaded = True
+
+    def transcribe(self, audio: np.ndarray, **kwargs) -> dict:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        text = self._post_audio(audio)
+
+        if _is_hallucination(text, self._language):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+        if self._is_duplicate(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+        return {"text": text, "speaker": "", "speaker_id": 0}
+
+    def _post_audio(self, audio: np.ndarray) -> str:
+        import io
+        import json
+        import uuid
+        import urllib.request
+        from scipy.io import wavfile
+        from config import SAMPLE_RATE
+
+        buf = io.BytesIO()
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
+        wavfile.write(buf, SAMPLE_RATE, pcm)
+
+        boundary = "----voxterm" + uuid.uuid4().hex
+
+        def _field(name: str, value: str) -> bytes:
+            return (f'--{boundary}\r\nContent-Disposition: form-data; '
+                    f'name="{name}"\r\n\r\n{value}\r\n').encode()
+
+        body = _field("model", self.model_id)
+        if self._language:
+            body += _field("language", self._language)
+        body += _field("response_format", "json")
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                 f'filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
+        body += buf.getvalue() + b"\r\n" + f"--{boundary}--\r\n".encode()
+
+        req = urllib.request.Request(
+            f"{self._base_url}/audio/transcriptions", data=body, method="POST",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read()).get("text", "").strip()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
