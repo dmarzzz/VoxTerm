@@ -51,6 +51,13 @@ dependencies = [
 # Optional cross-platform CPU streaming-ASR backend (sherpa-onnx). Not a core dep — install
 # with `pip install "voxterm[streaming]"`. The marker excludes Intel macOS (no wheel exists).
 streaming = ["sherpa-onnx>=1.13.0; sys_platform != 'darwin' or platform_machine == 'arm64'"]
+# OpenAI Privacy Filter redaction backend. ONNX weights run on onnxruntime
+# (already a core dep); optimum + transformers provide the loader/tokenizer.
+# Opt-in because they're heavy: pip install 'voxterm[privacy-filter]'
+privacy-filter = [
+    "optimum[onnxruntime]>=1.20.0",
+    "transformers>=4.40.0",
+]
 
 [project.scripts]
 voxterm = "tui.app:main"
