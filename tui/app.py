@@ -66,8 +66,18 @@ from tui.widgets.tag_screen import SpeakerTagScreen
 from tui.widgets.profile_screen import SpeakerProfileScreen
 from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
-from tui.widgets.redaction_screen import RedactionScreen, RedactionResultScreen
-from redaction import RedactionError, get_redactor, resolve_profile
+from tui.widgets.redaction_screen import (
+    RedactionScreen,
+    RedactionReviewScreen,
+    RedactionResultScreen,
+)
+from redaction import (
+    RedactionError,
+    apply_redactions,
+    get_redactor,
+    overwrite_and_delete,
+    resolve_profile,
+)
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
 from audio.capture import AudioCapture
@@ -2301,20 +2311,67 @@ class VoxTerm(App):
             return
 
         self.call_from_thread(
-            self._write_redaction_export,
+            self._review_redaction,
             profile.label,
             result,
+            body,
             entry_count,
         )
 
-    def _write_redaction_export(
+    def _review_redaction(
         self,
         profile_label: str,
         result,  # redaction.RedactionResult
+        body: str,
         entry_count: int,
     ) -> None:
-        """Write the redacted snapshot to a ``*-redacted.md`` file (main-thread)."""
+        """Show the pre-write review modal (main-thread).
+
+        Nothing is on disk yet. The user vets the found spans (uncheck false
+        positives, add missed ones), picks what happens to the unredacted
+        original, then confirms — only then do we write. Cancelling writes
+        nothing, which is the point: a small model's silent miss can't slip
+        into a file called ``-redacted`` without a human seeing the preview.
+        """
         transcript = self.query_one(TranscriptPanel)
+        candidate_spans = [(f.text, f.type) for f in result.findings]
+
+        def on_reviewed(res):
+            if not res:
+                transcript.system_message(
+                    "redaction cancelled — nothing written", Log.REC
+                )
+                return
+            self._finalize_redaction_export(
+                profile_label,
+                body,
+                res["spans"],
+                res.get("disposition", "keep"),
+                entry_count,
+            )
+
+        self.push_screen(
+            RedactionReviewScreen(
+                spans=candidate_spans,
+                body=body,
+                profile_label=profile_label,
+            ),
+            on_reviewed,
+        )
+
+    def _finalize_redaction_export(
+        self,
+        profile_label: str,
+        body: str,
+        spans: list,
+        disposition: str,
+        entry_count: int,
+    ) -> None:
+        """Apply the user-approved spans, write ``*-redacted.md``, and act on
+        the original per the chosen disposition (main-thread)."""
+        transcript = self.query_one(TranscriptPanel)
+        result = apply_redactions(body, spans)
+
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         filename = (
             self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-redacted.md"
@@ -2333,7 +2390,7 @@ class VoxTerm(App):
                 f"— {tally}._"
             )
         else:
-            note = f"_Redacted ({profile_label}): no sensitive spans found._"
+            note = f"_Redacted ({profile_label}): no spans masked._"
 
         # Splice the redaction note just after the first `---` divider so the
         # session header stays at the top (mirrors the summary export).
@@ -2350,8 +2407,23 @@ class VoxTerm(App):
 
         filepath.write_text(md, encoding="utf-8")
 
+        # Act on the unredacted original (the live-autosave file).
+        original_note = ""
+        if disposition in ("replace", "shred") and self._live_file and self._live_file.exists():
+            if disposition == "shred":
+                overwrite_and_delete(self._live_file)
+                original_note = "original shredded (best-effort overwrite + delete)"
+            else:
+                self._live_file.unlink()
+                original_note = "original (live autosave) deleted"
+        elif disposition in ("replace", "shred"):
+            original_note = "no live autosave on disk to remove"
+        else:
+            original_note = "original kept on disk"
+
         transcript.system_message(
-            f"redacted {entry_count} entries ({result.total} spans) → {filepath}",
+            f"redacted {entry_count} entries ({result.total} spans) → {filepath} "
+            f"[{original_note}]",
             Log.REC,
         )
         self.push_screen(
@@ -2361,6 +2433,7 @@ class VoxTerm(App):
                 total=result.total,
                 path=str(filepath),
                 profile_label=profile_label,
+                original_note=original_note,
             )
         )
 

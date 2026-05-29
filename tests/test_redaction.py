@@ -17,6 +17,7 @@ from redaction.engine import (
     apply_redactions,
     chunk_text,
     get_redactor,
+    overwrite_and_delete,
     parse_spans,
     regex_spans,
 )
@@ -188,3 +189,38 @@ def test_unreachable_host_raises_clean_error():
     r = OllamaRedactor("qwen3:0.6b@http://localhost:9")
     with pytest.raises(RedactionError, match="Cannot reach Ollama"):
         r.redact("x", resolve_profile("standard"))
+
+
+# --- review-step semantics (user edits the span set) --------------------
+
+def test_review_user_deselects_a_false_positive():
+    # The review screen hands back only the spans the user kept. A span
+    # dropped in review must NOT be masked in the finalized output.
+    body = "Paris is nice. Bob lives in Paris."
+    # model proposed both; user unchecked "Paris" (a place they don't mind).
+    kept = [("Bob", "NAME")]
+    res = apply_redactions(body, kept)
+    assert res.redacted_text == "Paris is nice. [NAME] lives in Paris."
+    assert "Paris" in res.redacted_text  # deselected → left intact
+
+
+def test_review_user_adds_a_missed_span():
+    body = "The codeword is bluebird."
+    added = [("bluebird", "OTHER")]
+    res = apply_redactions(body, added)
+    assert res.redacted_text == "The codeword is [OTHER]."
+
+
+# --- shred helper --------------------------------------------------------
+
+def test_overwrite_and_delete_removes_file(tmp_path):
+    p = tmp_path / "secret-transcript.md"
+    p.write_text("Alice said her SSN is 123-45-6789", encoding="utf-8")
+    overwrite_and_delete(p)
+    assert not p.exists()
+
+
+def test_overwrite_and_delete_missing_file_is_noop(tmp_path):
+    p = tmp_path / "nope.md"
+    overwrite_and_delete(p)  # must not raise
+    assert not p.exists()

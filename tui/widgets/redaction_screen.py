@@ -8,13 +8,35 @@ import subprocess
 import sys
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Static, OptionList, Input, Markdown
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import (
+    Button,
+    Input,
+    Markdown,
+    OptionList,
+    SelectionList,
+    Static,
+)
 from textual.widgets.option_list import Option
+from textual.widgets.selection_list import Selection
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
+from redaction.engine import apply_redactions
 from redaction.prompts import PROFILES
+
+# Disposition of the unredacted live-autosave file once the redacted copy is
+# written. Kept here so the screen and app agree on the string values.
+DISPOSITIONS = (
+    ("keep", "Keep original", "leave the unredacted live transcript on disk"),
+    ("replace", "Replace original", "delete the unredacted live transcript"),
+    ("shred", "Shred original", "overwrite then delete (best-effort, not a forensic wipe)"),
+)
+
+
+def _ellipsize(text: str, width: int = 56) -> str:
+    one_line = " ".join(text.split())
+    return one_line if len(one_line) <= width else one_line[: width - 1] + "…"
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -257,6 +279,10 @@ class RedactionResultScreen(ModalScreen):
         color: #807060;
         margin-top: 1;
     }
+    #redact-result-orig {
+        height: auto;
+        color: #807060;
+    }
     #redact-result-status {
         height: 1;
         color: #ffb38a;
@@ -282,6 +308,7 @@ class RedactionResultScreen(ModalScreen):
         total: int = 0,
         path: str = "",
         profile_label: str = "",
+        original_note: str = "",
     ):
         super().__init__()
         self._redacted = redacted_text
@@ -289,6 +316,7 @@ class RedactionResultScreen(ModalScreen):
         self._total = total
         self._path = path
         self._label = profile_label
+        self._original_note = original_note
 
     def _tally_line(self) -> str:
         if self._total == 0:
@@ -312,6 +340,8 @@ class RedactionResultScreen(ModalScreen):
                 yield Markdown(self._redacted)
             if self._path:
                 yield Static(f"saved → {self._path}", id="redact-result-path")
+            if self._original_note:
+                yield Static(f"original: {self._original_note}", id="redact-result-orig")
             yield Static("", id="redact-result-status", markup=True)
             yield Static(
                 " [#807060]C[/] copy  [#807060]O[/] open file  "
@@ -353,4 +383,201 @@ class RedactionResultScreen(ModalScreen):
             self._status("[#ff5577]could not open file[/]")
 
     def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class RedactionReviewScreen(ModalScreen):
+    """Review what will be masked BEFORE anything is written.
+
+    Small models miss PII, and a miss written into a file named ``-redacted``
+    is worse than no tool — it feels safe. This screen makes every miss
+    catchable: the found spans are shown as a toggle list (uncheck false
+    positives), you can type to add spans the model missed, a live preview
+    reflects the current selection, and you choose what happens to the
+    unredacted original. Nothing is written unless you confirm.
+
+    Dismisses with a dict or None:
+        {"spans": [(text, type), ...], "disposition": "keep"|"replace"|"shred"}
+            — write with exactly these spans
+        None — cancelled, write nothing
+    """
+
+    DEFAULT_CSS = """
+    RedactionReviewScreen {
+        align: center middle;
+    }
+    #review-dialog {
+        width: 92;
+        height: auto;
+        max-height: 40;
+        border: heavy #ff8855;
+        border-title-color: #ffb38a;
+        border-title-style: bold;
+        background: #140d0a;
+        padding: 1 2;
+    }
+    #review-instr { height: auto; color: #807060; margin-bottom: 1; }
+    #review-spans {
+        height: auto;
+        max-height: 9;
+        background: #140d0a;
+        color: #c0c0c0;
+    }
+    #review-add {
+        width: 100%;
+        background: #221511;
+        color: #ffb38a;
+        border: tall #442211;
+        margin-top: 1;
+    }
+    #review-add:focus { border: tall #ff8855; }
+    #review-disp-label { height: 1; color: #807060; margin-top: 1; }
+    #review-disposition {
+        height: auto;
+        max-height: 3;
+        background: #140d0a;
+        color: #c0c0c0;
+    }
+    #review-disposition > .option-list--option-highlighted {
+        background: #3a1f1a;
+        color: #ffb38a;
+    }
+    #review-preview-label { height: 1; color: #807060; margin-top: 1; }
+    #review-preview {
+        height: auto;
+        max-height: 9;
+        background: #0d0806;
+        border: tall #442211;
+    }
+    #review-preview Static { color: #9aa0a6; }
+    #review-buttons { height: auto; margin-top: 1; align-horizontal: right; }
+    #review-buttons Button { margin-left: 2; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+w", "confirm", "Write"),
+    ]
+
+    def __init__(
+        self,
+        spans: list[tuple[str, str]],
+        body: str,
+        profile_label: str = "",
+    ):
+        super().__init__()
+        # mutable working copy; add-span appends here
+        self._spans: list[tuple[str, str]] = list(spans)
+        self._body = body
+        self._label = profile_label
+        self._disposition = "keep"
+
+    @staticmethod
+    def _span_prompt(text: str, typ: str) -> str:
+        return f"[#ffb38a]{typ:<10}[/] {_ellipsize(text)}"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="review-dialog") as dialog:
+            n = len(self._spans)
+            dialog.border_title = (
+                f"REVIEW REDACTION — {n} found"
+                + (f" · {self._label}" if self._label else "")
+            )
+            yield Static(
+                "Uncheck false positives · type below to add a missed span · "
+                "models miss things, so scan the preview before writing.",
+                id="review-instr",
+            )
+
+            sl: SelectionList[int] = SelectionList(
+                *[
+                    Selection(self._span_prompt(t, ty), i, True)
+                    for i, (t, ty) in enumerate(self._spans)
+                ],
+                id="review-spans",
+            )
+            yield sl
+
+            yield Input(
+                placeholder="add a word/phrase the model missed, then Enter…",
+                id="review-add",
+            )
+
+            yield Static("[#807060]original file[/]", id="review-disp-label", markup=True)
+            disp = OptionList(
+                *[
+                    Option(f"  {label:<18s}  [#605040]{desc}[/]", id=did)
+                    for did, label, desc in DISPOSITIONS
+                ],
+                id="review-disposition",
+            )
+            disp.highlighted = 0
+            yield disp
+
+            yield Static("[#807060]preview[/]", id="review-preview-label", markup=True)
+            with VerticalScroll(id="review-preview"):
+                yield Static("", id="review-preview-body")
+
+            with Horizontal(id="review-buttons"):
+                yield Button("Cancel", id="review-cancel")
+                yield Button("Write redacted copy", id="review-confirm", variant="warning")
+
+    def on_mount(self) -> None:
+        self._refresh_preview()
+
+    # --- preview ---------------------------------------------------------
+
+    def _selected_spans(self) -> list[tuple[str, str]]:
+        sl = self.query_one("#review-spans", SelectionList)
+        chosen = set(sl.selected)
+        return [self._spans[i] for i in range(len(self._spans)) if i in chosen]
+
+    def _refresh_preview(self) -> None:
+        result = apply_redactions(self._body, self._selected_spans())
+        # show just the transcript portion (after the first --- divider)
+        text = result.redacted_text
+        marker = "\n---\n"
+        idx = text.find(marker)
+        shown = text[idx + len(marker):] if idx != -1 else text
+        body = self.query_one("#review-preview-body", Static)
+        if result.total == 0:
+            body.update("[#807060](nothing will be masked)[/]\n\n" + shown)
+        else:
+            body.update(shown)
+
+    def on_selection_list_selected_changed(self, event) -> None:
+        self._refresh_preview()
+
+    def on_option_list_option_highlighted(self, event) -> None:
+        if event.option_list.id == "review-disposition" and event.option.id:
+            self._disposition = event.option.id
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "review-add":
+            return
+        text = event.value.strip()
+        event.input.value = ""
+        if not text:
+            return
+        idx = len(self._spans)
+        self._spans.append((text, "OTHER"))
+        self.query_one("#review-spans", SelectionList).add_option(
+            Selection(self._span_prompt(text, "OTHER"), idx, True)
+        )
+        self._refresh_preview()
+
+    # --- actions ---------------------------------------------------------
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "review-confirm":
+            self.action_confirm()
+        elif event.button.id == "review-cancel":
+            self.action_cancel()
+
+    def action_confirm(self) -> None:
+        self.dismiss(
+            {"spans": self._selected_spans(), "disposition": self._disposition}
+        )
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

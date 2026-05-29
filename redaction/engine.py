@@ -213,6 +213,34 @@ def apply_redactions(
     )
 
 
+def overwrite_and_delete(path) -> None:
+    """Best-effort shred: overwrite a file's bytes with random data, then
+    unlink it.
+
+    NOTE: on copy-on-write / flash filesystems (APFS, most SSDs) this does
+    NOT guarantee the original bytes are unrecoverable — the overwrite may
+    land on fresh blocks while the old ones linger until garbage-collected.
+    It's a best-effort reduction of the on-disk plaintext, not a forensic
+    wipe. We don't pretend otherwise in the UI.
+    """
+    p = os.fspath(path)
+    try:
+        if not os.path.exists(p):
+            return
+        size = os.path.getsize(p)
+        if size:
+            with open(p, "r+b", buffering=0) as f:
+                f.write(os.urandom(size))
+                f.flush()
+                os.fsync(f.fileno())
+    except OSError:
+        pass  # fall through to unlink regardless
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Backends
 # ---------------------------------------------------------------------------
