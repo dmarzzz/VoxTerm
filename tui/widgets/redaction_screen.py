@@ -23,7 +23,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 
 from redaction.engine import apply_redactions
-from redaction.prompts import PROFILES
+from redaction.tiers import TIERS, filter_spans, next_tier, resolve_tier, tier_masks
 
 # Disposition of the unredacted live-autosave file once the redacted copy is
 # written. Kept here so the screen and app agree on the string values.
@@ -37,6 +37,13 @@ DISPOSITIONS = (
 def _ellipsize(text: str, width: int = 56) -> str:
     one_line = " ".join(text.split())
     return one_line if len(one_line) <= width else one_line[: width - 1] + "…"
+
+
+def _tier_meter(tier) -> str:
+    """A 4-segment colored meter filled to the tier's rank (markup string)."""
+    filled = "▰" * (tier.rank + 1)
+    empty = "▱" * (len(TIERS) - tier.rank - 1)
+    return f"[{tier.color}]{filled}[/][#3a332c]{empty}[/]"
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -62,10 +69,14 @@ def _open_cmd() -> str | None:
 
 
 class RedactionScreen(ModalScreen):
-    """Pick a redaction profile and (optionally) supply a custom instruction.
+    """Pick the starting disclosure tier and (optionally) the model.
+
+    The tier is the *audience* you're redacting for — you can still dial it up
+    or down on the review screen before writing. Detection always finds the
+    full vocabulary; the tier decides what gets masked.
 
     Dismisses with a dict or None:
-        {"profile_id": str, "custom_instructions": str, "redaction_model": str}
+        {"tier_id": str, "redaction_model": str}
             — proceed ("redaction_model": blank = on-device MLX on Apple
               Silicon, or an "ollama:<model>[@host]" string)
         None — cancelled
@@ -76,7 +87,7 @@ class RedactionScreen(ModalScreen):
         align: center middle;
     }
     #redact-dialog {
-        width: 64;
+        width: 70;
         height: auto;
         max-height: 24;
         border: heavy #ff8855;
@@ -87,30 +98,13 @@ class RedactionScreen(ModalScreen):
     }
     #redact-list {
         height: auto;
-        max-height: 10;
+        max-height: 12;
         background: #140d0a;
         color: #c0c0c0;
     }
     #redact-list > .option-list--option-highlighted {
         background: #3a1f1a;
         color: #ffb38a;
-    }
-    #redact-custom-container {
-        height: 3;
-        margin-top: 1;
-        display: none;
-    }
-    #redact-custom-container.-visible {
-        display: block;
-    }
-    #redact-custom {
-        width: 100%;
-        background: #221511;
-        color: #ffb38a;
-        border: tall #442211;
-    }
-    #redact-custom:focus {
-        border: tall #ff8855;
     }
     #redact-model-label {
         height: 1;
@@ -139,37 +133,32 @@ class RedactionScreen(ModalScreen):
 
     def __init__(
         self,
-        default_profile_id: str = "standard",
-        default_custom_instructions: str = "",
+        default_tier_id: str = "room",
         default_redaction_model: str = "",
     ):
         super().__init__()
-        self._default_id = default_profile_id
-        self._default_custom = default_custom_instructions
+        self._default_id = default_tier_id
         self._default_model = default_redaction_model
-        self._selected_id: str = default_profile_id
+        self._selected_id: str = resolve_tier(default_tier_id).id
 
     def compose(self) -> ComposeResult:
         with Vertical(id="redact-dialog") as dialog:
-            dialog.border_title = "REDACT TRANSCRIPT"
+            dialog.border_title = "REDACT — disclosure tier"
 
             options = []
             initial_index = 0
-            for idx, prof in enumerate(PROFILES):
-                label = f"  {prof.label:20s}  [#807060]{prof.description}[/]"
-                options.append(Option(label, id=prof.id))
-                if prof.id == self._default_id:
+            for idx, tier in enumerate(TIERS):
+                meter = _tier_meter(tier)
+                label = (
+                    f"  {meter}  [b {tier.color}]{tier.label:<6}[/] "
+                    f"[#807060]{tier.audience} — {tier.description}[/]"
+                )
+                options.append(Option(label, id=tier.id))
+                if tier.id == self._selected_id:
                     initial_index = idx
             ol = OptionList(*options, id="redact-list")
             ol.highlighted = initial_index
             yield ol
-
-            with Vertical(id="redact-custom-container"):
-                yield Input(
-                    placeholder="What should be redacted?…",
-                    id="redact-custom",
-                    value=self._default_custom,
-                )
 
             yield Static(
                 "[#807060]redaction model[/] "
@@ -186,28 +175,17 @@ class RedactionScreen(ModalScreen):
             )
 
             yield Static(
-                " [#807060]ENTER[/] redact  [#807060]ESC[/] cancel",
+                " [#807060]ENTER[/] detect  ·  dial the tier on the next "
+                "screen  ·  [#807060]ESC[/] cancel",
                 id="redact-hint",
                 markup=True,
             )
-
-    def on_mount(self) -> None:
-        self._sync_custom_visibility()
-
-    def _sync_custom_visibility(self) -> None:
-        container = self.query_one("#redact-custom-container")
-        if self._selected_id == "custom":
-            container.add_class("-visible")
-            self.query_one("#redact-custom", Input).focus()
-        else:
-            container.remove_class("-visible")
 
     def on_option_list_option_highlighted(
         self, event: OptionList.OptionHighlighted
     ) -> None:
         if event.option and event.option.id:
             self._selected_id = event.option.id
-            self._sync_custom_visibility()
 
     def on_option_list_option_selected(
         self, event: OptionList.OptionSelected
@@ -220,19 +198,8 @@ class RedactionScreen(ModalScreen):
         self._submit()
 
     def _submit(self) -> None:
-        custom = ""
-        if self._selected_id == "custom":
-            custom = self.query_one("#redact-custom", Input).value.strip()
-            if not custom:
-                return  # require an instruction for custom
         model = self.query_one("#redact-model", Input).value.strip()
-        self.dismiss(
-            {
-                "profile_id": self._selected_id,
-                "custom_instructions": custom,
-                "redaction_model": model,
-            }
-        )
+        self.dismiss({"tier_id": self._selected_id, "redaction_model": model})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -452,10 +419,12 @@ class RedactionReviewScreen(ModalScreen):
     #review-preview Static { color: #9aa0a6; }
     #review-buttons { height: auto; margin-top: 1; align-horizontal: right; }
     #review-buttons Button { margin-left: 2; }
+    #review-tier { height: auto; margin-bottom: 1; }
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+t", "cycle_tier", "Tier"),
         Binding("ctrl+w", "confirm", "Write"),
     ]
 
@@ -463,35 +432,45 @@ class RedactionReviewScreen(ModalScreen):
         self,
         spans: list[tuple[str, str]],
         body: str,
-        profile_label: str = "",
+        tier_id: str = "room",
     ):
         super().__init__()
         # mutable working copy; add-span appends here
         self._spans: list[tuple[str, str]] = list(spans)
         self._body = body
-        self._label = profile_label
+        self._tier = resolve_tier(tier_id)
         self._disposition = "keep"
 
     @staticmethod
     def _span_prompt(text: str, typ: str) -> str:
-        return f"[#ffb38a]{typ:<10}[/] {_ellipsize(text)}"
+        return f"[#ffb38a]{typ:<12}[/] {_ellipsize(text)}"
+
+    def _tier_banner(self) -> str:
+        t = self._tier
+        return (
+            f"disclosure  {_tier_meter(t)}  [b {t.color}]{t.label}[/]  "
+            f"[#807060]{t.audience} — {t.description}[/]   "
+            f"[#605040](⌃T to dial)[/]"
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="review-dialog") as dialog:
             n = len(self._spans)
-            dialog.border_title = (
-                f"REVIEW REDACTION — {n} found"
-                + (f" · {self._label}" if self._label else "")
-            )
+            dialog.border_title = f"REVIEW REDACTION — {n} found"
+
+            yield Static(self._tier_banner(), id="review-tier", markup=True)
             yield Static(
-                "Uncheck false positives · type below to add a missed span · "
-                "models miss things, so scan the preview before writing.",
+                "The tier sets the baseline · uncheck false positives or check "
+                "extras · type below to add a missed span · scan the preview.",
                 id="review-instr",
             )
 
+            # Initial check state follows the tier policy.
             sl: SelectionList[int] = SelectionList(
                 *[
-                    Selection(self._span_prompt(t, ty), i, True)
+                    Selection(
+                        self._span_prompt(t, ty), i, tier_masks(self._tier, ty)
+                    )
                     for i, (t, ty) in enumerate(self._spans)
                 ],
                 id="review-spans",
@@ -523,6 +502,21 @@ class RedactionReviewScreen(ModalScreen):
                 yield Button("Write redacted copy", id="review-confirm", variant="warning")
 
     def on_mount(self) -> None:
+        self._refresh_preview()
+
+    # --- tier dial -------------------------------------------------------
+
+    def action_cycle_tier(self) -> None:
+        self._tier = next_tier(self._tier)
+        self.query_one("#review-tier", Static).update(self._tier_banner())
+        # The dial resets the baseline selection to the new tier's policy;
+        # any manual tweaks are intentionally cleared so the posture is honest.
+        sl = self.query_one("#review-spans", SelectionList)
+        for i, (_t, ty) in enumerate(self._spans):
+            if tier_masks(self._tier, ty):
+                sl.select(i)
+            else:
+                sl.deselect(i)
         self._refresh_preview()
 
     # --- preview ---------------------------------------------------------
@@ -576,7 +570,11 @@ class RedactionReviewScreen(ModalScreen):
 
     def action_confirm(self) -> None:
         self.dismiss(
-            {"spans": self._selected_spans(), "disposition": self._disposition}
+            {
+                "spans": self._selected_spans(),
+                "disposition": self._disposition,
+                "tier_id": self._tier.id,
+            }
         )
 
     def action_cancel(self) -> None:

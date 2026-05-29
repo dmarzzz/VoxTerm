@@ -224,3 +224,52 @@ def test_overwrite_and_delete_missing_file_is_noop(tmp_path):
     p = tmp_path / "nope.md"
     overwrite_and_delete(p)  # must not raise
     assert not p.exists()
+
+
+# --- disclosure tiers ----------------------------------------------------
+
+from redaction.tiers import (
+    TIERS,
+    filter_spans,
+    next_tier,
+    resolve_tier,
+    tier_masks,
+)
+
+
+def test_tiers_are_strictly_nested():
+    raw, inner, room, world = (resolve_tier(i) for i in ("raw", "inner", "room", "world"))
+    assert raw.masks < inner.masks < room.masks < world.masks
+    assert raw.masks == frozenset()
+
+
+def test_tier_policy_per_category():
+    world, room, inner, raw = (resolve_tier(i) for i in ("world", "room", "inner", "raw"))
+    # secrets masked everywhere except raw
+    assert tier_masks(inner, "CREDENTIAL") and tier_masks(inner, "ID")
+    assert not tier_masks(inner, "NAME")
+    # room strips people but keeps the work (orgs/projects)
+    assert tier_masks(room, "NAME") and tier_masks(room, "SUBSTANCE")
+    assert not tier_masks(room, "ORG") and not tier_masks(room, "PROJECT")
+    # world strips proper nouns too
+    assert tier_masks(world, "ORG") and tier_masks(world, "PROJECT")
+    # raw masks nothing
+    assert not any(tier_masks(raw, c) for c in ("NAME", "ID", "ORG"))
+
+
+def test_filter_spans_by_tier():
+    spans = [("Alice", "NAME"), ("Reth", "PROJECT"), ("hunter2", "CREDENTIAL")]
+    assert dict(filter_spans(resolve_tier("raw"), spans)) == {}
+    assert dict(filter_spans(resolve_tier("inner"), spans)) == {"hunter2": "CREDENTIAL"}
+    assert "Reth" not in dict(filter_spans(resolve_tier("room"), spans))
+    assert "Alice" in dict(filter_spans(resolve_tier("room"), spans))
+    assert dict(filter_spans(resolve_tier("world"), spans)) == dict(spans)
+
+
+def test_next_tier_wraps():
+    order = [next_tier(TIERS[i]).id for i in range(len(TIERS))]
+    assert order == ["inner", "room", "world", "raw"]
+
+
+def test_resolve_tier_fallback():
+    assert resolve_tier("nonsense").id == "room"

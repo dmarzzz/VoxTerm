@@ -19,18 +19,33 @@ from dataclasses import dataclass
 
 # The fixed category vocabulary. The engine coerces any out-of-set label the
 # model emits down to OTHER, so adding/removing here only affects the prompt.
+# Two families: IDENTIFIERS (who/where) and SENSITIVITY content-classes
+# (what-about-them). The redaction *tiers* (redaction/tiers.py) decide which of
+# these get masked for a given audience — detection finds them all.
 CATEGORIES: tuple[str, ...] = (
-    "NAME",        # person names
-    "EMAIL",       # email addresses
-    "PHONE",       # phone / fax numbers
-    "ADDRESS",     # street / mailing addresses
-    "LOCATION",    # specific places that identify a person
-    "ORG",         # employers / companies tied to a person
-    "DATE",        # specific dates, especially dates of birth
-    "ID",          # SSN, account / card / licence / passport numbers
-    "CREDENTIAL",  # passwords, API keys, tokens, secrets
-    "URL",         # web links
-    "OTHER",       # anything else identifying
+    # --- identifiers ---
+    "NAME",          # person names
+    "EMAIL",         # email addresses
+    "PHONE",         # phone / fax numbers
+    "ADDRESS",       # street / mailing addresses
+    "LOCATION",      # specific places that identify a person
+    "DATE",          # specific dates, especially dates of birth
+    "ID",            # SSN, account / card / licence / passport numbers
+    "CREDENTIAL",    # passwords, API keys, tokens, secrets
+    "URL",           # web links
+    "HANDLE",        # social handles / usernames (@someone)
+    # --- proper nouns (kept until the most-public tier) ---
+    "ORG",           # organizations, companies, employers
+    "PROJECT",       # project / product / software / protocol names
+    # --- sensitivity content-classes (LLM-only; regex can't see these) ---
+    "SUBSTANCE",     # drugs, alcohol, substance use
+    "HEALTH",        # medical / mental-health details
+    "SEXUAL",        # sexual orientation / activity
+    "LEGAL",         # criminal or legal exposure
+    "FINANCIAL",     # personal financial specifics (salary, debt, balances)
+    "AFFILIATION",   # political / religious affiliation
+    "RELATIONSHIP",  # family / personal relationships
+    "OTHER",         # anything else identifying or sensitive
 )
 
 
@@ -63,8 +78,11 @@ _SYSTEM = (
     "- Copy each span VERBATIM — character for character as it appears in "
     "the transcript — so it can be found by exact string match. Do not "
     "normalize, reformat, re-case, or paraphrase it.\n"
-    "- CATEGORY is one of: NAME, EMAIL, PHONE, ADDRESS, LOCATION, ORG, "
-    "DATE, ID, CREDENTIAL, URL, OTHER.\n"
+    "- CATEGORY is one of: NAME, EMAIL, PHONE, ADDRESS, LOCATION, DATE, ID, "
+    "CREDENTIAL, URL, HANDLE, ORG (organizations/companies), PROJECT "
+    "(products/software/protocols), SUBSTANCE (drugs/alcohol), HEALTH, "
+    "SEXUAL, LEGAL, FINANCIAL, AFFILIATION (political/religious), "
+    "RELATIONSHIP, OTHER.\n"
     "- Prefer the smallest span that captures the sensitive value — the "
     "name itself, not the whole sentence.\n"
     "- If the transcript contains no sensitive information, output exactly: []"
@@ -140,3 +158,26 @@ _BY_ID = {p.id: p for p in PROFILES}
 def resolve_profile(profile_id: str) -> RedactionProfile:
     """Look up a profile by id. Falls back to ``standard`` if unknown."""
     return _BY_ID.get(profile_id, _BY_ID["standard"])
+
+
+# Comprehensive detection used by the tier dial: find EVERYTHING across both
+# families in a single pass, so cycling tiers only re-filters which categories
+# get masked (no re-inference). The tier policy — not the prompt — decides
+# what's actually redacted.
+DETECTION_PROFILE = RedactionProfile(
+    id="_detect_all",
+    label="All",
+    description="detect every identifier and sensitive content-class",
+    system=_SYSTEM,
+    user=(
+        "Find every span of every kind: people's names, emails, phones, "
+        "addresses, identifying locations, dates (esp. births), account/SSN/"
+        "card/licence numbers, passwords/keys/secrets, URLs, social handles, "
+        "organizations, project/product/software/protocol names, and any "
+        "mention of substances/drugs, health, sexual matters, legal/criminal "
+        "exposure, personal finances, political/religious affiliation, or "
+        "family/personal relationships. Tag each with its closest CATEGORY. "
+        "Be thorough — it is better to over-detect here; a later step decides "
+        "what actually gets masked." + _TRANSCRIPT
+    ),
+)
