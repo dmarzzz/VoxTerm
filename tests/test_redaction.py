@@ -273,3 +273,40 @@ def test_next_tier_wraps():
 
 def test_resolve_tier_fallback():
     assert resolve_tier("nonsense").id == "room"
+
+
+# --- user word lists -----------------------------------------------------
+
+from redaction.engine import apply_word_lists, custom_censor_spans, drop_allowed
+
+
+def test_custom_censor_is_case_insensitive_distinct_hits():
+    body = "ProjectX shipped; projectX again; unrelated."
+    spans = dict(custom_censor_spans(body, ["projectx"]))
+    assert spans.get("ProjectX") == "CUSTOM"
+    assert spans.get("projectX") == "CUSTOM"
+
+
+def test_custom_censor_ignores_too_short_and_absent():
+    assert custom_censor_spans("hello world", ["x", "absent"]) == []
+
+
+def test_drop_allowed_removes_matching_spans_case_insensitive():
+    spans = [("Acme", "ORG"), ("Alice", "NAME")]
+    assert drop_allowed(spans, ["acme"]) == [("Alice", "NAME")]
+
+
+def test_apply_word_lists_drops_then_adds():
+    body = "Acme hired Alice; codename Bluebird."
+    detected = [("Acme", "ORG"), ("Alice", "NAME")]
+    out = dict(apply_word_lists(body, detected, always_censor=["bluebird"], always_allow=["Acme"]))
+    assert "Acme" not in out          # allowed → dropped
+    assert out.get("Alice") == "NAME"  # kept
+    assert out.get("Bluebird") == "CUSTOM"  # censored → added
+
+
+def test_custom_spans_masked_at_every_redacting_tier():
+    # CUSTOM is in the secrets group → masked at inner/room/world, not raw.
+    assert tier_masks(resolve_tier("inner"), "CUSTOM")
+    assert tier_masks(resolve_tier("world"), "CUSTOM")
+    assert not tier_masks(resolve_tier("raw"), "CUSTOM")

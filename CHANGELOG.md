@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     map onto our vocab. Covers identifiers + secrets only — pair with a chat
     backend for content-classes / proper nouns (the hybrid in #150). Opt-in
     extra: `pip install 'voxterm[privacy-filter]'`.
+  - **User word lists + in-transcript redaction.** Configure phrases to
+    *always censor* (added as a `CUSTOM` span, masked at every redacting tier,
+    case-insensitive) or *always allow* (never masked). A word-list editor
+    (⌃E from the review screen) **auto-loads the transcript's detected spans as
+    suggestions** to quickly approve/censor; lists persist
+    (`redaction_always_censor` / `redaction_always_allow`). After redacting,
+    the **live transcript shows the masked view in place** (non-destructive;
+    ⌃R toggles back to the original).
   - New `redaction/` package; mirrors `summarizer/`.
 
 ## [0.2.1] - 2026-05-16

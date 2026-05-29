@@ -176,6 +176,48 @@ def regex_spans(text: str) -> list[tuple[str, str]]:
     return list(by_text.items())
 
 
+def custom_censor_spans(text: str, words: list[str]) -> list[tuple[str, str]]:
+    """User 'always censor' list → CUSTOM spans for every verbatim occurrence.
+
+    Case-insensitive: each distinct matched substring in ``text`` becomes its
+    own span so the case-sensitive masking step catches every casing.
+    """
+    spans: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for word in words:
+        w = word.strip()
+        if len(w) < _MIN_SPAN_LEN:
+            continue
+        for m in re.finditer(re.escape(w), text, re.IGNORECASE):
+            hit = m.group(0)
+            if hit not in seen:
+                seen.add(hit)
+                spans.append((hit, "CUSTOM"))
+    return spans
+
+
+def drop_allowed(
+    spans: list[tuple[str, str]], allow_words: list[str]
+) -> list[tuple[str, str]]:
+    """Remove spans whose text is on the user 'always allow' list (case-insensitive)."""
+    allow = {w.strip().lower() for w in allow_words if w.strip()}
+    if not allow:
+        return list(spans)
+    return [(t, ty) for (t, ty) in spans if t.strip().lower() not in allow]
+
+
+def apply_word_lists(
+    text: str,
+    spans: list[tuple[str, str]],
+    always_censor: list[str],
+    always_allow: list[str],
+) -> list[tuple[str, str]]:
+    """Layer the user word lists over detected spans: drop allowed, add censored."""
+    result = drop_allowed(spans, always_allow)
+    result.extend(custom_censor_spans(text, always_censor))
+    return result
+
+
 def apply_redactions(
     text: str, spans: list[tuple[str, str]]
 ) -> RedactionResult:

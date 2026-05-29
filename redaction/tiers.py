@@ -15,7 +15,9 @@ from dataclasses import dataclass
 
 
 # Category groupings the tiers compose from.
-_SECRETS = {"CREDENTIAL", "ID"}  # hazardous regardless of who's trusted
+# CUSTOM = an explicit user word-list match; censored at every redacting tier
+# (everything except RAW, which means "no redaction").
+_SECRETS = {"CREDENTIAL", "ID", "CUSTOM"}  # hazardous regardless of who's trusted
 _PERSONAL = {
     # personal identifiers
     "NAME", "EMAIL", "PHONE", "ADDRESS", "LOCATION", "DATE", "URL", "HANDLE",

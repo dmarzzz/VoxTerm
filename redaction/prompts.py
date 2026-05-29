@@ -46,6 +46,7 @@ CATEGORIES: tuple[str, ...] = (
     "AFFILIATION",   # political / religious affiliation
     "RELATIONSHIP",  # family / personal relationships
     "OTHER",         # anything else identifying or sensitive
+    "CUSTOM",        # user word-list match (always censored when redacting)
 )
 
 
