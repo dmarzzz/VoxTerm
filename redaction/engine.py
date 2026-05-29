@@ -409,15 +409,20 @@ _cache_lock = threading.Lock()
 _cache: dict[str, Redactor] = {}
 
 OLLAMA_PREFIX = "ollama:"
+PRIVACY_FILTER_NAMES = frozenset({"privacy-filter", "openai/privacy-filter", "pf"})
+PRIVACY_FILTER_PREFIXES = ("privacy-filter:", "pf:")
 
 
 def get_redactor(model_name: str = "") -> Redactor:
     """Return a (cached) Redactor for the requested model.
 
     Cached by model name so loaded weights / connections survive across
-    repeated invocations. Dispatch is by prefix:
-      - ``ollama:<model>[@host]`` → Ollama HTTP backend (any platform).
-      - anything else             → MLX backend (Apple Silicon macOS only).
+    repeated invocations. Dispatch is by name/prefix:
+      - ``privacy-filter[:<repo>]`` → OpenAI Privacy Filter via onnxruntime
+        (any platform; identifiers + secrets only — pair with a chat backend
+        for content-classes / proper nouns).
+      - ``ollama:<model>[@host]``   → Ollama HTTP backend (any platform).
+      - anything else               → MLX backend (Apple Silicon macOS only).
 
     An empty string selects the MLX default model on Apple Silicon macOS.
     """
@@ -427,15 +432,24 @@ def get_redactor(model_name: str = "") -> Redactor:
         if cached is not None:
             return cached
 
-        if model_name.startswith(OLLAMA_PREFIX):
-            backend: Redactor = OllamaRedactor(
-                model_name=model_name[len(OLLAMA_PREFIX):]
-            )
+        if model_name in PRIVACY_FILTER_NAMES or model_name.startswith(
+            PRIVACY_FILTER_PREFIXES
+        ):
+            from .privacy_filter import PrivacyFilterRedactor
+
+            repo = ""
+            for pfx in PRIVACY_FILTER_PREFIXES:
+                if model_name.startswith(pfx):
+                    repo = model_name[len(pfx):].strip()
+                    break
+            backend: Redactor = PrivacyFilterRedactor(repo=repo)
+        elif model_name.startswith(OLLAMA_PREFIX):
+            backend = OllamaRedactor(model_name=model_name[len(OLLAMA_PREFIX):])
         elif sys.platform != "darwin" or platform.machine() != "arm64":
             raise RedactionError(
-                "MLX redaction is only supported on Apple Silicon macOS. "
-                "Run a local Ollama server and set the redaction model to "
-                "e.g. 'ollama:qwen3:0.6b'."
+                "On-device MLX redaction is only supported on Apple Silicon "
+                "macOS. Use the cross-platform 'privacy-filter' backend, or run "
+                "a local Ollama server and set 'ollama:qwen3:0.6b'."
             )
         else:
             backend = MLXRedactor(model_name=model_name)

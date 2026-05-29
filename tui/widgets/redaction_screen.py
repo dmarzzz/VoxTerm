@@ -162,13 +162,13 @@ class RedactionScreen(ModalScreen):
 
             yield Static(
                 "[#807060]redaction model[/] "
-                "[#605040](blank = Apple Silicon MLX, or "
-                "ollama:model or ollama:model@host)[/]",
+                "[#605040](blank = Apple Silicon MLX · privacy-filter = "
+                "OpenAI Privacy Filter (onnxruntime) · ollama:model[@host])[/]",
                 id="redact-model-label",
                 markup=True,
             )
             yield Input(
-                placeholder="blank = Apple Silicon MLX  ·  e.g. "
+                placeholder="blank = MLX  ·  privacy-filter  ·  "
                 "ollama:qwen3:0.6b",
                 id="redact-model",
                 value=self._default_model,

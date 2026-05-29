@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     strips people; WORLD strips proper nouns too; INNER strips only secrets.
     Persisted as `redaction_tier`. See #150 for the design + roadmap
     (egress-coupled auto-tier, always-on header badge, live outbound masking).
+  - **OpenAI Privacy Filter backend** (`privacy-filter` model string). A
+    purpose-built token-classification PII model (`openai/privacy-filter`,
+    Apache-2.0) run via **onnxruntime** — already a VoxTerm dep, so no torch
+    and a fully-local detector on *any* platform (not just Apple Silicon).
+    Returns labeled spans with offsets (no JSON-parse fragility); its 8 labels
+    map onto our vocab. Covers identifiers + secrets only — pair with a chat
+    backend for content-classes / proper nouns (the hybrid in #150). Opt-in
+    extra: `pip install 'voxterm[privacy-filter]'`.
   - New `redaction/` package; mirrors `summarizer/`.
 
 ## [0.2.1] - 2026-05-16

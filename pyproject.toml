@@ -40,6 +40,15 @@ dependencies = [
     "torch>=2.0.0; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# OpenAI Privacy Filter redaction backend. ONNX weights run on onnxruntime
+# (already a core dep); optimum + transformers provide the loader/tokenizer.
+# Opt-in because they're heavy: pip install 'voxterm[privacy-filter]'
+privacy-filter = [
+    "optimum[onnxruntime]>=1.20.0",
+    "transformers>=4.40.0",
+]
+
 [project.scripts]
 voxterm = "tui.app:main"
 voxterm-dictate = "dictation.app:main"
