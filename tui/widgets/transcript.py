@@ -79,6 +79,10 @@ class TranscriptPanel(RichLog):
         self._merged_view = False
         self._peer_color_map: dict[str, str] = {}  # node_id → color
         self._peer_names: dict[str, str] = {}  # node_id → display_name
+        # Redacted-view state: when on, the panel shows masked entries while
+        # the originals are stashed for exact restore (non-destructive).
+        self._redacted_view = False
+        self._redacted_backup: list[tuple] | None = None
 
     def system_message(self, msg: str, category: str = "sys",
                        highlights: dict[str, str] | None = None):
@@ -331,6 +335,56 @@ class TranscriptPanel(RichLog):
                                    self._entry_highlights.get(i))
 
 
+    def redact_view(self, spans: list[tuple[str, str]], label: str = "") -> int:
+        """Mask the on-screen transcript with ``spans`` (content + speaker).
+
+        Non-destructive: the original entries are stashed so ``restore_view``
+        reverts exactly. Returns the number of entries changed. Imported here
+        (not at module top) to avoid a TUI→engine import at load time.
+        """
+        from redaction.engine import apply_redactions
+
+        if not spans:
+            return 0
+        if self._redacted_backup is None:
+            self._redacted_backup = list(self._entries)
+        changed = 0
+        masked: list[tuple] = []
+        for entry in self._entries:
+            ts, typ, content, spk = entry[0], entry[1], entry[2], entry[3]
+            sid = entry[4] if len(entry) > 4 else 0
+            conf = entry[5] if len(entry) > 5 else ""
+            if typ == "transcript":
+                new_content = apply_redactions(content, spans).redacted_text
+                new_spk = apply_redactions(spk, spans).redacted_text if spk else spk
+                if new_content != content or new_spk != spk:
+                    changed += 1
+                masked.append((ts, typ, new_content, new_spk, sid, conf))
+            else:
+                masked.append(entry)
+        self._entries = masked
+        self._redacted_view = True
+        if not self._merged_view:
+            self._rerender()
+        suffix = f" · {label}" if label else ""
+        self.border_title = f"TRANSCRIPT // REDACTED{suffix}"
+        return changed
+
+    def restore_view(self) -> bool:
+        """Revert a redacted view to the original entries. True if reverted."""
+        if self._redacted_backup is None:
+            return False
+        self._entries = self._redacted_backup
+        self._redacted_backup = None
+        self._redacted_view = False
+        if not self._merged_view:
+            self._rerender()
+        self.border_title = "TRANSCRIPT // LIVE"
+        return True
+
+    def is_redacted_view(self) -> bool:
+        return self._redacted_view
+
     def clear(self):
         """Clear display and entries."""
         super().clear()
@@ -341,6 +395,8 @@ class TranscriptPanel(RichLog):
         self._peer_color_map.clear()
         self._peer_names.clear()
         self._merged_view = False
+        self._redacted_view = False
+        self._redacted_backup = None
         self.border_title = "TRANSCRIPT // LIVE"
 
     def get_entries(self) -> list[tuple]:

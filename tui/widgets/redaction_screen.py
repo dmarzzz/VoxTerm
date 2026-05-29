@@ -22,7 +22,7 @@ from textual.widgets.selection_list import Selection
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
-from redaction.engine import apply_redactions
+from redaction.engine import apply_redactions, apply_word_lists
 from redaction.tiers import TIERS, filter_spans, next_tier, resolve_tier, tier_masks
 
 # Disposition of the unredacted live-autosave file once the redacted copy is
@@ -425,6 +425,7 @@ class RedactionReviewScreen(ModalScreen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+t", "cycle_tier", "Tier"),
+        Binding("ctrl+e", "edit_words", "Words"),
         Binding("ctrl+w", "confirm", "Write"),
     ]
 
@@ -433,13 +434,21 @@ class RedactionReviewScreen(ModalScreen):
         spans: list[tuple[str, str]],
         body: str,
         tier_id: str = "room",
+        always_censor: list[str] | None = None,
+        always_allow: list[str] | None = None,
     ):
         super().__init__()
-        # mutable working copy; add-span appends here
-        self._spans: list[tuple[str, str]] = list(spans)
         self._body = body
         self._tier = resolve_tier(tier_id)
         self._disposition = "keep"
+        # Model-detected spans are the immutable base; the user word lists are
+        # layered on top, and re-layered whenever the lists change (⌃E).
+        self._detected: list[tuple[str, str]] = list(spans)
+        self._censor: list[str] = list(always_censor or [])
+        self._allow: list[str] = list(always_allow or [])
+        self._spans: list[tuple[str, str]] = apply_word_lists(
+            self._body, self._detected, self._censor, self._allow
+        )
 
     @staticmethod
     def _span_prompt(text: str, typ: str) -> str:
@@ -460,9 +469,11 @@ class RedactionReviewScreen(ModalScreen):
 
             yield Static(self._tier_banner(), id="review-tier", markup=True)
             yield Static(
-                "The tier sets the baseline · uncheck false positives or check "
-                "extras · type below to add a missed span · scan the preview.",
+                "Tier sets the baseline · uncheck/check spans · add a missed "
+                "span below · [b]⌃E[/] word lists (always-censor / allow) · "
+                "scan the preview.",
                 id="review-instr",
+                markup=True,
             )
 
             # Initial check state follows the tier policy.
@@ -517,6 +528,50 @@ class RedactionReviewScreen(ModalScreen):
                 sl.select(i)
             else:
                 sl.deselect(i)
+        self._refresh_preview()
+
+    # --- word lists ------------------------------------------------------
+
+    def action_edit_words(self) -> None:
+        # Suggest the detected span texts (deduped) for quick censor/allow.
+        seen, suggestions = set(), []
+        for t, _ty in self._detected:
+            k = t.strip()
+            if k and k.lower() not in seen:
+                seen.add(k.lower())
+                suggestions.append(k)
+
+        def on_words(res):
+            if not res:
+                return
+            self._censor = res["censor"]
+            self._allow = res["allow"]
+            self._rebuild_spans()
+
+        self.app.push_screen(
+            RedactionWordsScreen(
+                suggestions=suggestions,
+                censor=self._censor,
+                allow=self._allow,
+            ),
+            on_words,
+        )
+
+    def _rebuild_spans(self) -> None:
+        """Re-layer the word lists over the detected base and rebuild the list.
+
+        Manual per-span tweaks are reset here on purpose — editing the word
+        lists is a deliberate redefinition of the baseline.
+        """
+        self._spans = apply_word_lists(
+            self._body, self._detected, self._censor, self._allow
+        )
+        sl = self.query_one("#review-spans", SelectionList)
+        sl.clear_options()
+        for i, (t, ty) in enumerate(self._spans):
+            sl.add_option(
+                Selection(self._span_prompt(t, ty), i, tier_masks(self._tier, ty))
+            )
         self._refresh_preview()
 
     # --- preview ---------------------------------------------------------
@@ -574,8 +629,162 @@ class RedactionReviewScreen(ModalScreen):
                 "spans": self._selected_spans(),
                 "disposition": self._disposition,
                 "tier_id": self._tier.id,
+                "always_censor": self._censor,
+                "always_allow": self._allow,
             }
         )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class RedactionWordsScreen(ModalScreen):
+    """Edit the persistent redaction word lists, pre-seeded with suggestions.
+
+    Each word is in one of three states — CENSOR (always mask), ALLOW (never
+    mask), or skip. The current transcript's detected spans are auto-loaded as
+    suggestions so you can quickly approve/censor them. Persisted by the app.
+
+    Dismisses with {"censor": [...], "allow": [...]} or None (cancelled).
+    """
+
+    DEFAULT_CSS = """
+    RedactionWordsScreen { align: center middle; }
+    #words-dialog {
+        width: 76; height: auto; max-height: 32;
+        border: heavy #ff8855;
+        border-title-color: #ffb38a; border-title-style: bold;
+        background: #140d0a; padding: 1 2;
+    }
+    #words-instr { height: auto; color: #807060; margin-bottom: 1; }
+    #words-list {
+        height: auto; max-height: 16; background: #140d0a; color: #c0c0c0;
+    }
+    #words-add {
+        width: 100%; background: #221511; color: #ffb38a;
+        border: tall #442211; margin-top: 1;
+    }
+    #words-add:focus { border: tall #ff8855; }
+    #words-hint { height: auto; color: #807060; margin-top: 1; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("c", "set_censor", "Censor"),
+        Binding("a", "set_allow", "Allow"),
+        Binding("s", "set_skip", "Skip"),
+        Binding("ctrl+s", "confirm", "Save"),
+    ]
+
+    _TAGS = {
+        "censor": "[#d8806e]✕ censor[/]",
+        "allow": "[#74b6a6]✓ allow [/]",
+        "skip": "[#605040]· skip  [/]",
+    }
+
+    def __init__(
+        self,
+        suggestions: list[str] | None = None,
+        censor: list[str] | None = None,
+        allow: list[str] | None = None,
+    ):
+        super().__init__()
+        self._state: dict[str, str] = {}
+        self._order: list[str] = []
+        # config words first (with their state), then fresh suggestions
+        for w in censor or []:
+            self._put(w, "censor")
+        for w in allow or []:
+            self._put(w, "allow")
+        for w in suggestions or []:
+            self._put(w, "skip")  # _put won't override an existing state
+        self._hi: str | None = self._order[0] if self._order else None
+
+    def _put(self, word: str, state: str) -> None:
+        w = word.strip()
+        if not w:
+            return
+        if w not in self._state:
+            self._state[w] = state
+            self._order.append(w)
+
+    def _prompt(self, word: str) -> str:
+        return f"{self._TAGS[self._state[word]]}  {_ellipsize(word, 52)}"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="words-dialog") as dialog:
+            dialog.border_title = "REDACTION WORD LISTS"
+            yield Static(
+                "Suggestions from this transcript are pre-loaded. Highlight a "
+                "row and press [b]C[/] censor · [b]A[/] allow · [b]S[/] skip.",
+                id="words-instr",
+                markup=True,
+            )
+            ol = OptionList(
+                *[Option(self._prompt(w), id=w) for w in self._order],
+                id="words-list",
+            )
+            yield ol
+            yield Input(
+                placeholder="add a word/phrase (starts as censor; A to allow)…",
+                id="words-add",
+            )
+            yield Static(
+                " [#807060]⌃S[/] save  ·  [#807060]ESC[/] cancel",
+                id="words-hint",
+                markup=True,
+            )
+
+    def on_mount(self) -> None:
+        if self._order:
+            self.query_one("#words-list", OptionList).highlighted = 0
+
+    def on_option_list_option_highlighted(self, event) -> None:
+        if event.option and event.option.id:
+            self._hi = event.option.id
+
+    def on_option_list_option_selected(self, event) -> None:
+        # Enter cycles the highlighted word's state.
+        if event.option and event.option.id:
+            self._hi = event.option.id
+            cycle = {"skip": "censor", "censor": "allow", "allow": "skip"}
+            self._set(self._hi, cycle[self._state[self._hi]])
+
+    def _set(self, word: str | None, state: str) -> None:
+        if not word or word not in self._state:
+            return
+        self._state[word] = state
+        self.query_one("#words-list", OptionList).replace_option_prompt(
+            word, self._prompt(word)
+        )
+
+    def action_set_censor(self) -> None:
+        self._set(self._hi, "censor")
+
+    def action_set_allow(self) -> None:
+        self._set(self._hi, "allow")
+
+    def action_set_skip(self) -> None:
+        self._set(self._hi, "skip")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        word = event.value.strip()
+        event.input.value = ""
+        if not word:
+            return
+        new = word not in self._state
+        self._put(word, "censor")
+        ol = self.query_one("#words-list", OptionList)
+        if new:
+            ol.add_option(Option(self._prompt(word), id=word))
+        else:
+            self._set(word, "censor")
+        self._hi = word
+
+    def action_confirm(self) -> None:
+        censor = [w for w in self._order if self._state[w] == "censor"]
+        allow = [w for w in self._order if self._state[w] == "allow"]
+        self.dismiss({"censor": censor, "allow": allow})
 
     def action_cancel(self) -> None:
         self.dismiss(None)

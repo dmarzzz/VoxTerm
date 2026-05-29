@@ -464,6 +464,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
                 "[bold #00e5ff]X[/]       [#c0c0c0]Save redacted copy (local LLM)[/]\n"
                 "[bold #00e5ff]Shift+X[/] [#c0c0c0]Cycle disclosure tier[/]\n"
+                "[bold #00e5ff]^R[/]      [#c0c0c0]Toggle redacted transcript view[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
@@ -559,6 +560,7 @@ class VoxTerm(App):
         Binding("u", "summarize_and_export", "Summarize"),
         Binding("x", "redact_and_export", "Redact"),
         Binding("shift+x", "cycle_redaction_tier", "Tier", show=False),
+        Binding("ctrl+r", "toggle_redacted_view", "Redacted view", show=False),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -2354,6 +2356,7 @@ class VoxTerm(App):
         """
         transcript = self.query_one(TranscriptPanel)
         candidate_spans = [(f.text, f.type) for f in result.findings]
+        cfg = _get_config()
 
         def on_reviewed(res):
             if not res:
@@ -2361,6 +2364,13 @@ class VoxTerm(App):
                     "redaction cancelled — nothing written", Log.REC
                 )
                 return
+            # Persist any word-list edits the user made in the review screen.
+            cfg.update(
+                {
+                    "redaction_always_censor": res.get("always_censor", []),
+                    "redaction_always_allow": res.get("always_allow", []),
+                }
+            )
             self._finalize_redaction_export(
                 res.get("tier_id", tier_id),
                 body,
@@ -2374,6 +2384,8 @@ class VoxTerm(App):
                 spans=candidate_spans,
                 body=body,
                 tier_id=tier_id,
+                always_censor=cfg.get("redaction_always_censor") or [],
+                always_allow=cfg.get("redaction_always_allow") or [],
             ),
             on_reviewed,
         )
@@ -2441,9 +2453,16 @@ class VoxTerm(App):
         else:
             original_note = "original kept on disk"
 
+        # Show the redaction in the live transcript itself — mask the on-screen
+        # entries (non-destructive; ⌃R toggles back to the original view).
+        view_note = ""
+        if result.total:
+            transcript.redact_view(spans, label=profile_label)
+            view_note = "  ·  transcript now showing REDACTED view (⌃R to toggle)"
+
         transcript.system_message(
-            f"redacted {entry_count} entries ({result.total} spans) → {filepath} "
-            f"[{original_note}]",
+            f"🛇 REDACTED [{profile_label}] — {result.total} spans masked → "
+            f"{filepath} [{original_note}]{view_note}",
             Log.REC,
         )
         self.push_screen(
@@ -2456,6 +2475,17 @@ class VoxTerm(App):
                 original_note=original_note,
             )
         )
+
+    def action_toggle_redacted_view(self) -> None:
+        """Toggle the transcript between the redacted view and the original."""
+        transcript = self.query_one(TranscriptPanel)
+        if transcript.is_redacted_view():
+            transcript.restore_view()
+            transcript.system_message("transcript: original view restored", Log.REC)
+        else:
+            transcript.system_message(
+                "no redacted view to toggle — run redaction (X) first", Log.REC
+            )
 
     def _export_to_clipboard(self):
         """Copy transcript to clipboard."""

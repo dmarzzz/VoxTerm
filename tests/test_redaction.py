@@ -18,8 +18,11 @@ import tui.app as tui_app
 from redaction.engine import (
     OllamaRedactor,
     RedactionError,
+    apply_word_lists,
     apply_redactions,
     chunk_text,
+    custom_censor_spans,
+    drop_allowed,
     get_redactor,
     overwrite_and_delete,
     parse_spans,
@@ -283,6 +286,46 @@ def test_resolve_tier_fallback():
     assert resolve_tier("nonsense").id == "room"
 
 
+# --- user word lists -----------------------------------------------------
+
+def test_custom_censor_is_case_insensitive_distinct_hits():
+    body = "ProjectX shipped; projectX again; unrelated."
+    spans = dict(custom_censor_spans(body, ["projectx"]))
+    assert spans.get("ProjectX") == "CUSTOM"
+    assert spans.get("projectX") == "CUSTOM"
+
+
+def test_custom_censor_ignores_too_short_and_absent():
+    assert custom_censor_spans("hello world", ["x", "absent"]) == []
+
+
+def test_drop_allowed_removes_matching_spans_case_insensitive():
+    spans = [("Acme", "ORG"), ("Alice", "NAME")]
+    assert drop_allowed(spans, ["acme"]) == [("Alice", "NAME")]
+
+
+def test_apply_word_lists_drops_then_adds():
+    body = "Acme hired Alice; codename Bluebird."
+    detected = [("Acme", "ORG"), ("Alice", "NAME")]
+    out = dict(
+        apply_word_lists(
+            body,
+            detected,
+            always_censor=["bluebird"],
+            always_allow=["Acme"],
+        )
+    )
+    assert "Acme" not in out
+    assert out.get("Alice") == "NAME"
+    assert out.get("Bluebird") == "CUSTOM"
+
+
+def test_custom_spans_masked_at_every_redacting_tier():
+    assert tier_masks(resolve_tier("inner"), "CUSTOM")
+    assert tier_masks(resolve_tier("world"), "CUSTOM")
+    assert not tier_masks(resolve_tier("raw"), "CUSTOM")
+
+
 # --- TUI wiring ----------------------------------------------------------
 
 def _binding(action: str):
@@ -293,6 +336,7 @@ def test_redaction_binding_added_without_removing_gui_binding():
     assert _binding("redact_and_export").key == "x"
     assert _binding("redact_and_export").description == "Redact"
     assert _binding("cycle_redaction_tier").key == "shift+x"
+    assert _binding("toggle_redacted_view").key == "ctrl+r"
     assert _binding("launch_gui").key == "g"
 
 
