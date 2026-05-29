@@ -72,11 +72,12 @@ from tui.widgets.redaction_screen import (
     RedactionResultScreen,
 )
 from redaction import (
+    DETECTION_PROFILE,
     RedactionError,
     apply_redactions,
     get_redactor,
     overwrite_and_delete,
-    resolve_profile,
+    resolve_tier,
 )
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
@@ -2270,26 +2271,17 @@ class VoxTerm(App):
             return
 
         cfg = _get_config()
-        default_profile = cfg.get("redaction_profile") or "standard"
-        default_custom = cfg.get("redaction_custom_prompt") or ""
+        default_tier = cfg.get("redaction_tier") or "room"
         default_model = cfg.get("redaction_model") or ""
 
-        def on_profile_selected(result):
+        def on_tier_selected(result):
             if not result:
                 return
-            profile_id = result["profile_id"]
-            custom_instructions = result["custom_instructions"]
+            tier_id = result["tier_id"]
             redaction_model = result.get("redaction_model", "")
-            # Persist the chosen profile + model (blank model = on-device MLX,
-            # an intentional choice). Only overwrite the saved custom
-            # instruction when the custom profile was actually used.
-            updates = {
-                "redaction_profile": profile_id,
-                "redaction_model": redaction_model,
-            }
-            if profile_id == "custom":
-                updates["redaction_custom_prompt"] = custom_instructions
-            cfg.update(updates)
+            # Persist the chosen tier + model (blank model = on-device MLX, an
+            # intentional choice). The tier is your default disclosure posture.
+            cfg.update({"redaction_tier": tier_id, "redaction_model": redaction_model})
             # Snapshot BEFORE the progress message so it isn't fed to the LLM
             # or written into the redacted file (same discipline as summarize).
             body = transcript.get_markdown(
@@ -2299,44 +2291,40 @@ class VoxTerm(App):
             )
             entry_count = len(transcript.get_entries())
             transcript.system_message(
-                "redacting transcript (local LLM)…", Log.REC
+                "detecting sensitive spans (local LLM)…", Log.REC
             )
-            self._run_redact_and_export(
-                profile_id, custom_instructions, body, entry_count, redaction_model
-            )
+            self._run_redact_and_export(tier_id, body, entry_count, redaction_model)
 
         self.push_screen(
             RedactionScreen(
-                default_profile_id=default_profile,
-                default_custom_instructions=default_custom,
+                default_tier_id=default_tier,
                 default_redaction_model=default_model,
             ),
-            on_profile_selected,
+            on_tier_selected,
         )
 
     @work(thread=True, exclusive=True, group="redaction")
     def _run_redact_and_export(
         self,
-        profile_id: str,
-        custom_instructions: str,
+        tier_id: str,
         body: str,
         entry_count: int,
         redaction_model: str,
     ):
-        """Worker: load LLM if needed, mask PII, write the redacted markdown.
+        """Worker: detect the full span vocabulary in one local-LLM pass.
 
-        The redactor chunks the snapshot internally and may call the model
-        several times; the whole pass runs inside the shared single-thread
+        Detection is tier-independent — we find everything, then the review
+        screen's dial decides what gets masked (so cycling tiers needs no
+        re-inference). The whole pass runs inside the shared single-thread
         executor + GPU lock that serialize transcription, so it can't overlap
         a transcribe/model-load on the Metal GPU.
         """
         transcript = self.query_one(TranscriptPanel)
         try:
-            profile = resolve_profile(profile_id)
             redactor = get_redactor(model_name=redaction_model)
             with self._transcribe_lock:
                 result = self._mlx_executor.submit(
-                    redactor.redact, body, profile, custom_instructions
+                    redactor.redact, body, DETECTION_PROFILE, ""
                 ).result()
         except RedactionError as e:
             self.call_from_thread(
@@ -2354,27 +2342,24 @@ class VoxTerm(App):
             return
 
         self.call_from_thread(
-            self._review_redaction,
-            profile.label,
-            result,
-            body,
-            entry_count,
+            self._review_redaction, tier_id, result, body, entry_count
         )
 
     def _review_redaction(
         self,
-        profile_label: str,
-        result,  # redaction.RedactionResult
+        tier_id: str,
+        result,  # redaction.RedactionResult (all detected spans)
         body: str,
         entry_count: int,
     ) -> None:
-        """Show the pre-write review modal (main-thread).
+        """Show the pre-write review modal with the tier dial (main-thread).
 
-        Nothing is on disk yet. The user vets the found spans (uncheck false
-        positives, add missed ones), picks what happens to the unredacted
-        original, then confirms — only then do we write. Cancelling writes
-        nothing, which is the point: a small model's silent miss can't slip
-        into a file called ``-redacted`` without a human seeing the preview.
+        Nothing is on disk yet. The user dials the disclosure tier, vets the
+        spans (the tier sets the baseline; manual toggles override), picks
+        what happens to the unredacted original, then confirms — only then do
+        we write. Cancelling writes nothing, which is the point: a small
+        model's silent miss can't slip into a file called ``-redacted``
+        without a human seeing the preview.
         """
         transcript = self.query_one(TranscriptPanel)
         candidate_spans = [(f.text, f.type) for f in result.findings]
@@ -2386,7 +2371,7 @@ class VoxTerm(App):
                 )
                 return
             self._finalize_redaction_export(
-                profile_label,
+                res.get("tier_id", tier_id),
                 body,
                 res["spans"],
                 res.get("disposition", "keep"),
@@ -2397,14 +2382,14 @@ class VoxTerm(App):
             RedactionReviewScreen(
                 spans=candidate_spans,
                 body=body,
-                profile_label=profile_label,
+                tier_id=tier_id,
             ),
             on_reviewed,
         )
 
     def _finalize_redaction_export(
         self,
-        profile_label: str,
+        tier_id: str,
         body: str,
         spans: list,
         disposition: str,
@@ -2413,6 +2398,7 @@ class VoxTerm(App):
         """Apply the user-approved spans, write ``*-redacted.md``, and act on
         the original per the chosen disposition (main-thread)."""
         transcript = self.query_one(TranscriptPanel)
+        profile_label = resolve_tier(tier_id).label
         result = apply_redactions(body, spans)
 
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

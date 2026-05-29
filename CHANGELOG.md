@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unredacted live autosave: keep / replace (delete) / shred (best-effort
     overwrite + delete — not a forensic wipe on copy-on-write/SSD storage,
     and the UI says so). Defaults to keep and is not persisted.
+  - **Disclosure tiers (the dial).** Redaction level is keyed to *audience*,
+    not an abstract amount: RAW → INNER → ROOM → WORLD, a strictly-nested
+    mask-policy over an expanded vocabulary (identifiers + sensitivity
+    content-classes like substances/health/legal/finance). Detection finds
+    everything in one pass; cycling the tier (⌃T on the review screen)
+    re-filters what's masked with no re-inference, and the current tier is
+    shown as a color-coded meter. ROOM keeps the work (projects, orgs) but
+    strips people; WORLD strips proper nouns too; INNER strips only secrets.
+    Persisted as `redaction_tier`. See #150 for the design + roadmap
+    (egress-coupled auto-tier, always-on header badge, live outbound masking).
   - New `redaction/` package; mirrors `summarizer/`.
 
 ## [0.2.1] - 2026-05-16
