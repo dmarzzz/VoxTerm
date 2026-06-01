@@ -80,9 +80,12 @@ def compute_fbank(
         mel_energies = np.maximum(mel_energies, 1e-10)
         features[i] = np.log(mel_energies)
 
-    # Cepstral mean normalization
+    # Cepstral mean normalization.  Accumulate in float64 so the returned
+    # float32 features remain numerically zero-mean within tight tolerances.
     if cmn and num_frames > 0:
-        features -= features.mean(axis=0)
+        features = (features.astype(np.float64) - features.mean(axis=0, dtype=np.float64)).astype(
+            np.float32
+        )
 
     return features
 
