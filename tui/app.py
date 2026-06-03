@@ -727,6 +727,25 @@ class VoxTerm(App):
             self.query_one(TranscriptPanel).system_message(f"party failed: {error}", Log.PARTY)
             self._update_telemetry()
 
+        def _on_party_intent(parties):
+            """User opened party mode: prompt to host a new party or join one by
+            code (the code is shared out-of-band — never broadcast)."""
+            from tui.widgets.party_screen import PartyScreen, PartyCodeScreen
+
+            def _on_pick(result):
+                if not result:
+                    return
+                if result.get("action") == "host":
+                    code = self._party.host_party()
+                    self.push_screen(PartyCodeScreen(code))
+                    self.query_one(TranscriptPanel).system_message(
+                        f"hosting — share this code to let others join: {code}", Log.PARTY
+                    )
+                elif result.get("action") == "join":
+                    self._party.join_party(result["code"], result.get("party_id") or "")
+
+            self.push_screen(PartyScreen(parties), _on_pick)
+
         p.on_state_changed = _on_state_changed
         p.on_peer_joined = _on_peer_joined
         p.on_peer_left = _on_peer_left
@@ -737,6 +756,7 @@ class VoxTerm(App):
         p.on_party_colors_restored = _on_party_colors_restored
         p.on_peer_bloom = _on_peer_bloom
         p.on_party_failed = _on_party_failed
+        p.on_party_intent = _on_party_intent
 
     # ── @work stubs for PartyManager ───────────────────────────
 
