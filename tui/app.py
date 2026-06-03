@@ -71,10 +71,7 @@ from tui.widgets.recording_pulse import RecordingPulse
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.system_capture import SystemCapture
-from audio.transcriber import (
-    Qwen3Transcriber, WhisperTranscriber, FasterWhisperTranscriber,
-    configure_mlx_memory,
-)
+from audio.transcriber import configure_mlx_memory, get_transcriber
 from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
 from audio.vad import SileroVAD
@@ -1600,13 +1597,7 @@ class VoxTerm(App):
                         _posixsubprocess.fork_exec = _safe_fork_exec
                         _posixsubprocess._vt_patched = True
 
-                model_repo = AVAILABLE_MODELS[self._model_name]
-                if self._model_name in QWEN3_MODELS:
-                    self.transcriber = Qwen3Transcriber(model=model_repo, language=self._language)
-                elif self._model_name in FASTER_WHISPER_MODELS:
-                    self.transcriber = FasterWhisperTranscriber(model=model_repo, language=self._language)
-                else:
-                    self.transcriber = WhisperTranscriber(model=model_repo)
+                self.transcriber = get_transcriber(self._model_name, language=self._language)
                 self._mlx_executor.submit(self.transcriber.load).result()
                 self.call_from_thread(self._on_model_loaded)
             except Exception as e:
@@ -1978,14 +1969,8 @@ class VoxTerm(App):
 
     @work(thread=True, exclusive=True, group="model_loading")
     def _do_swap(self, model_key: str):
-        repo = AVAILABLE_MODELS[model_key]
         try:
-            if model_key in QWEN3_MODELS:
-                new_transcriber = Qwen3Transcriber(model=repo, language=self._language)
-            elif model_key in FASTER_WHISPER_MODELS:
-                new_transcriber = FasterWhisperTranscriber(model=repo, language=self._language)
-            else:
-                new_transcriber = WhisperTranscriber(model=repo)
+            new_transcriber = get_transcriber(model_key, language=self._language)
             # Serialize Metal access against active transcription: the
             # _transcribe_lock blocks transcribe submissions for the duration
             # of the load; the executor guarantees the load runs on the same

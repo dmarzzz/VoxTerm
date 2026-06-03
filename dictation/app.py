@@ -33,8 +33,6 @@ from config import (
     AVAILABLE_MODELS,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
-    FASTER_WHISPER_MODELS,
-    QWEN3_MODELS,
 )
 
 logging.basicConfig(
@@ -88,27 +86,18 @@ def _check_linux_tools() -> bool:
     return False
 
 
-def _load_transcriber(model_name: str, model_repo: str, language: str, mlx_executor: ThreadPoolExecutor):
-    """Load the transcription model (same logic as app.py __main__).
+def _load_transcriber(model_name: str, language: str, mlx_executor: ThreadPoolExecutor):
+    """Load the transcription model.
 
     Loads on `mlx_executor` so the same thread owns the MLX state used for
     inference. MLX 0.31+ binds arrays to per-thread streams.
     """
-    from audio.transcriber import (
-        FasterWhisperTranscriber,
-        Qwen3Transcriber,
-        WhisperTranscriber,
-    )
+    from audio.transcriber import get_transcriber
 
     print(f"VOXTERM DICTATION // loading model ({model_name}) lang={language}...")
     print("(first run downloads the model, please wait)\n")
 
-    if model_name in QWEN3_MODELS:
-        transcriber = Qwen3Transcriber(model=model_repo, language=language)
-    elif model_name in FASTER_WHISPER_MODELS:
-        transcriber = FasterWhisperTranscriber(model=model_repo, language=language)
-    else:
-        transcriber = WhisperTranscriber(model=model_repo)
+    transcriber = get_transcriber(model_name, language=language)
 
     mlx_executor.submit(transcriber.load).result()
     print("Model ready.\n")
@@ -209,8 +198,7 @@ def main() -> None:
     # Single-thread executor shared between load + every transcribe call so
     # MLX per-thread streams stay valid (see audio/transcriber.py + tui/app.py).
     mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
-    model_repo = AVAILABLE_MODELS[args.model]
-    transcriber = _load_transcriber(args.model, model_repo, args.language, mlx_executor)
+    transcriber = _load_transcriber(args.model, args.language, mlx_executor)
 
     # ---- Create components ----
     from dictation.injector import get_injector

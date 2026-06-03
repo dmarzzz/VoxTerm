@@ -329,3 +329,22 @@ class FasterWhisperTranscriber(_DeduplicatorMixin):
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+
+def get_transcriber(model_name: str, *, language: str | None = "en"):
+    """Construct the transcriber backend for a model key.
+
+    Centralizes the model_key -> backend selection that was hand-written
+    identically in three places (tui/app.py x2, dictation/app.py). Returns an
+    UNLOADED transcriber; the caller invokes ``.load()`` (typically on a dedicated
+    MLX executor thread). Raises KeyError for an unknown model_name, same as the
+    inline ``AVAILABLE_MODELS[...]`` lookups it replaces.
+    """
+    from config import AVAILABLE_MODELS, FASTER_WHISPER_MODELS, QWEN3_MODELS
+
+    model_repo = AVAILABLE_MODELS[model_name]
+    if model_name in QWEN3_MODELS:
+        return Qwen3Transcriber(model=model_repo, language=language)
+    if model_name in FASTER_WHISPER_MODELS:
+        return FasterWhisperTranscriber(model=model_repo, language=language)
+    return WhisperTranscriber(model=model_repo)
