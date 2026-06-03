@@ -2583,10 +2583,10 @@ def main():
     parser.add_argument(
         "--hivemind",
         choices=["auto", "on", "off"],
-        default=_cfg.get("hivemind_mode") or "auto",
+        default=_cfg.get("hivemind_mode") or "off",
         help=(
-            "Hivemind transcript-sink mode (default: auto). "
-            "auto = mDNS-discover; on = require a sink; off = never POST."
+            "Hivemind transcript-sink mode (default: off). "
+            "off = never discover or POST; auto = mDNS-discover; on = require a sink."
         ),
     )
     parser.add_argument(

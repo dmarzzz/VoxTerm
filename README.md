@@ -81,20 +81,17 @@ Voxterm can stream transcript batches to a "convent box" running
 `swf-node --full --hivemind-sink`. The sink wraps each batch in a
 signed bundle and propagates it on the LAN.
 
-By default voxterm auto-discovers sinks via mDNS. To override:
+By default this is **off** — voxterm never discovers or contacts a sink unless
+you opt in. To enable discovery (and, with push enabled, streaming):
 ```
+voxterm --hivemind=auto
 voxterm --hivemind-sink-url=http://convent.local:7777
 ```
 
-Or disable entirely:
-```
-voxterm --hivemind=off
-```
-
 Mode flag: `--hivemind=auto|on|off`
-- `auto` (default): mDNS-discover; fall back to local logging only.
+- `off` (default): never discover or POST; everything stays local.
+- `auto`: mDNS-discover; fall back to local logging only.
 - `on`: require a sink (fails to start if discovery times out after 5s).
-- `off`: never POST; everything stays local.
 
 Your voxterm device gets a persistent UUID stored at
 `~/Library/Application Support/voxterm/device_id` (macOS) or

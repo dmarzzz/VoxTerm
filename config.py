@@ -298,7 +298,10 @@ _DEFAULTS: dict[str, Any] = {
     # Hivemind transcript-sink (spec §4.3 of SHAPE-ROTATOR-OS-SPEC.md).
     # `hivemind_mode` is one of "auto" | "on" | "off"; when set on the
     # CLI it persists so the next launch picks the same default.
-    "hivemind_mode": "auto",
+    # Default "off": off-device behaviour (including mDNS sink discovery) is
+    # opt-in, matching the "nothing leaves your machine" promise. Choose
+    # `auto` to discover sinks (and, with hivemind_push_enabled, push to them).
+    "hivemind_mode": "off",
     "hivemind_sink_url": "",
     "hivemind_location": "",
     # User opt-in to actually push transcripts to a discovered sink.
