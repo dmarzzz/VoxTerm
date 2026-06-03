@@ -46,8 +46,7 @@ except ImportError:
 
 class PartyState(Enum):
     SOLO = "solo"           # not in party mode
-    SCANNING = "scanning"   # pressed N, looking for groups
-    JOINING = "joining"     # connecting to a group
+    JOINING = "joining"     # connecting to a group (after host/join is chosen)
     IN_PARTY = "in_party"   # connected, transcripts flowing
 
 
@@ -122,6 +121,8 @@ class PartyManager:
         self._color_pri = "#00ffcc"
         self._color_light = "#66ffd9"
         self._party_id = ""  # non-secret group id (set when hosting/joining)
+        self._is_host = False  # set in _party_ready; init here so a failed first
+        #                        join doesn't AttributeError in _handle_party_failed
 
         # Networking objects
         self._session_mgr: SessionManager | None = None
@@ -356,14 +357,26 @@ class PartyManager:
         out-of-band ``code``. A wrong code yields an empty party — no peer's
         encrypted handshake validates, so nothing connects."""
         self._ensure_identity()
+        if not party_id:
+            # No discovered party to adopt — there is nothing to mesh with.
+            # Do NOT mint a phantom party_id: the host never broadcasts it, so
+            # the strict party_id gate would leave us silently isolated. Stay
+            # solo and tell the user instead.
+            self._state = PartyState.SOLO
+            self._fire_state_changed()
+            if self.on_party_failed:
+                self.on_party_failed(
+                    "no nearby party to join — ask the host to start one, or host your own"
+                )
+            return
         if group_name:
             self._display_name = group_name
-        self._party_id = party_id or _new_party_id()
+        self._party_id = party_id
         if peer_color:
             self._color_pri = peer_color
             self._color_light = peer_color
         else:
-            self._color_pri, self._color_light = _party_color(code)
+            self._color_pri, self._color_light = _party_color(self._party_id)
         self._state = PartyState.JOINING
         self._fire_state_changed()
         self._start_party_session(code, is_creator=False)
@@ -390,9 +403,23 @@ class PartyManager:
         """Create a new party -- you are the host. Returns the session code."""
         code = generate_session_code()
         self._party_id = _new_party_id()
-        self._color_pri, self._color_light = _party_color(code)
+        # Color derives from the NON-secret party_id (not the code): peers share
+        # the party_id so colors still match, and nothing code-derived is put on
+        # the wire (the broadcast party_color would otherwise leak bits of the code).
+        self._color_pri, self._color_light = _party_color(self._party_id)
         self._start_party_session(code, is_creator=True)
         return code
+
+    def _same_party(self, peer_info) -> bool:
+        """True if a discovered peer belongs to OUR party, by the non-secret
+        party_id. Admission is still gated by the encrypted handshake under the
+        out-of-band code, so a spoofed/guessed party_id cannot actually join."""
+        return (
+            bool(getattr(peer_info, "in_session", False))
+            and bool(self._party_id)
+            and getattr(peer_info, "party_id", "") == self._party_id
+            and getattr(peer_info, "node_id", None) != self._node_id
+        )
 
     # ── session setup (runs in worker thread) ────────────────────
 
@@ -495,10 +522,10 @@ class PartyManager:
                     return
                 if not peer_info.in_session:
                     return
-                # Only connect to peers in the SAME party (same party_id —
-                # the non-secret group id; the key is still validated by the
-                # encrypted handshake, so a spoofed party_id can't actually join)
-                if peer_info.party_id != self._party_id:
+                # Only connect to peers in the SAME party (non-secret party_id;
+                # admission is still gated by the encrypted handshake under the
+                # out-of-band code, so a spoofed party_id can't actually join).
+                if not self._same_party(peer_info):
                     self._app.call_from_thread(
                         self._fire_debug,
                         f"{peer_info.display_name} is in a different party"
@@ -539,10 +566,7 @@ class PartyManager:
 
             # Connect to any already-visible peers in the SAME party
             for peer_info in self._discovery.get_visible_peers():
-                if (peer_info.in_session
-                        and peer_info.party_id == self._party_id
-                        and peer_info.node_id != my_id
-                        and my_id < peer_info.node_id):
+                if self._same_party(peer_info) and my_id < peer_info.node_id:
                     threading.Thread(
                         target=self._try_connect_peer,
                         args=(peer_info,),
@@ -560,7 +584,7 @@ class PartyManager:
                     return
                 visible = self._discovery.get_visible_peers() if self._discovery else []
                 for pi in visible:
-                    if pi.in_session and pi.party_id == self._party_id and pi.node_id != my_id:
+                    if self._same_party(pi):
                         with mgr._lock:
                             if pi.node_id in mgr._peers:
                                 continue
@@ -587,8 +611,7 @@ class PartyManager:
                         continue
                     try:
                         for pi in disc.get_visible_peers():
-                            if (pi.in_session and pi.party_id == self._party_id
-                                    and pi.node_id != my_id
+                            if (self._same_party(pi)
                                     and my_id < pi.node_id
                                     and not mgr.has_peer(pi.node_id)):
                                 self._try_connect_peer(pi)
@@ -880,9 +903,7 @@ class PartyManager:
     def telemetry_text(self) -> str:
         """Generate the P2P portion of the telemetry bar text."""
         pc = self._color_pri
-        if self._state == PartyState.SCANNING:
-            return f"    [{pc}]◌ looking for the party...[/]"
-        elif self._state == PartyState.JOINING:
+        if self._state == PartyState.JOINING:
             return f"    [{pc}]joining the party...[/]"
         elif self._state == PartyState.IN_PARTY and self._session_mgr:
             peers = self._session_mgr.peers

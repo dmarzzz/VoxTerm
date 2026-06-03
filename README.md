@@ -50,9 +50,9 @@ python3 -m tui.app
 | Key | Action |
 |-----|--------|
 | `R` | Start/pause recording |
-| `N` | Party mode — join or leave P2P sessions |
+| `P` | Party mode — host or join a P2P session |
 | `T` | Tag/name speakers |
-| `P` | Speaker profiles |
+| `O` | Speaker profiles |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
@@ -65,8 +65,8 @@ python3 -m tui.app
 
 Multiple people in the same room can share transcripts over the local network. Each laptop captures its closest speaker best — the combined result is better than any single mic.
 
-**Press N** to open party mode: host a new party (you get a short session code
-to share) or join one by typing a code. Press N again to leave.
+**Press P** to open party mode: host a new party (you get a short session code
+to share) or join one by typing a code. Press P again to leave.
 
 - Discovers nearby VoxTerm parties via mDNS (by name — **the session code is
   never broadcast**)

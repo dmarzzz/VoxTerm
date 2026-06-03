@@ -20,6 +20,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from network.crypto import validate_session_code
+
 
 class PartyScreen(ModalScreen):
     """Host-or-join picker. ``parties`` is a list of discovered-party dicts:
@@ -38,6 +40,7 @@ class PartyScreen(ModalScreen):
     #party-code-container { height: 3; margin-top: 1; }
     #party-code { width: 100%; background: #111822; color: #00ffcc; border: tall #003344; }
     #party-code:focus { border: tall #00e5ff; }
+    #party-error { height: auto; color: #f7768e; margin-top: 1; }
     #party-hint { height: auto; color: #607080; margin-top: 1; }
     """
 
@@ -78,6 +81,7 @@ class PartyScreen(ModalScreen):
                     placeholder="session code to join (e.g. bacon-horse-galaxy)",
                     id="party-code",
                 )
+            yield Static("", id="party-error", markup=True)
             yield Static(
                 " [#607080]ENTER[/] join   [#607080]^H[/] host new   [#607080]ESC[/] cancel\n"
                 " [#607080]the host shares the code out-of-band — it is never sent over the network[/]",
@@ -103,8 +107,15 @@ class PartyScreen(ModalScreen):
         return None
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        code = event.value.strip().lower()
+        code = (event.value or "").strip().lower()
+        err = self.query_one("#party-error", Static)
         if not code:
+            return
+        if not self._parties:
+            err.update(" No nearby party to join — press Ctrl+H to host one.")
+            return
+        if validate_session_code(code) is None:
+            err.update(" That isn't a valid code (three words, e.g. bacon-horse-galaxy).")
             return
         self.dismiss({
             "action": "join",

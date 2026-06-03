@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from network.discovery import PeerDiscovery
-from network.party import PartyManager
+from network.party import PartyManager, PartyState
 
 
 class _FakeWorkers:
@@ -89,3 +89,47 @@ def test_discovered_parties_excludes_codes(monkeypatch):
     # the picker payload must never carry a session code
     for g in parties:
         assert "session_code" not in g and "code" not in g
+
+
+class _PI:
+    def __init__(self, node_id, party_id, in_session=True):
+        self.node_id = node_id
+        self.party_id = party_id
+        self.in_session = in_session
+
+
+def test_same_party_gate():
+    # The mesh dial gate: only peers sharing our non-secret party_id (and not us,
+    # and in-session) are dialed. This is what the connect / reconnect-sweep use.
+    p = _mgr()
+    p._node_id = "me"
+    p._party_id = "pid-X"
+    assert p._same_party(_PI("other", "pid-X")) is True
+    assert p._same_party(_PI("other", "pid-Y")) is False          # different party
+    assert p._same_party(_PI("me", "pid-X")) is False             # self
+    assert p._same_party(_PI("other", "pid-X", in_session=False)) is False
+    p._party_id = ""
+    assert p._same_party(_PI("other", "")) is False               # no party -> never match
+
+
+def test_join_with_empty_party_id_stays_solo_not_isolated():
+    # Regression for the review's major finding: a join with no discovered
+    # party_id must NOT mint a phantom id and sit silently isolated — it must
+    # surface a failure and stay solo.
+    p = _mgr()
+    failures = []
+    p.on_party_failed = lambda e: failures.append(e)
+    p.join_party("bacon-horse-galaxy", party_id="")
+    assert p._state == PartyState.SOLO
+    assert p._session_mgr is None
+    assert failures, "empty party_id must surface a message, not isolate silently"
+
+
+def test_host_color_derives_from_party_id_not_code():
+    # Security: the broadcast party_color must not be derived from the secret
+    # code (that would leak bits of it). It comes from the non-secret party_id.
+    from network.party import _party_color
+
+    p = _mgr()
+    p.host_party()
+    assert p._color_pri == _party_color(p._party_id)[0]
