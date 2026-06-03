@@ -80,9 +80,11 @@ def compute_fbank(
         mel_energies = np.maximum(mel_energies, 1e-10)
         features[i] = np.log(mel_energies)
 
-    # Cepstral mean normalization
+    # Cepstral mean normalization. Accumulate the per-bin mean in float64 —
+    # a float32 reduction over many frames loses precision and leaves a
+    # residual bias (~1e-5) instead of a truly zero-mean result.
     if cmn and num_frames > 0:
-        features -= features.mean(axis=0)
+        features -= features.mean(axis=0, dtype=np.float64).astype(features.dtype)
 
     return features
 
