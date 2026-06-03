@@ -504,6 +504,14 @@ class PartyManager:
                 self._discovery.update_port(port)
             else:
                 self._start_discovery(port, on_peer_found=on_peer_found)
+            # Heal the mesh: a KNOWN peer that re-advertises — flips in_session when it
+            # joins the party, or changes port/group — fires an Updated mDNS event, not
+            # Added, so on_peer_found never sees it and the event was dropped, leaving a
+            # permanent hole in a 3+ peer mesh. Wire the same gated connect logic to it.
+            # (A peer that fully restarts comes back with a fresh node_id, i.e. an Added
+            # event for on_peer_found; the periodic sweep below covers missed/failed
+            # initial connects regardless of ordering.)
+            self._discovery.on_peer_updated = on_peer_found
             # Advertise our session code + group name + party color via mDNS
             self._discovery.update_group(
                 self._display_name, True, session_code=code,
@@ -540,6 +548,37 @@ class PartyManager:
                         self._try_connect_peer(pi)
 
             threading.Thread(target=_retry_connect, daemon=True).start()
+
+            # Periodic reconnect sweep. The 3s fallback above bails as soon as we hold
+            # ANY peer, so in a 3+ peer mesh it can't recover a single late/dropped
+            # peer. This idempotent sweep reconnects any same-party peer we should
+            # initiate toward (my_id < theirs) but aren't connected to — and because
+            # every node runs it, the lower-id side always initiates each missing edge,
+            # so a peer that left and came back is re-meshed within one interval.
+            def _reconnect_sweep():
+                while mgr._running:
+                    time.sleep(10.0)
+                    # Capture once: _stop_discovery() can null self._discovery from
+                    # another thread during the leave_session() window (mgr._running is
+                    # still True until BYE + thread joins finish), so re-reading it would
+                    # race. The try/except keeps a transient error from silently killing
+                    # this long-lived healer thread.
+                    disc = self._discovery
+                    if not mgr._running or disc is None:
+                        continue
+                    try:
+                        for pi in disc.get_visible_peers():
+                            if (pi.in_session and pi.session_code == code
+                                    and pi.node_id != my_id
+                                    and my_id < pi.node_id
+                                    and not mgr.has_peer(pi.node_id)):
+                                self._try_connect_peer(pi)
+                    except Exception:
+                        log.warning("reconnect sweep iteration failed", exc_info=True)
+
+            threading.Thread(
+                target=_reconnect_sweep, daemon=True, name="p2p-reconnect"
+            ).start()
 
             # Update state -- we are in the party
             self._app.call_from_thread(self._party_ready, is_creator)
