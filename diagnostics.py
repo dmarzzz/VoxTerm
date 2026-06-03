@@ -33,6 +33,12 @@ from config import CRASH_DIR
 
 def _ensure_crash_dir() -> None:
     CRASH_DIR.mkdir(parents=True, exist_ok=True)
+    # Lock the dir to the owner, matching the codebase's convention for
+    # sensitive data (e.g. BACKUP_DIR at 0o700 in audio/speakers/store.py).
+    try:
+        CRASH_DIR.chmod(0o700)
+    except OSError:
+        pass
 
 
 # ── faulthandler ──────────────────────────────────────────────
@@ -49,6 +55,12 @@ def setup_faulthandler() -> None:
     global _fault_file
     _ensure_crash_dir()
     _fault_file = open(CRASH_DIR / "faulthandler.log", "a")
+    # C-level tracebacks can contain runtime context — keep them owner-only,
+    # matching the 0o600 convention used for the speaker DB / backups.
+    try:
+        os.fchmod(_fault_file.fileno(), 0o600)
+    except OSError:
+        pass
     faulthandler.enable(file=_fault_file, all_threads=True)
 
 
@@ -232,9 +244,12 @@ def write_crash_dump(
             if key in state:
                 lines.append(f"{key + ':':18s}{state[key]}")
 
-        (CRASH_DIR / (base + ".log")).write_text(
-            "\n".join(lines), encoding="utf-8"
-        )
+        log_path = CRASH_DIR / (base + ".log")
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+        try:
+            log_path.chmod(0o600)
+        except OSError:
+            pass
 
         # ── machine-readable .json ────────────────────
         crash_json = {
@@ -250,9 +265,12 @@ def write_crash_dump(
             if not isinstance(v, (str, int, float, bool, type(None))):
                 crash_json[k] = str(v)
 
-        (CRASH_DIR / (base + ".json")).write_text(
-            json.dumps(crash_json, indent=2), encoding="utf-8"
-        )
+        json_path = CRASH_DIR / (base + ".json")
+        json_path.write_text(json.dumps(crash_json, indent=2), encoding="utf-8")
+        try:
+            json_path.chmod(0o600)
+        except OSError:
+            pass
     except Exception:
         pass  # crash dump must never itself crash the app
 
