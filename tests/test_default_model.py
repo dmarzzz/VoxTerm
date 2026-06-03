@@ -50,3 +50,32 @@ def test_cpu_only_linux_does_not_default_to_qwen():
     # PyTorch qwen3 path.
     assert config.DEFAULT_MODEL in config.FASTER_WHISPER_MODELS
     assert config.DEFAULT_MODEL == "fw-base"
+
+
+def test_torch_cpu_only_wheel_detected_via_metadata(monkeypatch):
+    import importlib.metadata as md
+
+    monkeypatch.setattr(md, "version", lambda name: "2.11.0+cpu")
+    assert config._torch_is_cpu_only() is True
+    monkeypatch.setattr(md, "version", lambda name: "2.11.0+cu121")
+    assert config._torch_is_cpu_only() is False
+    monkeypatch.setattr(md, "version", lambda name: "2.11.0")  # default PyPI (CUDA-capable)
+    assert config._torch_is_cpu_only() is False
+
+    def _raise(_name):
+        raise md.PackageNotFoundError
+    monkeypatch.setattr(md, "version", _raise)
+    assert config._torch_is_cpu_only() is False  # unknown -> don't suppress
+
+
+def test_cpu_only_torch_suppresses_gpu_default_even_with_driver(monkeypatch):
+    # The review's exact false-positive case: an NVIDIA driver is present but
+    # torch is a +cpu wheel -> the GPU model can't actually run, so the heuristic
+    # must NOT pick it.
+    monkeypatch.setattr(config, "_nvidia_driver_present", lambda: True)
+    monkeypatch.setattr(config, "_torch_is_cpu_only", lambda: True)
+    assert config._has_nvidia_gpu() is False
+    monkeypatch.setattr(config, "_torch_is_cpu_only", lambda: False)
+    assert config._has_nvidia_gpu() is True
+    monkeypatch.setattr(config, "_nvidia_driver_present", lambda: False)
+    assert config._has_nvidia_gpu() is False  # no driver -> never GPU default

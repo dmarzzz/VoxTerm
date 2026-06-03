@@ -12,15 +12,13 @@ CHANNELS = 1
 DTYPE = "float32"
 
 
-def _has_nvidia_gpu() -> bool:
-    """Cheap, torch-free probe for a usable NVIDIA GPU + driver.
+def _nvidia_driver_present() -> bool:
+    """True if an NVIDIA driver looks present, without importing torch.
 
-    The transcriber selects CUDA via ``torch.cuda.is_available()``
-    (audio/transcriber.py); importing torch *here* would slow every
-    ``import config`` (including ``--list-models`` and the test suite). The
-    NVIDIA driver exposes ``/dev/nvidiactl`` and ``/dev/nvidia*`` device nodes
-    when a GPU is usable and ships ``nvidia-smi`` on PATH — a few ``stat()``
-    calls that match the common case without the heavy import.
+    The driver exposes ``/dev/nvidiactl`` + ``/dev/nvidia*`` device nodes and
+    ships ``nvidia-smi`` on PATH. A few ``stat()`` calls, no heavy import.
+    (Heuristic: ``nvidia-smi`` can also appear in containers/WSL/stale installs
+    without a usable device — see ``_has_nvidia_gpu``.)
     """
     import glob
     import os
@@ -31,6 +29,34 @@ def _has_nvidia_gpu() -> bool:
     ):
         return True
     return shutil.which("nvidia-smi") is not None
+
+
+def _torch_is_cpu_only() -> bool:
+    """True if the installed torch is a CPU-only wheel (local version ``+cpu``).
+
+    Read from package *metadata*, so torch is never imported here. CUDA wheels
+    are tagged ``+cuXXX`` and the default PyPI wheel has no local tag — both can
+    use a GPU; only the ``+cpu`` wheel cannot. Unknown ⇒ don't suppress.
+    """
+    try:
+        import importlib.metadata as _md
+        return _md.version("torch").endswith("+cpu")
+    except Exception:
+        return False
+
+
+def _has_nvidia_gpu() -> bool:
+    """Cheap, torch-free heuristic: is the GPU model default actually viable?
+
+    The transcriber selects CUDA via ``torch.cuda.is_available()``
+    (audio/transcriber.py); importing torch *here* would slow every
+    ``import config`` (incl. ``--list-models`` and the test suite). So we
+    approximate it: an NVIDIA driver must be present AND torch must not be a
+    CPU-only wheel (a ``+cpu`` build can't use the GPU even with a driver, which
+    would otherwise mis-default to the slow qwen3-on-CPU path). It's a heuristic
+    — if it ever mis-detects, pin a model with ``-m fw-base``.
+    """
+    return _nvidia_driver_present() and not _torch_is_cpu_only()
 
 
 # Transcription — platform-aware model registry

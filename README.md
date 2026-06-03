@@ -130,7 +130,10 @@ Press `P` to manage your speaker profile library (rename, delete, wipe all data)
   on CPU-only machines** (~4.5× real time, a good speed/accuracy balance).
 - Whisper variants (tiny through large-v3) available via the `M` menu.
 
-Models download automatically on first use.
+Models download automatically on first use. GPU detection is a lightweight
+heuristic (NVIDIA driver present + a CUDA-capable torch build); if it ever picks
+the wrong default on your box, pin one explicitly with `-m fw-base` (or
+`-m qwen3-0.6b`).
 
 ## Project Structure
 
