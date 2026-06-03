@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import pytest
 
+import config
 from audio.transcriber import (
     FasterWhisperTranscriber,
     Qwen3Transcriber,
+    WhisperTranscriber,
     get_transcriber,
 )
 from config import FASTER_WHISPER_MODELS, QWEN3_MODELS
@@ -25,6 +27,18 @@ def test_factory_dispatches_by_model_set():
         assert isinstance(get_transcriber(key), Qwen3Transcriber)
     for key in FASTER_WHISPER_MODELS:
         assert isinstance(get_transcriber(key), FasterWhisperTranscriber)
+
+
+def test_factory_else_branch_returns_mlx_whisper(monkeypatch):
+    # A model key in neither the QWEN3 nor faster-whisper set falls through to the
+    # MLX WhisperTranscriber else-branch (the macOS-arm64 path, not populated on
+    # Linux) — covered here by injecting a key, since WhisperTranscriber() is cheap
+    # to construct (MLX only loads in .load()). Also asserts the else-branch omits
+    # the language arg, matching WhisperTranscriber's signature.
+    monkeypatch.setitem(config.AVAILABLE_MODELS, "mlx-whisper-probe", "mlx-community/whisper-tiny")
+    t = get_transcriber("mlx-whisper-probe", language="ja")
+    assert isinstance(t, WhisperTranscriber)
+    assert t.model == "mlx-community/whisper-tiny"
 
 
 def test_factory_passes_language_through():
