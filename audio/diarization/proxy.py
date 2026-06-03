@@ -122,10 +122,16 @@ class DiarizationProxy:
         self._engine.load(backend="onnx")
         log.info("Diarization proxy: direct mode (ONNX, in-process)")
 
-    def _spawn(self):
-        """Start the subprocess worker."""
+    def _spawn_proc(self) -> subprocess.Popen:
+        """Start a worker subprocess and block until it's READY (model load: 5-30s).
+
+        Returns the ready process. Deliberately does NOT touch self._proc: the
+        blocking READY wait must run WITHOUT _lock held so a concurrent _call()
+        never stalls for the whole startup timeout. Callers install the result
+        under a brief lock (see _handle_crash).
+        """
         project_root = str(Path(__file__).parent.parent.parent)
-        self._proc = subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-m", _WORKER_MODULE],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -134,20 +140,24 @@ class DiarizationProxy:
         )
 
         # Wait for READY message (model loading can take 5-30s)
-        resp = recv_msg(self._proc.stdout, timeout=DIARIZER_STARTUP_TIMEOUT)
+        resp = recv_msg(proc.stdout, timeout=DIARIZER_STARTUP_TIMEOUT)
         if resp is None or resp.get("type") != MSG_READY:
             # Kill first to ensure stderr is closed, then read for diagnostics
             stderr_out = ""
             try:
-                self._proc.kill()
-                self._proc.wait(timeout=2)
-                stderr_out = self._proc.stderr.read(2000).decode("utf-8", errors="replace")
+                proc.kill()
+                proc.wait(timeout=2)
+                stderr_out = proc.stderr.read(2000).decode("utf-8", errors="replace")
             except Exception:
                 pass
-            self._proc = None
             raise RuntimeError(
                 f"Diarizer subprocess did not start: {stderr_out[:200]}"
             )
+        return proc
+
+    def _spawn(self):
+        """Start the subprocess worker and install it (startup path, single-threaded)."""
+        self._proc = self._spawn_proc()
 
     def _kill(self):
         """Force-kill the subprocess."""
@@ -418,12 +428,17 @@ class DiarizationProxy:
 
         # Brief delay before respawn
         time.sleep(1.0)
+        # Spawn + the up-to-30s READY wait run WITHOUT _lock, so a concurrent
+        # _call() isn't blocked for the whole model-load; only the pointer swap
+        # below is locked. (Finishes the "respawn outside the lock" intent that
+        # _call already started — see its comment.)
+        try:
+            new_proc = self._spawn_proc()
+        except Exception:
+            self._fallback_to_inprocess()
+            return
         with self._lock:
-            try:
-                self._spawn()
-            except Exception:
-                self._fallback_to_inprocess()
-                return
+            self._proc = new_proc
 
         if self.on_subprocess_ready:
             try:
