@@ -11,6 +11,28 @@ CHUNK_SIZE = 1024
 CHANNELS = 1
 DTYPE = "float32"
 
+
+def _has_nvidia_gpu() -> bool:
+    """Cheap, torch-free probe for a usable NVIDIA GPU + driver.
+
+    The transcriber selects CUDA via ``torch.cuda.is_available()``
+    (audio/transcriber.py); importing torch *here* would slow every
+    ``import config`` (including ``--list-models`` and the test suite). The
+    NVIDIA driver exposes ``/dev/nvidiactl`` and ``/dev/nvidia*`` device nodes
+    when a GPU is usable and ships ``nvidia-smi`` on PATH — a few ``stat()``
+    calls that match the common case without the heavy import.
+    """
+    import glob
+    import os
+    import shutil
+
+    if sys.platform.startswith("linux") and (
+        os.path.exists("/dev/nvidiactl") or glob.glob("/dev/nvidia[0-9]*")
+    ):
+        return True
+    return shutil.which("nvidia-smi") is not None
+
+
 # Transcription — platform-aware model registry
 if sys.platform == "darwin" and platform.machine() == "arm64":
     # macOS: Qwen3-ASR (primary, MLX) + mlx-whisper (fallback)
@@ -68,11 +90,17 @@ elif sys.platform.startswith("linux"):
         AVAILABLE_MODELS["qwen3-1.7b"] = "Qwen/Qwen3-ASR-1.7B"
     QWEN3_MODELS = set(AVAILABLE_MODELS) - FASTER_WHISPER_MODELS
     PARAKEET_MODELS: set[str] = set()
-    DEFAULT_MODEL = "qwen3-0.6b" if _HAS_QWEN_ASR else "fw-small"
+    # qwen3-0.6b (PyTorch) is fast on CUDA but effectively unusable on CPU
+    # (minutes to load, sub-realtime decode), so default to it only when a GPU
+    # is present; otherwise fw-base (~4.5x realtime on CPU) is the better
+    # out-of-box choice. qwen3 stays available for explicit selection.
+    DEFAULT_MODEL = "qwen3-0.6b" if (_HAS_QWEN_ASR and _has_nvidia_gpu()) else "fw-base"
     WHISPER_MODEL = None
 elif sys.platform == "win32":
     # Windows: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
-    DEFAULT_MODEL = "qwen3-0.6b"
+    # GPU-gate the heavy PyTorch default (see the Linux note); fall back to the
+    # CPU-friendly faster-whisper otherwise.
+    DEFAULT_MODEL = "qwen3-0.6b" if _has_nvidia_gpu() else "fw-base"
     AVAILABLE_MODELS = {
         "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
         "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",
