@@ -305,8 +305,8 @@ _DEFAULTS: dict[str, Any] = {
     "hivemind_sink_url": "",
     "hivemind_location": "",
     # User opt-in to actually push transcripts to a discovered sink.
-    # Default False: voxterm always discovers but never pushes until
-    # the user enables it from the `h` hivemind menu. Once enabled,
+    # Default False: even when discovery is enabled (mode=auto/on) voxterm
+    # never pushes until the user enables it from the `h` hivemind menu. Once enabled,
     # this flips to True and persists so subsequent launches push
     # silently. `--hivemind on` overrides this (force push regardless).
     "hivemind_push_enabled": False,

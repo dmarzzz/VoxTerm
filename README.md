@@ -82,10 +82,11 @@ Voxterm can stream transcript batches to a "convent box" running
 signed bundle and propagates it on the LAN.
 
 By default this is **off** — voxterm never discovers or contacts a sink unless
-you opt in. To enable discovery (and, with push enabled, streaming):
+you opt in. Opting in always needs a mode (a bare `--hivemind-sink-url` is
+ignored while the mode is `off`):
 ```
-voxterm --hivemind=auto
-voxterm --hivemind-sink-url=http://convent.local:7777
+voxterm --hivemind=auto                                               # discover sinks on the LAN
+voxterm --hivemind=auto --hivemind-sink-url=http://convent.local:7777 # or target one directly
 ```
 
 Mode flag: `--hivemind=auto|on|off`

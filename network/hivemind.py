@@ -783,7 +783,7 @@ def configure(
     and no sink can be located (neither ``sink_url`` nor mDNS within
     ``discovery_timeout``), raises ``RuntimeError``.
 
-    Push gating (mode=auto default behavior): discovery runs but
+    Push gating (whenever discovery is active): discovery runs but
     transcripts are buffered, not POSTed, until ``push_enabled=True``
     (the user opted in via the `h` menu and the TUI saved the choice
     to ConfigStore). ``mode=on`` overrides and always pushes — that's
