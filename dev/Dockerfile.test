@@ -25,11 +25,11 @@ ctl.pulse {\n\
 # Install CPU-only PyTorch first (much smaller than full torch)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install Python deps (only Linux-relevant ones)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy project
+# Copy project and install (editable). Dependencies are declared in
+# pyproject.toml — there is no requirements.txt. CPU torch is pre-installed
+# above, so `-e .` resolves the unpinned `torch>=2.0.0` against it rather than
+# pulling the multi-GB CUDA build.
 COPY . .
+RUN pip install --no-cache-dir -e .
 
 CMD ["sh"]
