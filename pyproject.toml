@@ -55,6 +55,7 @@ packages = [
     "diagnostics.py",
     "dictation",
     "network",
+    "redaction",
     "summarizer",
     "tui",
 ]

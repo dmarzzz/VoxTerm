@@ -283,6 +283,12 @@ _DEFAULTS: dict[str, Any] = {
     "summarization_strength": "medium",
     "summarization_template": "tldr",
     "summarization_custom_prompt": "",
+    # Local-LLM transcript redaction. `redaction_model` is blank for on-device
+    # MLX (Apple Silicon) or an "ollama:model[@host]" string; `redaction_profile`
+    # is a profile id from redaction/prompts.py (standard|contact_only|aggressive|custom).
+    "redaction_model": "",
+    "redaction_profile": "standard",
+    "redaction_custom_prompt": "",
     "p2p_display_name": "",
     # Hivemind transcript-sink (spec §4.3 of SHAPE-ROTATOR-OS-SPEC.md).
     # `hivemind_mode` is one of "auto" | "on" | "off"; when set on the
@@ -312,6 +318,9 @@ _TYPES: dict[str, type] = {
     "summarization_strength": str,
     "summarization_template": str,
     "summarization_custom_prompt": str,
+    "redaction_model": str,
+    "redaction_profile": str,
+    "redaction_custom_prompt": str,
     "p2p_display_name": str,
     "hivemind_mode": str,
     "hivemind_sink_url": str,

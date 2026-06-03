@@ -66,6 +66,18 @@ from tui.widgets.tag_screen import SpeakerTagScreen
 from tui.widgets.profile_screen import SpeakerProfileScreen
 from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
+from tui.widgets.redaction_screen import (
+    RedactionScreen,
+    RedactionReviewScreen,
+    RedactionResultScreen,
+)
+from redaction import (
+    RedactionError,
+    apply_redactions,
+    get_redactor,
+    overwrite_and_delete,
+    resolve_profile,
+)
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
 from audio.capture import AudioCapture
@@ -449,6 +461,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]E[/]       [#c0c0c0]Browse saved transcripts[/]\n"
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
+                "[bold #00e5ff]X[/]       [#c0c0c0]Save redacted copy (local LLM)[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
@@ -542,6 +555,7 @@ class VoxTerm(App):
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize_and_export", "Summarize"),
+        Binding("x", "redact_and_export", "Redact"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -2240,6 +2254,229 @@ class VoxTerm(App):
                 summary=summary,
                 path=str(filepath),
                 template_label=template_label,
+            )
+        )
+
+    def action_redact_and_export(self):
+        """Open the profile picker, then save a redacted copy of the transcript.
+
+        Non-destructive: unlike summarize-and-export, this does NOT consume the
+        session — it writes a separate ``*-redacted.md`` snapshot and leaves the
+        live transcript (and live file) intact so recording can continue.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        if not transcript.get_entries():
+            transcript.system_message("nothing to redact", Log.REC)
+            return
+
+        cfg = _get_config()
+        default_profile = cfg.get("redaction_profile") or "standard"
+        default_custom = cfg.get("redaction_custom_prompt") or ""
+        default_model = cfg.get("redaction_model") or ""
+
+        def on_profile_selected(result):
+            if not result:
+                return
+            profile_id = result["profile_id"]
+            custom_instructions = result["custom_instructions"]
+            redaction_model = result.get("redaction_model", "")
+            # Persist the chosen profile + model (blank model = on-device MLX,
+            # an intentional choice). Only overwrite the saved custom
+            # instruction when the custom profile was actually used.
+            updates = {
+                "redaction_profile": profile_id,
+                "redaction_model": redaction_model,
+            }
+            if profile_id == "custom":
+                updates["redaction_custom_prompt"] = custom_instructions
+            cfg.update(updates)
+            # Snapshot BEFORE the progress message so it isn't fed to the LLM
+            # or written into the redacted file (same discipline as summarize).
+            body = transcript.get_markdown(
+                self._model_name,
+                session_start=self._session_start,
+                language=self._language or "",
+            )
+            entry_count = len(transcript.get_entries())
+            transcript.system_message(
+                "redacting transcript (local LLM)…", Log.REC
+            )
+            self._run_redact_and_export(
+                profile_id, custom_instructions, body, entry_count, redaction_model
+            )
+
+        self.push_screen(
+            RedactionScreen(
+                default_profile_id=default_profile,
+                default_custom_instructions=default_custom,
+                default_redaction_model=default_model,
+            ),
+            on_profile_selected,
+        )
+
+    @work(thread=True, exclusive=True, group="redaction")
+    def _run_redact_and_export(
+        self,
+        profile_id: str,
+        custom_instructions: str,
+        body: str,
+        entry_count: int,
+        redaction_model: str,
+    ):
+        """Worker: load LLM if needed, mask PII, write the redacted markdown.
+
+        The redactor chunks the snapshot internally and may call the model
+        several times; the whole pass runs inside the shared single-thread
+        executor + GPU lock that serialize transcription, so it can't overlap
+        a transcribe/model-load on the Metal GPU.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        try:
+            profile = resolve_profile(profile_id)
+            redactor = get_redactor(model_name=redaction_model)
+            with self._transcribe_lock:
+                result = self._mlx_executor.submit(
+                    redactor.redact, body, profile, custom_instructions
+                ).result()
+        except RedactionError as e:
+            self.call_from_thread(
+                lambda: transcript.system_message(
+                    f"redaction failed: {e}", Log.REC
+                )
+            )
+            return
+        except Exception as e:
+            self.call_from_thread(
+                lambda: transcript.system_message(
+                    f"redaction error: {e}", Log.REC
+                )
+            )
+            return
+
+        self.call_from_thread(
+            self._review_redaction,
+            profile.label,
+            result,
+            body,
+            entry_count,
+        )
+
+    def _review_redaction(
+        self,
+        profile_label: str,
+        result,  # redaction.RedactionResult
+        body: str,
+        entry_count: int,
+    ) -> None:
+        """Show the pre-write review modal (main-thread).
+
+        Nothing is on disk yet. The user vets the found spans (uncheck false
+        positives, add missed ones), picks what happens to the unredacted
+        original, then confirms — only then do we write. Cancelling writes
+        nothing, which is the point: a small model's silent miss can't slip
+        into a file called ``-redacted`` without a human seeing the preview.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        candidate_spans = [(f.text, f.type) for f in result.findings]
+
+        def on_reviewed(res):
+            if not res:
+                transcript.system_message(
+                    "redaction cancelled — nothing written", Log.REC
+                )
+                return
+            self._finalize_redaction_export(
+                profile_label,
+                body,
+                res["spans"],
+                res.get("disposition", "keep"),
+                entry_count,
+            )
+
+        self.push_screen(
+            RedactionReviewScreen(
+                spans=candidate_spans,
+                body=body,
+                profile_label=profile_label,
+            ),
+            on_reviewed,
+        )
+
+    def _finalize_redaction_export(
+        self,
+        profile_label: str,
+        body: str,
+        spans: list,
+        disposition: str,
+        entry_count: int,
+    ) -> None:
+        """Apply the user-approved spans, write ``*-redacted.md``, and act on
+        the original per the chosen disposition (main-thread)."""
+        transcript = self.query_one(TranscriptPanel)
+        result = apply_redactions(body, spans)
+
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = (
+            self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-redacted.md"
+        )
+        filepath = SESSIONS_DIR / filename
+
+        if result.total:
+            tally = ", ".join(
+                f"{n} {cat}"
+                for cat, n in sorted(
+                    result.counts.items(), key=lambda kv: kv[1], reverse=True
+                )
+            )
+            note = (
+                f"_Redacted ({profile_label}): {result.total} spans masked "
+                f"— {tally}._"
+            )
+        else:
+            note = f"_Redacted ({profile_label}): no spans masked._"
+
+        # Splice the redaction note just after the first `---` divider so the
+        # session header stays at the top (mirrors the summary export).
+        redacted = result.redacted_text
+        marker = "\n---\n"
+        idx = redacted.find(marker)
+        block = f"\n## Redacted — {profile_label}\n\n{note}\n"
+        if idx == -1:
+            md = redacted + block
+        else:
+            head = redacted[: idx + len(marker)]
+            tail = redacted[idx + len(marker):]
+            md = head + block + "\n---\n" + tail
+
+        filepath.write_text(md, encoding="utf-8")
+
+        # Act on the unredacted original (the live-autosave file).
+        original_note = ""
+        if disposition in ("replace", "shred") and self._live_file and self._live_file.exists():
+            if disposition == "shred":
+                overwrite_and_delete(self._live_file)
+                original_note = "original shredded (best-effort overwrite + delete)"
+            else:
+                self._live_file.unlink()
+                original_note = "original (live autosave) deleted"
+        elif disposition in ("replace", "shred"):
+            original_note = "no live autosave on disk to remove"
+        else:
+            original_note = "original kept on disk"
+
+        transcript.system_message(
+            f"redacted {entry_count} entries ({result.total} spans) → {filepath} "
+            f"[{original_note}]",
+            Log.REC,
+        )
+        self.push_screen(
+            RedactionResultScreen(
+                redacted_text=md,
+                counts=result.counts,
+                total=result.total,
+                path=str(filepath),
+                profile_label=profile_label,
+                original_note=original_note,
             )
         )
 
