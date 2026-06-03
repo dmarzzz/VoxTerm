@@ -100,6 +100,19 @@ class P2PDebugStats:
                 f"  merge: {ms['peer_count']} peers, delay={ms['delay_ms']}ms, "
                 f"merged={ms['merge_count']}, peer_contrib={ms['peer_contributions']}"
             )
+            # Per-peer audio frame loss (sequence gaps filled with silence). This is
+            # the real UDP loss signal — surfaced from the mixer, where it's measured.
+            peer_frames = ms.get("peer_frames", {})
+            peer_gaps = ms.get("peer_gaps", {})
+            for nid, frames in peer_frames.items():
+                gaps = peer_gaps.get(nid, 0)
+                total = frames + gaps
+                rate = (gaps / total * 100.0) if total else 0.0
+                name = next(
+                    (p["display_name"] for p in snap["peers"] if nid.startswith(p["node_id"])),
+                    nid[:8],
+                )
+                lines.append(f"    {name:<12} audio: {frames} frames, {gaps} gaps ({rate:.1f}%)")
             # Live weight bars — shows which mic is dominant right now
             weights = ms.get("live_weights", {})
             if weights:

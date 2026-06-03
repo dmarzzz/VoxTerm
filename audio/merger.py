@@ -158,6 +158,13 @@ class PeerAudioMixer:
                     nid: buf.frames_received
                     for nid, buf in self._peer_buffers.items()
                 },
+                # Per-peer frame loss: sequence gaps filled with silence (buffer.py).
+                # This is the real audio-loss signal — exported so the debug overlay
+                # can show a gap rate instead of a permanently-zero counter.
+                "peer_gaps": {
+                    nid: buf.gaps_filled
+                    for nid, buf in self._peer_buffers.items()
+                },
             }
 
     def debug_info(self) -> dict:
@@ -168,11 +175,16 @@ class PeerAudioMixer:
                 nid: buf.frames_received
                 for nid, buf in self._peer_buffers.items()
             }
+            peer_gaps = {
+                nid: buf.gaps_filled
+                for nid, buf in self._peer_buffers.items()
+            }
         return {
             "peer_count": len(peer_ids),
             "merge_delay_ms": int(self._merge_delay_s * 1000),
             "buffered_chunks": len(self._delay_buf),
             "peer_frames": peer_frames,
+            "peer_gaps": peer_gaps,
             "live_weights": dict(self._live_weights),
         }
 
