@@ -2,7 +2,7 @@
 
 Local real-time voice transcription TUI with speaker diarization and P2P collaborative transcription. Runs entirely offline — no cloud APIs, no audio stored.
 
-![platform](https://img.shields.io/badge/platform-macOS-black)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-black)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 
 ## Privacy & Storage Policy
@@ -29,7 +29,7 @@ Then run:
 voxterm
 ```
 
-Requires macOS and Python 3.12+. Apple Silicon Macs use MLX models; Intel Macs use the CPU-compatible faster-whisper backend. Models download automatically on first use.
+Runs on macOS and Linux, Python 3.12+. Apple Silicon Macs use MLX models; Intel Macs and Linux use the CPU-compatible faster-whisper / Qwen3-ASR (PyTorch) backends. Models download automatically on first use.
 
 <details>
 <summary>Manual setup (for developers)</summary>

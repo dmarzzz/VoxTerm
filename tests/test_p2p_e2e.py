@@ -52,7 +52,7 @@ class SimNode:
     def start_session(self, code: str):
         self.session = SessionManager(self.name, node_id=self.node_id, tcp_port=0)
         self.session._session_code = code
-        self.session._session_key = b"unused"
+        self.session._session_key = derive_session_key(code)
         self.session._start_server()
         self.session._in_session = True
 

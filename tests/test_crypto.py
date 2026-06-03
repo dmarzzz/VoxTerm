@@ -10,6 +10,7 @@ All tests use ephemeral keys (os.urandom) — no Keychain interaction.
 """
 
 import os
+import sys
 
 import pytest
 
@@ -299,7 +300,21 @@ class TestKeyManagement:
         assert enc_a != enc_b
         assert mac_a != mac_b
 
-    # -- Keychain orchestration (mocked) --
+
+_darwin_only = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="exercises the macOS Keychain key store; on Linux/Windows get_or_create_key "
+    "uses file-based storage (_file_key_get/_file_key_set), so the _keychain_* mocks don't apply",
+)
+
+
+@_darwin_only
+class TestKeychainKeyManagement:
+    """macOS Keychain get-or-create orchestration (mocked).
+
+    These monkeypatch _keychain_get/_keychain_set, which only drive the key store
+    on macOS; the file-based Linux/Windows path is covered by the round-trip tests above.
+    """
 
     def test_creates_new_key_when_none_exists(self, monkeypatch):
         """When keychain returns None, generate a new key and store it."""
