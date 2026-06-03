@@ -43,6 +43,7 @@ dependencies = [
 [project.scripts]
 voxterm = "tui.app:main"
 voxterm-dictate = "dictation.app:main"
+voxterm-batch = "batch.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/dmarzzz/VoxTerm"
