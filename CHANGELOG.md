@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional cross-platform CPU **streaming ASR** backend (sherpa-onnx) behind the
+  `[streaming]` extra, with model keys `sherpa-stream-en` (zipformer-20M, ultra-fast) and
+  `sherpa-nemotron-en` (NeMo FastConformer-RNNT 0.6B, accurate). Fully additive — nothing
+  changes when the extra is absent. See `docs/streaming-asr.md` and
+  `docs/streaming-asr-benchmark.md`.
+
 ## [0.3.0] - 2026-06-03
 
 ### Added

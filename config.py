@@ -2,6 +2,7 @@
 
 VERSION = "0.3.0"
 
+import importlib.util
 import sys
 import platform
 
@@ -89,6 +90,21 @@ elif sys.platform == "win32":
     FASTER_WHISPER_MODELS = {"fw-tiny", "fw-base", "fw-small", "fw-medium", "fw-large-v3", "fw-distil-large-v3"}
 else:
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+# Optional cross-platform streaming backend (sherpa-onnx). Surfaced ONLY when the package is
+# installed AND a wheel exists for this platform (there is no Intel-macOS wheel). 100% additive:
+# if absent, SHERPA_MODELS stays empty, AVAILABLE_MODELS/DEFAULT_MODEL are byte-for-byte unchanged,
+# and the transcriber's sherpa dispatch branch is unreachable. sherpa statically links its own
+# ONNX Runtime, so it cannot collide with VoxTerm's pinned onnxruntime (Silero VAD / 3D-Speaker).
+_HAS_SHERPA = (
+    importlib.util.find_spec("sherpa_onnx") is not None
+    and not (sys.platform == "darwin" and platform.machine() != "arm64")
+)
+if _HAS_SHERPA:
+    AVAILABLE_MODELS["sherpa-stream-en"] = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+    # nemotron-EN streaming (NeMo FastConformer-RNNT, 0.6B, exported for sherpa-onnx)
+    AVAILABLE_MODELS["sherpa-nemotron-en"] = "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25"
+SHERPA_MODELS = {"sherpa-stream-en", "sherpa-nemotron-en"} if _HAS_SHERPA else set()
 
 # Language forcing for Qwen3-ASR (None = auto-detect)
 DEFAULT_LANGUAGE = "en"
