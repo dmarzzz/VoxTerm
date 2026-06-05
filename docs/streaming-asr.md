@@ -32,10 +32,12 @@ See the measured [benchmark](./streaming-asr-benchmark.md).
 
 ## Use
 
-- **GUI:** pick the model in the dropdown, then record/transcribe as usual. The **live
-  transcript** view automatically prefers `sherpa-stream-en` (when installed) and streams the
-  text in word-by-word, finalizing a line on a pause.
-- **TUI:** pass the key like any model: `python -m tui.app -m sherpa-nemotron-en`.
+- **TUI / CLI:** pass the key like any model — `python -m tui.app -m sherpa-nemotron-en`. The
+  backend is a drop-in for the existing chunked callers, so anything that goes through
+  `get_transcriber` can use it.
+
+> A GUI live-view that drives this backend word-by-word (endpoint detection finalizing each line)
+> lives on a separate branch (the web GUI). **This PR is the backend only.**
 
 The default model is unchanged (`fw-small` on Linux/Intel, MLX on Apple Silicon) — streaming
 is something you opt into per use.
@@ -44,8 +46,8 @@ is something you opt into per use.
 
 `audio/transcriber.py:SherpaStreamingTranscriber` wraps sherpa-onnx's `OnlineRecognizer`
 (transducer: encoder/decoder/joiner). Per-call `create_stream()` makes it a drop-in for the
-existing chunked callers; `gui/engine.py:_live_stream_loop` drives a single persistent stream
-for true streaming in the live view (endpoint detection finalizes each line). New model keys
+existing chunked callers, while a persistent `create_stream()` enables true word-by-word
+streaming (endpoint detection finalizes each line) for a live consumer. New model keys
 are added to the registry in `audio/transcriber.py` (`_SHERPA_MODEL_URLS`) + gated in
 `config.py` (surfaced only when `sherpa_onnx` is importable on a supported platform).
 
