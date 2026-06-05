@@ -69,7 +69,7 @@ The install script at `install.sh`:
 - Queries GitHub API for latest release tag
 - Downloads the release tarball (not git clone — faster, no .git directory)
 - Creates a venv at `~/.local/share/voxterm/.venv/`
-- Installs dependencies from `requirements.txt`
+- Installs dependencies from `pyproject.toml` (via `pip install -e .`)
 - Symlinks `voxterm` to `~/.local/bin/voxterm`
 - Preserves existing venv on updates (avoids re-downloading all deps)
 - Skips entirely if already on the requested version
