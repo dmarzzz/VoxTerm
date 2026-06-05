@@ -32,8 +32,11 @@ jobs:
       - name: Install (CPU-only torch + project)
         run: |
           python -m pip install --upgrade pip
-          # The default Linux torch wheel is the multi-GB CUDA build; CI only needs CPU.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # CPU-only, version-MATCHED torch + torchaudio from the PyTorch CPU index. The default
+          # Linux torch wheel is the multi-GB CUDA build, and leaving torchaudio unpinned drifts it
+          # to a different major than torch (e.g. torch 2.12 vs torchaudio 2.11) that fails on import
+          # — so pin the known-good matched pair.
+          pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -e . -r dev/requirements-dev.txt
       - name: Run tests
         run: pytest   # markers/paths from [tool.pytest.ini_options]; engine is mocked
