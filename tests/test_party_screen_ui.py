@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from textual.app import App
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
 
 from tui.widgets.party_screen import PartyCodeScreen, PartyScreen
 
@@ -83,6 +83,31 @@ def test_no_parties_join_is_refused():
 
     # nothing to join -> not dismissed; the screen tells the user to host
     assert _drive(PartyScreen([]), steps) == _SENTINEL
+
+
+def test_picker_repolls_so_a_late_host_becomes_joinable():
+    # A host that comes up AFTER the picker opens must appear live (instead of the
+    # old behaviour where an empty list funnelled the code-holder into hosting a
+    # divergent party — the split-brain the security fix's review flagged).
+    seq = [[], _PARTIES]
+
+    def provider():
+        return seq.pop(0) if seq else _PARTIES
+
+    async def steps(app, pilot):
+        app.screen._refresh()                       # tick 1: still nothing discovered
+        await pilot.pause()
+        assert app.screen.query_one("#party-list", OptionList).display is False
+        app.screen._refresh()                       # tick 2: a host appears
+        await pilot.pause()
+        ol = app.screen.query_one("#party-list", OptionList)
+        assert ol.display is True and ol.option_count == 1
+        app.screen.query_one("#party-code", Input).value = "bacon-horse-galaxy"
+        await pilot.press("enter")
+
+    assert _drive(PartyScreen([], provider=provider), steps) == {
+        "action": "join", "code": "bacon-horse-galaxy", "party_id": "pid-1",
+    }
 
 
 def test_code_display_screen_mounts_and_closes():

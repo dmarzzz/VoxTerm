@@ -68,10 +68,13 @@ PARTY_COLORS = [
 ]
 
 
-def _party_color(session_code: str) -> tuple[str, str]:
-    """Derive a (primary, light) color pair from the session code."""
+def _party_color(party_id: str) -> tuple[str, str]:
+    """Derive a (primary, light) color pair from the NON-SECRET party_id.
+
+    Must NOT take the session code: this color is broadcast/visible, so deriving
+    it from the secret code would leak ~log2(len(PARTY_COLORS)) bits of it."""
     import hashlib
-    h = int(hashlib.sha256(session_code.encode()).hexdigest(), 16) % len(PARTY_COLORS)
+    h = int(hashlib.sha256(party_id.encode()).hexdigest(), 16) % len(PARTY_COLORS)
     return PARTY_COLORS[h]
 
 
@@ -651,16 +654,13 @@ class PartyManager:
     def _handle_party_failed(self, error: str) -> None:
         """Called on main thread when party session fails.
 
-        If we failed trying to JOIN (likely stale mDNS entry), fall back
-        to hosting instead of giving up.
+        A failed JOIN must NOT auto-host: hosting mints a fresh random party_id,
+        which splits same-code peers into separate parties (the mesh groups on
+        party_id). Go solo and report so the user can re-pick the host from the
+        (re-polling) picker — clarity > convenience.
         """
-        if not self._is_host and self._state != PartyState.SOLO:
-            # Tried to join a ghost party — host our own instead
-            if self.on_debug:
-                self.on_debug(f"join failed ({error}), hosting instead")
-            self._host_party()
-            return
         self._state = PartyState.SOLO
+        self._is_host = False
         if self.on_party_failed:
             self.on_party_failed(error)
         # Mark ourselves as not in session but keep discovery cache
@@ -678,6 +678,7 @@ class PartyManager:
         self._session_mgr = None
         self._send_queue = None
         self._state = PartyState.SOLO
+        self._is_host = False          # reset so a later failed join can't misroute on stale host state
         if self.on_party_colors_restored:
             self.on_party_colors_restored()
         self._fire_state_changed()

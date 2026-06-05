@@ -49,33 +49,36 @@ class PartyScreen(ModalScreen):
         Binding("ctrl+h", "host", "Host"),
     ]
 
-    def __init__(self, parties: list[dict] | None = None):
+    def __init__(self, parties: list[dict] | None = None, provider=None):
         super().__init__()
         self._parties = parties or []
+        # optional callable returning the current discovered parties; when given, the
+        # picker re-polls it so a host that appears AFTER opening shows up live (instead
+        # of funnelling the code-holder into hosting a divergent party — the split-brain).
+        self._provider = provider
+
+    def _status_text(self) -> str:
+        if self._parties:
+            return "  [#00e5ff]Nearby parties[/] — pick one, then enter its code:"
+        return ("  [#607080]Looking for nearby parties…[/]  "
+                "[#00e5ff]^H[/] to host your own.")
+
+    def _party_options(self) -> list:
+        return [
+            Option(
+                f"  {p.get('display_name', '?'):20s}  {p.get('peer_count', 0)} peer(s)",
+                id=p["party_id"],
+            )
+            for p in self._parties
+        ]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="party-dialog") as dialog:
             dialog.border_title = "PARTY MODE"
-            if self._parties:
-                yield Static(
-                    "  [#00e5ff]Nearby parties[/] — pick one, then enter its code:",
-                    markup=True,
-                )
-                options = [
-                    Option(
-                        f"  {p.get('display_name', '?'):20s}  "
-                        f"{p.get('peer_count', 0)} peer(s)",
-                        id=p["party_id"],
-                    )
-                    for p in self._parties
-                ]
-                yield OptionList(*options, id="party-list")
-            else:
-                yield Static(
-                    "  [#607080]No nearby parties found.[/]\n"
-                    "  [#00e5ff]Press Ctrl+H to host one[/] and share the code.",
-                    markup=True,
-                )
+            # The list is always present (hidden when empty) so a re-poll can fill it
+            # in place without losing the code the user is typing.
+            yield Static(self._status_text(), id="party-status", markup=True)
+            yield OptionList(*self._party_options(), id="party-list")
             with Vertical(id="party-code-container"):
                 yield Input(
                     placeholder="session code to join (e.g. bacon-horse-galaxy)",
@@ -90,9 +93,33 @@ class PartyScreen(ModalScreen):
             )
 
     def on_mount(self) -> None:
-        if self._parties:
-            self.query_one("#party-list", OptionList).highlighted = 0
+        self._sync_list()
         self.query_one("#party-code", Input).focus()
+        if self._provider:
+            self.set_interval(1.5, self._refresh)   # live-refresh so a late host appears
+
+    def _sync_list(self) -> None:
+        """Reflect self._parties into the OptionList + status, preserving the typed code."""
+        ol = self.query_one("#party-list", OptionList)
+        ol.clear_options()
+        for opt in self._party_options():
+            ol.add_option(opt)
+        ol.display = bool(self._parties)
+        if self._parties and ol.highlighted is None:
+            ol.highlighted = 0
+        self.query_one("#party-status", Static).update(self._status_text())
+
+    def _refresh(self) -> None:
+        if not self._provider:
+            return
+        try:
+            fresh = self._provider() or []
+        except Exception:
+            return
+        # rebuild only when the set of party_ids actually changes (don't clobber selection)
+        if [p.get("party_id") for p in fresh] != [p.get("party_id") for p in self._parties]:
+            self._parties = fresh
+            self._sync_list()
 
     def _selected_party_id(self) -> str | None:
         if not self._parties:
@@ -112,7 +139,7 @@ class PartyScreen(ModalScreen):
         if not code:
             return
         if not self._parties:
-            err.update(" No nearby party to join — press Ctrl+H to host one.")
+            err.update(" Still looking for the host — keep this open, or ^H to host your own.")
             return
         if validate_session_code(code) is None:
             err.update(" That isn't a valid code (three words, e.g. bacon-horse-galaxy).")

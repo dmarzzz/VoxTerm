@@ -738,13 +738,18 @@ class VoxTerm(App):
                 if result.get("action") == "host":
                     code = self._party.host_party()
                     self.push_screen(PartyCodeScreen(code))
+                    # Keep the secret code OUT of the transcript: system_message entries are
+                    # persisted by export/copy, so the code is shown only in the ephemeral
+                    # PartyCodeScreen modal above, never written to a saved transcript.
                     self.query_one(TranscriptPanel).system_message(
-                        f"hosting — share this code to let others join: {code}", Log.PARTY
+                        "hosting a party — the join code is shown on screen", Log.PARTY
                     )
                 elif result.get("action") == "join":
                     self._party.join_party(result["code"], result.get("party_id") or "")
 
-            self.push_screen(PartyScreen(parties), _on_pick)
+            self.push_screen(
+                PartyScreen(parties, provider=self._party.discovered_parties), _on_pick
+            )
 
         p.on_state_changed = _on_state_changed
         p.on_peer_joined = _on_peer_joined
