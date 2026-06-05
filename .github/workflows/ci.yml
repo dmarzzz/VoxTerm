@@ -1,0 +1,61 @@
+# Continuous integration: run the test suite on every push/PR so a broken commit
+# can't be tagged + released by the existing release.yml. The suite self-mocks the
+# engine (VOXTERM_MOCK_ENGINE=1 in tests/conftest.py), so no models are downloaded.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install (CPU-only torch + project)
+        run: |
+          python -m pip install --upgrade pip
+          # The default Linux torch wheel is the multi-GB CUDA build; CI only needs CPU.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e . -r dev/requirements-dev.txt
+      - name: Run tests
+        run: pytest   # markers/paths from [tool.pytest.ini_options]; engine is mocked
+
+  tauri-shell:
+    name: tauri shell builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect the Tauri shell (only present once the GUI branch is merged)
+        id: guard
+        run: |
+          if [ -f src-tauri/Cargo.toml ]; then echo "present=yes" >> "$GITHUB_OUTPUT";
+          else echo "present=no" >> "$GITHUB_OUTPUT"; echo "No src-tauri/ on this ref — skipping."; fi
+      - if: steps.guard.outputs.present == 'yes'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.guard.outputs.present == 'yes'
+        name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - if: steps.guard.outputs.present == 'yes'
+        name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml

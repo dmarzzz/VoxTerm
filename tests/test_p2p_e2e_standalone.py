@@ -99,6 +99,8 @@ class SimNode:
 # ── test runner ───────────────────────────────────────────────
 
 class TestResult:
+    __test__ = False  # a result accumulator, not a pytest test class — don't collect it
+
     def __init__(self):
         self.tests: list[tuple[str, bool, str]] = []
 
