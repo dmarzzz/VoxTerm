@@ -333,10 +333,104 @@ class _SignalHotkey(GlobalHotkey):
 # Factory
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Windows: Win32 RegisterHotKey via ctypes
+# ---------------------------------------------------------------------------
+
+class _WindowsHotkey(GlobalHotkey):
+    """Global hotkey on Windows using Win32 RegisterHotKey.
+
+    Registers Ctrl+Shift+D system-wide. Runs a Win32 message pump in a
+    daemon thread — no external libraries required.
+
+    Hotkey: Ctrl+Shift+D  (avoids conflicts with common Win shortcuts)
+    """
+
+    _MOD_CONTROL = 0x0002
+    _MOD_SHIFT   = 0x0004
+    _MOD_NOREPEAT = 0x4000
+    _HOTKEY_ID = 0xBEEF  # arbitrary unique ID
+    _VK_D = 0x44         # Virtual key code for 'D'
+    _WM_HOTKEY = 0x0312
+
+    _DEBOUNCE_SEC = 0.4
+
+    def __init__(self, callback: Callable[[], None]):
+        super().__init__(callback)
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._hwnd = None
+        self._last_fire: float = 0
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="win-hotkey")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        # Post a quit message to unblock the message loop
+        try:
+            import ctypes
+            ctypes.windll.user32.PostQuitMessage(0)
+        except Exception:
+            pass
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def _run(self) -> None:
+        import ctypes
+        import ctypes.wintypes as wt
+        import time
+
+        user32 = ctypes.windll.user32
+
+        # Register the hotkey on this thread (Win32 hotkeys are thread-local)
+        modifiers = self._MOD_CONTROL | self._MOD_SHIFT | self._MOD_NOREPEAT
+        if not user32.RegisterHotKey(None, self._HOTKEY_ID, modifiers, self._VK_D):
+            # Already registered or permission issue — log and bail
+            import sys
+            print(
+                "VoxTerm: could not register hotkey Ctrl+Shift+D "
+                "(may already be in use). Dictation hotkey disabled.",
+                file=sys.stderr,
+            )
+            return
+
+        try:
+            msg = wt.MSG()
+            while self._running:
+                # PeekMessage with timeout so we can check _running
+                result = user32.PeekMessageW(
+                    ctypes.byref(msg), None, 0, 0, 1  # PM_REMOVE = 1
+                )
+                if result:
+                    if msg.message == self._WM_HOTKEY and msg.wParam == self._HOTKEY_ID:
+                        now = time.monotonic()
+                        if now - self._last_fire >= self._DEBOUNCE_SEC:
+                            self._last_fire = now
+                            try:
+                                self._callback()
+                            except Exception:
+                                pass
+                    elif msg.message == 0x0012:  # WM_QUIT
+                        break
+                else:
+                    time.sleep(0.02)
+        finally:
+            user32.UnregisterHotKey(None, self._HOTKEY_ID)
+
+
 def get_hotkey(callback: Callable[[], None]) -> GlobalHotkey:
     """Return the appropriate GlobalHotkey for the current platform."""
     if CURRENT_PLATFORM == Platform.MACOS:
         return _MacOSHotkey(callback)
+
+    if CURRENT_PLATFORM == Platform.WINDOWS:
+        return _WindowsHotkey(callback)
 
     if CURRENT_PLATFORM == Platform.LINUX:
         from dictation.injector import _detect_display_server

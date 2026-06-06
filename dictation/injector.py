@@ -233,10 +233,106 @@ class _WaylandInjector(KeyboardInjector):
 # Factory
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Windows: Win32 SendInput via ctypes
+# ---------------------------------------------------------------------------
+
+class _WindowsInjector(KeyboardInjector):
+    """Injects keystrokes on Windows using Win32 SendInput (ctypes).
+
+    Uses KEYEVENTF_UNICODE to inject arbitrary Unicode text directly,
+    bypassing keyboard layout — works for any language/script.
+    No external tools or permissions required on Windows 10/11.
+    """
+
+    _INTER_CHAR_DELAY = 0.0  # seconds between chars; increase if apps miss chars
+
+    def __init__(self):
+        import ctypes
+        import ctypes.wintypes as _wt
+
+        self._ctypes = ctypes
+        self._wt = _wt
+        self._user32 = ctypes.windll.user32
+
+        # Win32 constants
+        self._INPUT_KEYBOARD = 1
+        self._KEYEVENTF_UNICODE = 0x0004
+        self._KEYEVENTF_KEYUP = 0x0002
+
+        # Define KEYBDINPUT structure
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk",         _wt.WORD),
+                ("wScan",       _wt.WORD),
+                ("dwFlags",     _wt.DWORD),
+                ("time",        _wt.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        # Define INPUT union/structure
+        class _INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [
+                ("type", _wt.DWORD),
+                ("_input", _INPUT_UNION),
+            ]
+
+        self._KEYBDINPUT = KEYBDINPUT
+        self._INPUT = INPUT
+        self._INPUT_UNION = _INPUT_UNION
+
+    def type_text(self, text: str) -> None:
+        if not text:
+            return
+
+        ctypes = self._ctypes
+        INPUT = self._INPUT
+        KEYBDINPUT = self._KEYBDINPUT
+        _INPUT_UNION = self._INPUT_UNION
+
+        inputs = []
+        for char in text:
+            scan = ord(char)
+            # Key down
+            ki_down = KEYBDINPUT(
+                wVk=0,
+                wScan=scan,
+                dwFlags=self._KEYEVENTF_UNICODE,
+                time=0,
+                dwExtraInfo=None,
+            )
+            inp_down = INPUT(type=self._INPUT_KEYBOARD, _input=_INPUT_UNION(ki=ki_down))
+            inputs.append(inp_down)
+            # Key up
+            ki_up = KEYBDINPUT(
+                wVk=0,
+                wScan=scan,
+                dwFlags=self._KEYEVENTF_UNICODE | self._KEYEVENTF_KEYUP,
+                time=0,
+                dwExtraInfo=None,
+            )
+            inp_up = INPUT(type=self._INPUT_KEYBOARD, _input=_INPUT_UNION(ki=ki_up))
+            inputs.append(inp_up)
+
+        n = len(inputs)
+        arr = (INPUT * n)(*inputs)
+        self._user32.SendInput(n, arr, ctypes.sizeof(INPUT))
+
+    def is_available(self) -> bool:
+        # SendInput is available on all Windows versions we care about
+        return True
+
+
 def get_injector() -> KeyboardInjector:
     """Return the appropriate KeyboardInjector for the current platform."""
     if CURRENT_PLATFORM == Platform.MACOS:
         return _MacOSInjector()
+
+    if CURRENT_PLATFORM == Platform.WINDOWS:
+        return _WindowsInjector()
 
     if CURRENT_PLATFORM == Platform.LINUX:
         ds = _detect_display_server()

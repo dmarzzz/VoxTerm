@@ -195,6 +195,10 @@ def main() -> None:
     elif CURRENT_PLATFORM == Platform.LINUX:
         if not _check_linux_tools():
             sys.exit(1)
+    elif CURRENT_PLATFORM == Platform.WINDOWS:
+        # No special permissions needed for SendInput + RegisterHotKey
+        # Hotkey: Ctrl+Shift+D
+        print("VOXTERM DICTATION // Windows: hotkey is Ctrl+Shift+D")
     else:
         print(f"Unsupported platform: {CURRENT_PLATFORM}", file=sys.stderr)
         sys.exit(1)
@@ -304,6 +308,8 @@ def main() -> None:
     hotkey.start()
     if CURRENT_PLATFORM == Platform.MACOS:
         log.info("hotkey: Cmd+Shift+D")
+    elif CURRENT_PLATFORM == Platform.WINDOWS:
+        log.info("hotkey: Ctrl+Shift+D")
     else:
         log.info("hotkey: Super+Shift+D (X11) or SIGUSR1 (Wayland)")
 
