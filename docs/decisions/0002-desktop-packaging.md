@@ -1,4 +1,4 @@
-# ADR 0001 — Desktop/app packaging: browser-first + Tauri shell, not Electron
+# ADR 0002 — Desktop/app packaging: browser-first + Tauri shell, not Electron
 
 - **Status:** Proposed (resolves #92 — maintainer to ratify / amend)
 - **Date:** 2026-06-05
