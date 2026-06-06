@@ -35,6 +35,13 @@ class CyberHeader(Widget):
             self._blink_timer = None
         self.refresh()
 
+    def on_unmount(self) -> None:
+        # Defense-in-depth: tear the pulse timer down if the header is ever removed
+        # mid-recording. It's long-lived today, but don't leave that an invariant.
+        if self._blink_timer is not None:
+            self._blink_timer.stop()
+            self._blink_timer = None
+
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         if y != 0:
