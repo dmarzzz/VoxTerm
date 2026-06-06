@@ -36,11 +36,14 @@ def _torch_is_cpu_only() -> bool:
 
     Read from package *metadata*, so torch is never imported here. CUDA wheels
     are tagged ``+cuXXX`` and the default PyPI wheel has no local tag — both can
-    use a GPU; only the ``+cpu`` wheel cannot. Unknown ⇒ don't suppress.
+    use a GPU; only the ``+cpu`` wheel cannot. Match the whole ``cpu`` segment,
+    not a literal ``+cpu`` suffix, so CXX11-ABI wheels (``+cpu.cxx11.abi``) and
+    other ``+cpu.*`` variants are caught too. Unknown ⇒ don't suppress.
     """
     try:
         import importlib.metadata as _md
-        return _md.version("torch").endswith("+cpu")
+        local = _md.version("torch").partition("+")[2]   # after '+', '' if untagged
+        return local.split(".")[0] == "cpu"
     except Exception:
         return False
 

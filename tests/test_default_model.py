@@ -57,6 +57,8 @@ def test_torch_cpu_only_wheel_detected_via_metadata(monkeypatch):
 
     monkeypatch.setattr(md, "version", lambda name: "2.11.0+cpu")
     assert config._torch_is_cpu_only() is True
+    monkeypatch.setattr(md, "version", lambda name: "2.11.0+cpu.cxx11.abi")  # CXX11-ABI CPU wheel
+    assert config._torch_is_cpu_only() is True
     monkeypatch.setattr(md, "version", lambda name: "2.11.0+cu121")
     assert config._torch_is_cpu_only() is False
     monkeypatch.setattr(md, "version", lambda name: "2.11.0")  # default PyPI (CUDA-capable)
