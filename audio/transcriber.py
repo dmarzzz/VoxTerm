@@ -452,7 +452,12 @@ def _ensure_sherpa_model(repo: str) -> "Path":
     if not tarball.exists():
         tmp = tarball.with_suffix(".part")
         try:
-            urllib.request.urlretrieve(_SHERPA_MODEL_URLS[repo], tmp)  # noqa: S310 (pinned github release URL)
+            # stream via urlopen with a socket timeout so a stalled mirror raises instead of
+            # hanging the download thread forever (urlretrieve has no timeout knob). The timeout
+            # is per network op (connect + each read), not a wall-clock cap on the whole download.
+            req = urllib.request.Request(_SHERPA_MODEL_URLS[repo])
+            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:  # noqa: S310 (pinned github release URL)
+                shutil.copyfileobj(resp, out)
         except Exception:
             tmp.unlink(missing_ok=True)                     # don't leak a partial download
             raise
