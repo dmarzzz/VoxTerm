@@ -46,3 +46,14 @@ def test_silence_returns_empty_without_loading_network():
     from audio.transcriber import SherpaStreamingTranscriber
     tr = SherpaStreamingTranscriber()
     assert tr.transcribe(np.zeros(16000, dtype=np.float32)) == {"text": "", "speaker": "", "speaker_id": 0}
+
+
+def test_transcribe_before_load_raises_clear_error():
+    # non-silent audio on an unloaded instance must fail loudly, not AttributeError on
+    # self._rec (None). Needs no sherpa — the guard fires before any recognizer use.
+    import numpy as np
+    from audio.transcriber import SherpaStreamingTranscriber
+    tr = SherpaStreamingTranscriber()
+    loud = np.full(16000, 0.5, dtype=np.float32)  # RMS well above the 0.005 silence gate
+    with pytest.raises(RuntimeError):
+        tr.transcribe(loud)

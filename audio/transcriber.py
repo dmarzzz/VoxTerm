@@ -522,6 +522,8 @@ class SherpaStreamingTranscriber(_DeduplicatorMixin):
         rms = float(np.sqrt(np.mean(audio ** 2)))
         if rms < 0.005:
             return {"text": "", "speaker": "", "speaker_id": 0}
+        if not self._loaded:   # silence short-circuits above without the model; real audio needs it
+            raise RuntimeError("SherpaStreamingTranscriber.transcribe() called before load()")
         s = self._rec.create_stream()
         s.accept_waveform(16000, np.ascontiguousarray(audio, dtype=np.float32))
         while self._rec.is_ready(s):
