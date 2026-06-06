@@ -29,6 +29,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      - name: System dependencies (PortAudio — sounddevice loads libportaudio at import)
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
       - name: Install (CPU-only torch + project)
         run: |
           python -m pip install --upgrade pip
