@@ -2,7 +2,7 @@
 
 ## What is this project?
 
-VoxTerm is a local, offline voice transcription TUI. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions. It is **cross-platform**: macOS (Apple Silicon uses MLX; Intel uses faster-whisper), Linux, and Windows (both use faster-whisper / Qwen3-ASR on CPU/CUDA). There is also a web GUI (`gui/`, see `gui/README.md`) and Tauri desktop + Android shells (`src-tauri/`, `tauri-plugin-voxasr/`).
+VoxTerm is a local, offline voice transcription TUI. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions. It is **cross-platform**: macOS (Apple Silicon uses MLX; Intel uses faster-whisper), Linux, and Windows (both use faster-whisper / Qwen3-ASR on CPU/CUDA).
 
 **Stack**: transcription backends via `audio/transcriber.py` `get_transcriber()` — MLX Qwen3-ASR (macOS arm64, Metal), faster-whisper / CTranslate2 (Linux/Windows/macOS-Intel, CPU int8 or CUDA), and optional sherpa-onnx streaming · 3D-Speaker ERes2Net (512-dim speaker embeddings via ONNX) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (encrypted speaker profiles) · sounddevice (mic) · ScreenCaptureKit (macOS) / `parec` (Linux) system audio · 3D-Speaker LID (language identification)
 
@@ -83,9 +83,6 @@ SUBPROCESSES (fallback only — not used when ONNX models available)
 | `dictation/app.py` | Dictation mode — global hotkey + system-wide voice-to-text injection |
 | `network/` | P2P party mode: mDNS discovery, encrypted TCP/UDP session mesh, transcript exchange |
 | `summarizer/engine.py` | Local-LLM transcript summarization (MLX on macOS, Ollama elsewhere) |
-| `gui/` | Web GUI control app over the same engine (server.py + static/); see `gui/README.md` |
-| `src-tauri/` | Tauri desktop shell (spawns the Python engine; webview loads the GUI same-origin) |
-| `tauri-plugin-voxasr/` | Android on-device streaming-ASR plugin (sherpa-onnx via Kotlin) |
 
 ## Data and debug paths
 
