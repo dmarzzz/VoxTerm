@@ -434,7 +434,7 @@ def _model_complete(d: "Path") -> bool:
 
 
 def _ensure_sherpa_model(repo: str) -> "Path":
-    """Return a local dir holding the streaming-zipformer ONNX files, downloading + extracting
+    """Return a local dir holding the transducer ONNX files, downloading + extracting
     the published tarball on first use. Cached under ~/.cache/voxterm/sherpa/<repo>/. Both the
     download and the extraction are atomic, and a partial/corrupt cache self-heals."""
     from pathlib import Path

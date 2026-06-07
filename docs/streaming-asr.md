@@ -56,4 +56,4 @@ are added to the registry in `audio/transcriber.py` (`_SHERPA_MODEL_URLS`) + gat
 - The bundled `sherpa-nemotron-en` is the **English** sibling of NVIDIA's
   `nemotron-3.5-asr-streaming` family; the multilingual `.nemo` checkpoint needs a custom
   ONNX export before it can be wired (the same backend would carry it).
-- Reproduce the benchmark: `python scripts/bench_asr.py`. Browser e2e: `python scripts/gui_e2e.py`.
+- Reproduce the benchmark: `python scripts/bench_asr.py`.
