@@ -47,6 +47,11 @@ dependencies = [
     "torch>=2.0.0; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# Optional cross-platform CPU streaming-ASR backend (sherpa-onnx). Not a core dep — install
+# with `pip install "voxterm[streaming]"`. The marker excludes Intel macOS (no wheel exists).
+streaming = ["sherpa-onnx>=1.13.0; sys_platform != 'darwin' or platform_machine == 'arm64'"]
+
 [project.scripts]
 voxterm = "tui.app:main"
 voxterm-dictate = "dictation.app:main"
