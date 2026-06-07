@@ -62,7 +62,7 @@ benefit here (the OS webview is sufficient for a localhost control surface), at
 
 ## Status of the spike
 
-Implemented and tested on the fork (PR #175): web GUI (525 tests + a headless-Chrome
+Implemented and tested on the fork (PR #175): web GUI (523 passing tests, 4 skipped, plus a headless-Chrome
 e2e), Tauri desktop shell verified via `cargo tauri dev`, Android plugin built to a
 green APK. So this ADR documents a decision that already has a working reference,
 ready for the maintainer to accept or adjust.
