@@ -44,6 +44,15 @@ Screen.--recording.--recording-pulse {
     color: #607080;
 }
 
+#transcript-row {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#transcript-row TranscriptPanel {
+    width: 1fr;
+}
+
 /* ── Party bloom: warm pulse on join ─────────────────── */
 
 TranscriptPanel {
