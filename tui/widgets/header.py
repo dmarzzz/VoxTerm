@@ -20,12 +20,27 @@ class CyberHeader(Widget):
         super().__init__()
         self._recording = False
         self._rec_start: float = 0.0
+        self._blink_timer = None
 
     def set_recording(self, on: bool):
         self._recording = on
         if on:
             self._rec_start = time.time()
+            if self._blink_timer is None:
+                # Pulse ~2 Hz so the indicator can't be tuned out like a static red bar
+                # (consent/awareness — testers kept forgetting the mic was live, #93).
+                self._blink_timer = self.set_interval(0.5, self.refresh)
+        elif self._blink_timer is not None:
+            self._blink_timer.stop()
+            self._blink_timer = None
         self.refresh()
+
+    def on_unmount(self) -> None:
+        # Defense-in-depth: tear the pulse timer down if the header is ever removed
+        # mid-recording. It's long-lived today, but don't leave that an invariant.
+        if self._blink_timer is not None:
+            self._blink_timer.stop()
+            self._blink_timer = None
 
     def render_line(self, y: int) -> Strip:
         width = self.size.width
@@ -37,11 +52,17 @@ class CyberHeader(Widget):
             mins, secs = divmod(elapsed, 60)
             ts = f"{mins:02d}:{secs:02d}"
 
+            # Pulse between bright and dim red (~2 Hz) + blink the dot, so the
+            # "mic is live" signal stays attention-grabbing rather than fading
+            # into the chrome.
+            bright = int(time.time() * 2) % 2 == 0
+            rec_bg = "#ee0000" if bright else "#8a0000"
+            dot = "●" if bright else "○"
             line = Text()
-            rec_style = Style(color="#ffffff", bgcolor="#cc0000", bold=True)
-            bar_style = Style(color="#cc0000", bgcolor="#cc0000")
-            line.append(f"  ● REC {ts} ", rec_style)
-            # Fill the rest with the red bar
+            rec_style = Style(color="#ffffff", bgcolor=rec_bg, bold=True)
+            bar_style = Style(color=rec_bg, bgcolor=rec_bg)
+            line.append(f"  {dot} REC {ts} ", rec_style)
+            # Fill the rest with the (pulsing) red bar
             remaining = max(0, width - line.cell_len)
             line.append("━" * remaining, bar_style)
             line.truncate(width)
