@@ -50,9 +50,9 @@ python3 -m tui.app
 | Key | Action |
 |-----|--------|
 | `R` | Start/pause recording |
-| `N` | Party mode — join or leave P2P sessions |
+| `P` | Party mode — host or join a P2P session |
 | `T` | Tag/name speakers |
-| `P` | Speaker profiles |
+| `O` | Speaker profiles |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
@@ -65,10 +65,14 @@ python3 -m tui.app
 
 Multiple people in the same room can share transcripts over the local network. Each laptop captures its closest speaker best — the combined result is better than any single mic.
 
-**Press N** to join the party. Press N again to leave. No codes, no configuration.
+**Press P** to open party mode: host a new party (you get a short session code
+to share) or join one by typing a code. Press P again to leave.
 
-- Auto-discovers nearby VoxTerm peers via mDNS
-- Auto-joins the nearest party, or hosts one if none found
+- Discovers nearby VoxTerm parties via mDNS (by name — **the session code is
+  never broadcast**)
+- The host shares the code out-of-band (say it aloud / paste it); joiners type
+  it. The code derives the AES-256-GCM key, so keeping it off the wire is what
+  makes a passive LAN sniffer unable to decrypt the party
 - Each party gets a unique color — all peers see the same color
 - Encrypted transcript sharing (AES-256-GCM)
 - Everyone sees who joins and leaves — no silent surveillance

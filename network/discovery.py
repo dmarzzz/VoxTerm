@@ -1,8 +1,14 @@
 """mDNS service advertisement and peer browsing via zeroconf.
 
 Advertises the local VoxTerm instance as ``_voxterm._tcp.local.`` and
-discovers other instances on the LAN.  The session code is never
-broadcast — only ``in_session`` (0/1) is visible via mDNS.
+discovers other instances on the LAN.
+
+The **session code is never broadcast** — it is the secret the AES-256-GCM
+party key is derived from, so it must stay out-of-band. What *is* broadcast is
+``party_id``: a random, non-secret group identifier the host generates per
+party. Peers use it only to recognise who belongs to the same party (for
+auto-reconnect/mesh-heal); it reveals nothing about the key. Joining still
+requires the out-of-band code.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ class PeerInfo:
     udp_port: int
     in_session: bool
     group_name: str = ""
-    session_code: str = ""
+    party_id: str = ""  # non-secret group id (NOT the session code / key material)
     party_color: str = ""
     app_version: str = ""
     proto_v: int = 1
@@ -70,7 +76,7 @@ class PeerDiscovery:
         self._udp_port = udp_port
         self._in_session = False
         self._group_name = ""
-        self._session_code = ""
+        self._party_id = ""
         self._party_color = ""
         # Import version at init time to avoid circular imports in mDNS callbacks
         from config import VERSION
@@ -112,11 +118,15 @@ class PeerDiscovery:
             self._zeroconf = None
         log.info("mDNS stopped")
 
-    def update_group(self, group_name: str, in_session: bool, session_code: str = "", party_color: str = "") -> None:
-        """Update mDNS TXT record with group name and session status."""
+    def update_group(self, group_name: str, in_session: bool, party_id: str = "", party_color: str = "") -> None:
+        """Update mDNS TXT record with group name and session status.
+
+        ``party_id`` is the non-secret group identifier (never the session
+        code). It is advertised so peers can recognise the same party.
+        """
         self._group_name = group_name
         self._in_session = in_session
-        self._session_code = session_code
+        self._party_id = party_id
         self._party_color = party_color
         if self._zeroconf and self._service_info:
             new_info = self._build_service_info()
@@ -174,7 +184,9 @@ class PeerDiscovery:
                 "node_id": self._node_id,
                 "display_name": self._display_name,
                 "group_name": self._group_name,
-                "session_code": self._session_code,
+                # party_id is a non-secret group id; the session code (key
+                # material) is intentionally NOT advertised.
+                "party_id": self._party_id,
                 "party_color": self._party_color,
                 "app_version": self._app_version,
                 "in_session": "1" if self._in_session else "0",
@@ -255,7 +267,7 @@ class PeerDiscovery:
                 udp_port=int(props.get(b"udp_port", b"0").decode()),
                 in_session=props.get(b"in_session", b"0") == b"1",
                 group_name=(props.get(b"group_name") or b"").decode("utf-8", errors="replace"),
-                session_code=(props.get(b"session_code") or b"").decode("utf-8", errors="replace"),
+                party_id=(props.get(b"party_id") or b"").decode("utf-8", errors="replace"),
                 party_color=(props.get(b"party_color") or b"").decode("utf-8", errors="replace"),
                 app_version=(props.get(b"app_version") or b"").decode("utf-8", errors="replace"),
                 proto_v=int(props.get(b"proto_v", b"1").decode()),

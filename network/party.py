@@ -46,8 +46,7 @@ except ImportError:
 
 class PartyState(Enum):
     SOLO = "solo"           # not in party mode
-    SCANNING = "scanning"   # pressed N, looking for groups
-    JOINING = "joining"     # connecting to a group
+    JOINING = "joining"     # connecting to a group (after host/join is chosen)
     IN_PARTY = "in_party"   # connected, transcripts flowing
 
 
@@ -69,11 +68,21 @@ PARTY_COLORS = [
 ]
 
 
-def _party_color(session_code: str) -> tuple[str, str]:
-    """Derive a (primary, light) color pair from the session code."""
+def _party_color(party_id: str) -> tuple[str, str]:
+    """Derive a (primary, light) color pair from the NON-SECRET party_id.
+
+    Must NOT take the session code: this color is broadcast/visible, so deriving
+    it from the secret code would leak ~log2(len(PARTY_COLORS)) bits of it."""
     import hashlib
-    h = int(hashlib.sha256(session_code.encode()).hexdigest(), 16) % len(PARTY_COLORS)
+    h = int(hashlib.sha256(party_id.encode()).hexdigest(), 16) % len(PARTY_COLORS)
     return PARTY_COLORS[h]
+
+
+def _new_party_id() -> str:
+    """A random, NON-secret group id advertised via mDNS so peers recognise the
+    same party. Deliberately unrelated to the session code (which derives the
+    AES key and is shared out-of-band, never broadcast)."""
+    return uuid.uuid4().hex[:12]
 
 
 class PartyManager:
@@ -114,6 +123,9 @@ class PartyManager:
         self._state = PartyState.SOLO
         self._color_pri = "#00ffcc"
         self._color_light = "#66ffd9"
+        self._party_id = ""  # non-secret group id (set when hosting/joining)
+        self._is_host = False  # set in _party_ready; init here so a failed first
+        #                        join doesn't AttributeError in _handle_party_failed
 
         # Networking objects
         self._session_mgr: SessionManager | None = None
@@ -138,6 +150,9 @@ class PartyManager:
         self.on_peer_bloom: Callable[[], None] | None = None
         self.on_party_failed: Callable[[str], None] | None = None
         self.on_peer_audio_frame: Callable[[bytes, int, float, bytes], None] | None = None
+        # Fired (with the list of discovered parties) when the user opens party
+        # mode and the UI must prompt: host a new party, or join one by code.
+        self.on_party_intent: Callable[[list], None] | None = None
 
     # ── public properties ────────────────────────────────────────
 
@@ -298,91 +313,116 @@ class PartyManager:
     # ── toggle (entry point for [N] key) ─────────────────────────
 
     def toggle(self) -> None:
-        """Toggle party mode: enter if solo, leave if in party."""
+        """Toggle party mode: open the host/join picker if solo, else leave."""
         if not P2P_AVAILABLE:
             self._fire_debug("P2P unavailable -- install zeroconf and cryptography")
             return
         if self._state == PartyState.SOLO:
-            self._enter_party_mode()
+            self._open_party_picker()
         else:
             self._leave_party_mode()
 
-    # ── enter ─────────────────────────────────────────────────────
+    # ── enter (explicit host / join — the code is shared out-of-band) ──
+    #
+    # Auto-join was removed deliberately: the session code (which the
+    # AES-256-GCM key is derived from) is no longer broadcast over mDNS, so a
+    # joiner must obtain it out-of-band and type it. mDNS advertises only a
+    # non-secret ``party_id`` for grouping/reconnect. The UI prompts via
+    # ``on_party_intent`` and then calls ``host_party()`` / ``join_party()``.
 
-    def _enter_party_mode(self) -> None:
-        """Start party mode: scan for groups, auto-join or host."""
-        self._state = PartyState.SCANNING
+    def _open_party_picker(self) -> None:
+        """Ask the UI to choose: host a new party, or join one by code."""
         self._ensure_identity()
-        self._fire_state_changed()
-
-        groups = self._find_party_groups()
-        if len(groups) == 1:
-            self._state = PartyState.JOINING
-            self._fire_state_changed()
-            group = groups[0]
-            self._join_party(group["session_code"], group["display_name"], group.get("party_color"))
-        elif len(groups) == 0:
-            # No groups found yet — schedule a rescan before hosting
-            self._app.set_timer(0.8, self._rescan_or_host)
+        if self.on_party_intent is not None:
+            self.on_party_intent(self.discovered_parties())
         else:
-            groups.sort(key=lambda g: g["peer_count"], reverse=True)
-            self._join_best_group(groups)
+            # No UI wired (headless / tests): host — we can't prompt for a code.
+            self.host_party()
 
-    def _rescan_or_host(self) -> None:
-        """Rescan for party groups after a short delay; host if still none found."""
-        if self._state != PartyState.SCANNING:
-            return
-        groups = self._find_party_groups()
-        if groups:
-            groups.sort(key=lambda g: g["peer_count"], reverse=True)
-            self._join_best_group(groups)
-        else:
-            self._host_party()
-
-    def _join_best_group(self, groups: list[dict]) -> None:
-        """Join the best (largest) group from a list of discovered groups."""
+    def host_party(self, group_name: str | None = None) -> str:
+        """Host a new party. Returns the session code to SHARE out-of-band
+        (read it aloud / paste it) — peers need it to join and decrypt."""
+        self._ensure_identity()
+        if group_name:
+            self._display_name = group_name
         self._state = PartyState.JOINING
         self._fire_state_changed()
-        group = groups[0]
-        self._join_party(group["session_code"], group["display_name"], group.get("party_color"))
+        return self._host_party()
 
-    def _find_party_groups(self) -> list[dict]:
-        """Find active party groups from discovered peers."""
+    def join_party(
+        self,
+        code: str,
+        party_id: str,
+        group_name: str | None = None,
+        peer_color: str | None = None,
+    ) -> None:
+        """Join the party identified by ``party_id`` (from discovery) using the
+        out-of-band ``code``. A wrong code yields an empty party — no peer's
+        encrypted handshake validates, so nothing connects."""
+        self._ensure_identity()
+        if not party_id:
+            # No discovered party to adopt — there is nothing to mesh with.
+            # Do NOT mint a phantom party_id: the host never broadcasts it, so
+            # the strict party_id gate would leave us silently isolated. Stay
+            # solo and tell the user instead.
+            self._state = PartyState.SOLO
+            self._fire_state_changed()
+            if self.on_party_failed:
+                self.on_party_failed(
+                    "no nearby party to join — ask the host to start one, or host your own"
+                )
+            return
+        if group_name:
+            self._display_name = group_name
+        self._party_id = party_id
+        if peer_color:
+            self._color_pri = peer_color
+            self._color_light = peer_color
+        else:
+            self._color_pri, self._color_light = _party_color(self._party_id)
+        self._state = PartyState.JOINING
+        self._fire_state_changed()
+        self._start_party_session(code, is_creator=False)
+
+    def discovered_parties(self) -> list[dict]:
+        """In-session parties on the LAN, grouped by the non-secret ``party_id``.
+        No codes here — those are out-of-band. Feeds the join picker."""
         if not self._discovery:
             return []
-        peers = self._discovery.get_visible_peers()
         groups: dict[str, dict] = {}
-        for p in peers:
-            if not p.in_session or not p.session_code:
+        for p in self._discovery.get_visible_peers():
+            if not p.in_session or not p.party_id:
                 continue
-            if p.session_code not in groups:
-                groups[p.session_code] = {
-                    "session_code": p.session_code,
-                    "display_name": p.group_name or p.display_name,
-                    "party_color": p.party_color,
-                    "peer_count": 1,
-                    "ip": p.ip,
-                    "tcp_port": p.tcp_port,
-                }
-            else:
-                groups[p.session_code]["peer_count"] += 1
+            g = groups.setdefault(p.party_id, {
+                "party_id": p.party_id,
+                "display_name": p.group_name or p.display_name,
+                "party_color": p.party_color,
+                "peer_count": 0,
+            })
+            g["peer_count"] += 1
         return list(groups.values())
 
-    def _host_party(self) -> None:
-        """Create a new party -- you are the host."""
+    def _host_party(self) -> str:
+        """Create a new party -- you are the host. Returns the session code."""
         code = generate_session_code()
-        self._color_pri, self._color_light = _party_color(code)
+        self._party_id = _new_party_id()
+        # Color derives from the NON-secret party_id (not the code): peers share
+        # the party_id so colors still match, and nothing code-derived is put on
+        # the wire (the broadcast party_color would otherwise leak bits of the code).
+        self._color_pri, self._color_light = _party_color(self._party_id)
         self._start_party_session(code, is_creator=True)
+        return code
 
-    def _join_party(self, session_code: str, group_name: str, peer_color: str | None = None) -> None:
-        """Join an existing party by session code (read from mDNS)."""
-        if peer_color:
-            # Use the exact color the host is broadcasting — guaranteed match
-            self._color_pri = peer_color
-            self._color_light = peer_color  # close enough for the light variant
-        else:
-            self._color_pri, self._color_light = _party_color(session_code)
-        self._start_party_session(session_code, is_creator=False)
+    def _same_party(self, peer_info) -> bool:
+        """True if a discovered peer belongs to OUR party, by the non-secret
+        party_id. Admission is still gated by the encrypted handshake under the
+        out-of-band code, so a spoofed/guessed party_id cannot actually join."""
+        return (
+            bool(getattr(peer_info, "in_session", False))
+            and bool(self._party_id)
+            and getattr(peer_info, "party_id", "") == self._party_id
+            and getattr(peer_info, "node_id", None) != self._node_id
+        )
 
     # ── session setup (runs in worker thread) ────────────────────
 
@@ -402,6 +442,12 @@ class PartyManager:
         try:
             # Cancel passive discovery worker (but keep the PeerDiscovery instance)
             self._app.workers.cancel_group(self._app, "p2p_discovery")
+
+            # party_id is normally set by host_party()/join_party(); a creator
+            # that reaches here without one (e.g. a direct call) gets a fresh id
+            # so the mesh has something non-secret to group on.
+            if not self._party_id and is_creator:
+                self._party_id = _new_party_id()
 
             old_mgr = self._session_mgr
             if old_mgr is not None:
@@ -479,8 +525,10 @@ class PartyManager:
                     return
                 if not peer_info.in_session:
                     return
-                # Only connect to peers in the SAME party (same session code)
-                if peer_info.session_code != code:
+                # Only connect to peers in the SAME party (non-secret party_id;
+                # admission is still gated by the encrypted handshake under the
+                # out-of-band code, so a spoofed party_id can't actually join).
+                if not self._same_party(peer_info):
                     self._app.call_from_thread(
                         self._fire_debug,
                         f"{peer_info.display_name} is in a different party"
@@ -512,18 +560,16 @@ class PartyManager:
             # event for on_peer_found; the periodic sweep below covers missed/failed
             # initial connects regardless of ordering.)
             self._discovery.on_peer_updated = on_peer_found
-            # Advertise our session code + group name + party color via mDNS
+            # Advertise our non-secret party_id + group name + color via mDNS.
+            # The session code is NEVER broadcast — it stays out-of-band.
             self._discovery.update_group(
-                self._display_name, True, session_code=code,
+                self._display_name, True, party_id=self._party_id,
                 party_color=self._color_pri,
             )
 
             # Connect to any already-visible peers in the SAME party
             for peer_info in self._discovery.get_visible_peers():
-                if (peer_info.in_session
-                        and peer_info.session_code == code
-                        and peer_info.node_id != my_id
-                        and my_id < peer_info.node_id):
+                if self._same_party(peer_info) and my_id < peer_info.node_id:
                     threading.Thread(
                         target=self._try_connect_peer,
                         args=(peer_info,),
@@ -541,7 +587,7 @@ class PartyManager:
                     return
                 visible = self._discovery.get_visible_peers() if self._discovery else []
                 for pi in visible:
-                    if pi.in_session and pi.session_code == code and pi.node_id != my_id:
+                    if self._same_party(pi):
                         with mgr._lock:
                             if pi.node_id in mgr._peers:
                                 continue
@@ -568,8 +614,7 @@ class PartyManager:
                         continue
                     try:
                         for pi in disc.get_visible_peers():
-                            if (pi.in_session and pi.session_code == code
-                                    and pi.node_id != my_id
+                            if (self._same_party(pi)
                                     and my_id < pi.node_id
                                     and not mgr.has_peer(pi.node_id)):
                                 self._try_connect_peer(pi)
@@ -609,16 +654,13 @@ class PartyManager:
     def _handle_party_failed(self, error: str) -> None:
         """Called on main thread when party session fails.
 
-        If we failed trying to JOIN (likely stale mDNS entry), fall back
-        to hosting instead of giving up.
+        A failed JOIN must NOT auto-host: hosting mints a fresh random party_id,
+        which splits same-code peers into separate parties (the mesh groups on
+        party_id). Go solo and report so the user can re-pick the host from the
+        (re-polling) picker — clarity > convenience.
         """
-        if not self._is_host and self._state != PartyState.SOLO:
-            # Tried to join a ghost party — host our own instead
-            if self.on_debug:
-                self.on_debug(f"join failed ({error}), hosting instead")
-            self._host_party()
-            return
         self._state = PartyState.SOLO
+        self._is_host = False
         if self.on_party_failed:
             self.on_party_failed(error)
         # Mark ourselves as not in session but keep discovery cache
@@ -636,6 +678,7 @@ class PartyManager:
         self._session_mgr = None
         self._send_queue = None
         self._state = PartyState.SOLO
+        self._is_host = False          # reset so a later failed join can't misroute on stale host state
         if self.on_party_colors_restored:
             self.on_party_colors_restored()
         self._fire_state_changed()
@@ -861,9 +904,7 @@ class PartyManager:
     def telemetry_text(self) -> str:
         """Generate the P2P portion of the telemetry bar text."""
         pc = self._color_pri
-        if self._state == PartyState.SCANNING:
-            return f"    [{pc}]◌ looking for the party...[/]"
-        elif self._state == PartyState.JOINING:
+        if self._state == PartyState.JOINING:
             return f"    [{pc}]joining the party...[/]"
         elif self._state == PartyState.IN_PARTY and self._session_mgr:
             peers = self._session_mgr.peers
