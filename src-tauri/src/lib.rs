@@ -133,6 +133,11 @@ pub fn run() {
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_voxasr::init());
 
+    // On-device LLM (conversation graph + interruptions) is mobile-only and fully offline. If no
+    // model is bundled it reports unavailable and the GUI keeps its heuristic analyzer.
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_voxllm::init());
+
     let builder = builder.setup(|app| {
         if cfg!(debug_assertions) {
             app.handle().plugin(

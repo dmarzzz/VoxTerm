@@ -1,0 +1,8 @@
+# Large native deps — not committed; fetched by ./fetch-deps.sh before an Android build.
+android/libs/*.aar
+android/src/main/assets/voxllm-model/
+# Gradle/build artifacts + the Tauri-CLI-generated framework mirror (regenerated on build)
+android/build/
+android/.gradle/
+android/.tauri/
+target/

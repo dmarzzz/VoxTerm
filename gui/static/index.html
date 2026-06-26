@@ -25,6 +25,13 @@
 
   <main class="main">
     <div class="doc">
+      <!-- MODE SWITCHER (shown whenever there's live or loaded content) -->
+      <div id="modeTabs" class="mode-tabs hidden" role="tablist" aria-label="Conversation view">
+        <button class="mode-tab active" data-mode="transcript" role="tab" aria-selected="true">Transcript</button>
+        <button class="mode-tab" data-mode="graph" role="tab" aria-selected="false">Graph</button>
+        <button class="mode-tab" data-mode="interruptions" role="tab" aria-selected="false">Interruptions</button>
+      </div>
+
       <!-- TRANSCRIPT HEADER (shown when a session is loaded) -->
       <header id="tvHead" class="tv-head hidden">
         <div class="tv-titlewrap">
@@ -77,6 +84,12 @@
       <div id="turns" class="turns"></div>
       <div id="liveLines" class="live-lines hidden" aria-live="polite"></div>
 
+      <!-- GRAPH mode: live topic / argument tree -->
+      <div id="graphPanel" class="graph-panel hidden" aria-live="polite"></div>
+
+      <!-- INTERRUPTIONS mode: live counters + timeline -->
+      <div id="interruptPanel" class="interrupt-panel hidden" aria-live="polite"></div>
+
       <!-- EMPTY STATE -->
       <section id="empty" class="empty">
         <p><strong>Press record to start.</strong><br>Your transcript appears when you stop — everything stays on your machine.</p>
@@ -91,6 +104,9 @@
         <span id="recState" class="rec-state">Ready</span>
       </div>
       <canvas id="recWave" class="rec-wave" width="600" height="56" aria-hidden="true"></canvas>
+      <!-- On-device only: opt in to speaker diarization at stop (slower + more memory, but enables real
+           multi-speaker interruptions). Hidden on desktop, which diarizes in the Python engine. -->
+      <label class="toggle ondevice-only" id="diarizeToggle" title="Identify who spoke at stop — slower, uses more memory, enables multi-speaker interruptions"><input type="checkbox" id="diarizeOndevice"><span>Speakers</span></label>
       <select id="language" class="select" aria-label="Language"></select>
       <details class="menu" id="settingsMenu">
         <summary class="gear-btn" id="gearBtn" aria-label="Settings" aria-haspopup="menu">⚙</summary>
@@ -114,6 +130,9 @@
   </main>
 
   <script src="/static/backend-remote.js"></script>
+  <script src="/static/analyze.js"></script>
+  <script src="/static/llm-backend.js"></script>
+  <script src="/static/conversation.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

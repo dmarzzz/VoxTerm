@@ -320,8 +320,95 @@ body.low-signal .rec-wave { opacity: .45; }
 html.on-device #language,
 html.on-device #settingsMenu { display: none !important; }
 
+/* On-device speaker-diarization toggle: hidden everywhere by default, shown only on-device (desktop
+   diarizes in the Python engine and has its own "Detect speakers" in the gear menu). */
+.ondevice-only { display: none; }
+html.on-device .ondevice-only { display: inline-flex; align-items: center; }
+
 /* Export menu: local-LLM summary needs the Python engine; "Summarize for AI (copy prompt)" is
    pure client-side and stays. No recorded-audio store on-device, so hide the WAV download too. */
 html.on-device #summarizeLocal,
 html.on-device #dlWav,
 html.on-device #summaryBlock { display: none !important; }
+
+/* ====================================================================
+   Conversation modes — Graph (topic/argument tree) + Interruptions
+   ==================================================================== */
+
+/* Mode switcher: segmented tabs above the content (Transcript / Graph / Interruptions) */
+.mode-tabs { display: flex; gap: 2px; padding: 3px; margin: var(--sp-2) 0 var(--sp-3);
+  background: var(--bg-elev); border: var(--hairline); border-radius: var(--r-pill);
+  width: fit-content; max-width: 100%; }
+.mode-tab { appearance: none; border: 0; cursor: pointer; height: 30px; padding: 0 16px;
+  border-radius: var(--r-pill); background: transparent; color: var(--muted);
+  font: 600 var(--fs-sub)/1 var(--font); white-space: nowrap; transition: background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.mode-tab:hover { color: var(--text); }
+.mode-tab.active { background: var(--accent); color: var(--bg); }
+.mode-tab:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.conv-empty { color: var(--faint); font-style: italic; padding: var(--sp-5) var(--sp-3); text-align: center; }
+.conv-cap { color: var(--muted); font-size: var(--fs-sub); margin: 0 0 var(--sp-3); }
+.conv-hint { color: var(--faint); font-style: italic; }
+
+/* ---- Graph mode: SVG topic/argument tree ---- */
+.graph-panel { padding: var(--sp-2) 0; }
+.graph-scroll { overflow: auto; border: var(--hairline); border-radius: var(--r-lg);
+  background: var(--bg-elev); -webkit-overflow-scrolling: touch; }
+.graph-svg { display: block; min-width: 100%; }
+.graph-svg .gnode rect { fill: var(--bg-elev-2); stroke: var(--line); }
+.graph-svg .gnode.root rect { fill: var(--fill); stroke: var(--line-strong); }
+.graph-svg .gnode.topic rect { fill: #2f2f36; stroke: var(--line-strong); }
+.graph-svg .gnode text { fill: var(--text); font: 600 12px var(--font); }
+.graph-svg .gnode.root text, .graph-svg .gnode.topic text { font-weight: 700; }
+.graph-svg .gnode.utter rect:first-of-type { fill: var(--bg-elev-2); }
+.graph-svg .gnode.utter .utext { fill: var(--muted); font-weight: 500; }
+.graph-svg .gnode.utter .ubadge { font: 700 12px var(--font); }
+.graph-svg .gnode.utter[data-seek] { cursor: pointer; }
+.graph-svg .gnode.utter[data-seek]:hover rect:first-of-type { fill: #3a3a42; }
+.graph-svg .gnode[data-seek]:focus-visible { outline: 2px solid var(--ring); }
+
+/* ---- Interruptions mode ---- */
+.interrupt-panel { padding: var(--sp-2) 0; display: flex; flex-direction: column; gap: var(--sp-4); }
+.ir-stats { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+.ir-stats .stat { flex: 1 1 90px; min-width: 90px; padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-elev); border: var(--hairline); border-radius: var(--r-lg); text-align: center; }
+.ir-stats .stat-n { font: 700 28px/1 var(--font); font-variant-numeric: tabular-nums; color: var(--text); }
+.ir-stats .stat-l { font-size: var(--fs-caption); color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ir-stats .stat.overlap .stat-n { color: #d98a8a; }
+.ir-stats .stat.rapid .stat-n { color: #d9c08a; }
+.ir-stats .conv-cap { flex-basis: 100%; margin: 0; }
+
+.ir-timeline { }
+.ir-timeline-svg { display: block; width: 100%; height: 46px; }
+.ir-timeline .ir-tick { cursor: pointer; }
+.ir-timeline .ir-tick:hover { stroke-width: 4; }
+.ir-axis { display: flex; justify-content: space-between; color: var(--faint);
+  font-size: var(--fs-caption); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.ir-timeline-empty { color: var(--faint); font-style: italic; font-size: var(--fs-sub); }
+
+.ir-bars-svg { display: block; width: 100%; height: 90px; }
+.ir-bars .lg { float: right; color: var(--faint); }
+.ir-bars .lg .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: baseline; }
+.ir-bars .lg .sw.o { background: #c47a7a; } .ir-bars .lg .sw.r { background: #c4a86a; }
+
+.ir-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ir-ev { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm); border-left: 3px solid var(--line); }
+.ir-ev.overlap { border-left-color: #c47a7a; } .ir-ev.rapid { border-left-color: #c4a86a; }
+.ir-ev[data-seek] { cursor: pointer; } .ir-ev[data-seek]:hover { background: var(--fill); }
+.ir-ev[data-seek]:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.ir-t { color: var(--faint); font-variant-numeric: tabular-nums; font-size: var(--fs-caption); min-width: 44px; }
+.ir-badge { font-size: var(--fs-caption); font-weight: 600; color: var(--muted); min-width: 84px; }
+.ir-desc { color: var(--text); font-size: var(--fs-sub); }
+
+/* opt-in on-device-LLM control atop the Graph / Interruptions panels */
+.conv-toolbar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin: 0 0 var(--sp-3); }
+.conv-toolbar .conv-cap { margin: 0; flex: 1 1 auto; min-width: 0; }
+.llm-sharpen { appearance: none; cursor: pointer; flex: none; height: 30px; padding: 0 14px;
+  border: var(--hairline); border-radius: var(--r-pill); background: var(--bg-elev-2); color: var(--text);
+  font: 600 var(--fs-sub)/1 var(--font); transition: background var(--dur) var(--ease); }
+.llm-sharpen:hover { background: var(--fill-hover); }
+.llm-sharpen:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.llm-badge { flex: none; font-size: var(--fs-caption); font-weight: 600; color: var(--muted);
+  padding: 4px 10px; border-radius: var(--r-pill); background: var(--fill); }
+.llm-state { flex: none; font-size: var(--fs-sub); color: var(--faint); font-style: italic; }

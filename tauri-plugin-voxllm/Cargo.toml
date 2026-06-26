@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-voxllm"
+version = "0.1.0"
+description = "On-device LLM text generation for VoxTerm mobile — local conversation graph + interruption analysis, fully offline."
+authors = ["VoxTerm contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+# Required by tauri-plugin: a unique `links` value so the permission/mobile metadata is emitted once.
+links = "tauri-plugin-voxllm"
+
+[dependencies]
+tauri = "2"
+serde_json = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

@@ -28,6 +28,9 @@ rand = "0.8"
 # desktop/iOS the crate is a no-op stub (so it's a plain dep the Tauri CLI can discover + wire
 # the Android module). Only registered on mobile (see lib.rs #[cfg(mobile)]).
 tauri-plugin-voxasr = { path = "../tauri-plugin-voxasr" }
+# On-device LLM text generation (conversation graph + interruption analysis). Same shape as voxasr:
+# the Android plugin carries the native engine; desktop/iOS is a no-op stub. Mobile-only (see lib.rs).
+tauri-plugin-voxllm = { path = "../tauri-plugin-voxllm" }
 
 # Desktop only: spawn the Python engine as a scoped sidecar. Mobile is a thin client
 # (no local engine), so the shell plugin isn't compiled there.

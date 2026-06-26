@@ -39,6 +39,7 @@ function colorFor(sid) { return PALETTE[((sid || 0) % PALETTE.length + PALETTE.l
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 // localStorage wrappers — private/incognito mode can throw on access, so swallow it.
 const LS_MODEL = "voxterm.model", LS_LANG = "voxterm.language", LS_MIC = "voxterm.mic", LS_DIARIZE = "voxterm.diarize", LS_SOURCE = "voxterm.source", LS_SUMMODEL = "voxterm.summodel";
+const LS_DIARIZE_OD = "voxterm.diarize_ondevice";   // on-device opt-in speaker diarization (default off — it's slow)
 function lsGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function lsSet(key, val) { try { localStorage.setItem(key, val); } catch { /* private mode */ } }
 function setNav(open) {
@@ -54,15 +55,39 @@ function nameFor(turn) {
 // which content block is showing: 'empty' | 'live' | 'transcript'
 function setView(state) {
   $("empty").classList.toggle("hidden", state !== "empty");
-  $("liveLines").classList.toggle("hidden", state !== "live");
   const t = state === "transcript";
   $("tvHead").classList.toggle("hidden", !t);
-  $("turns").classList.toggle("hidden", !t);
   if (!t) {
     const p = $("player"); if (p && !p.paused) p.pause();   // never leave audio playing off-screen
     $("summaryBlock").classList.add("hidden"); $("summaryBody").textContent = "";   // summary is per-session
   }
+  // VOX_CONV owns the panel-level switch (turns / liveLines / graph / interruptions) for the current
+  // mode within this top-level state, and re-analyzes when a derived mode is showing.
+  if (window.VOX_CONV) window.VOX_CONV.setTop(state);
 }
+
+// The doc the Graph/Interruptions modes analyze: the loaded transcript, or — while recording — a
+// single-speaker doc synthesized from the live tail so the derived views update in real time.
+let LIVE_DOC = null;
+function hmsToSec(s) {
+  const p = String(s || "").split(":").map(Number);
+  if (!p.length || p.some(Number.isNaN)) return undefined;
+  return p.reduce((acc, n) => acc * 60 + n, 0);
+}
+function buildLiveDoc(lines) {
+  return {
+    session: { id: "(live)" },
+    speakers: [{ id: 0, label: "Speaker 1" }],
+    turns: (lines || []).map((l) => ({ speaker: "Speaker 1", speaker_id: 0, text: l.text, t_offset: hmsToSec(l.t), t_offset_hms: l.t })),
+  };
+}
+function activeDoc() { return (CUR && Array.isArray(CUR.turns)) ? CUR : LIVE_DOC; }
+// Click-to-play seam used by graph nodes / interruption events.
+window.VOX_SEEK = function (sec) {
+  const p = $("player"); if (!p || !p.src || typeof sec !== "number") return;
+  const go = () => { try { p.currentTime = sec; } catch { /* not seekable yet */ } p.play().catch(() => {}); };
+  if (p.readyState >= 1) go(); else { p.addEventListener("loadedmetadata", go, { once: true }); p.load(); }
+};
 
 // Live amplitude strip: push each SSE level reading and draw a scrolling bar history.
 const WAVE_MAX = 80;
@@ -132,6 +157,12 @@ async function init() {
   dSel.addEventListener("change", () => lsSet(LS_MIC, dSel.value));
   if (lsGet(LS_DIARIZE) === "0") $("diarize").checked = false;
   $("diarize").addEventListener("change", () => lsSet(LS_DIARIZE, $("diarize").checked ? "1" : "0"));
+  // On-device speaker-diarization opt-in (default OFF — it adds a slow pass at stop).
+  const dOd = $("diarizeOndevice");
+  if (dOd) {
+    if (lsGet(LS_DIARIZE_OD) === "1") dOd.checked = true;
+    dOd.addEventListener("change", () => lsSet(LS_DIARIZE_OD, dOd.checked ? "1" : "0"));
+  }
   const savedSource = lsGet(LS_SOURCE);
   if (savedSource && [...$("source").options].some((op) => op.value === savedSource)) $("source").value = savedSource;
   $("source").addEventListener("change", () => lsSet(LS_SOURCE, $("source").value));
@@ -165,6 +196,8 @@ async function init() {
     setNav(false);
   });
   document.addEventListener("keydown", onKeydown);
+
+  if (window.VOX_CONV) { window.VOX_CONV.getDoc = activeDoc; window.VOX_CONV.init(); }
 
   await loadSessions();
   openEvents();
@@ -248,8 +281,9 @@ function applyStatus(s) {
   const live = s.live || { active: false, lines: [], partial: null };
   document.body.classList.toggle("live-on", !!live.active);
   if (live.active && s.recording) {   // only while actually recording — never re-flip a loaded transcript
-    setView("live");
     const lines = live.lines || [];
+    LIVE_DOC = buildLiveDoc(lines);    // feed the Graph/Interruptions modes the live tail
+    setView("live");                   // triggers a re-analyze if a derived mode is open (reads LIVE_DOC)
     const el = $("liveLines");
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     let html = lines.map((l) => `<div class="ll"><span class="ll-t">${escapeHtml(l.t)}</span>${escapeHtml(l.text)}</div>`).join("");
@@ -291,11 +325,17 @@ async function toggleRecord() {
   if (!recording) {
     _levelPeak = 0; _recStartedAt = Date.now();
     const device = parseInt($("micDevice").value, 10);
+    // On a fresh install the FIRST start blocks on the OS mic-permission prompt. Disable the button
+    // and show a clear "Starting…" so a second tap can't desync the start/stop state machine while the
+    // dialog is up (the bug behind "pressed three times before it recorded"). Re-enabled below.
+    $("recBtn").disabled = true;
+    $("recState").textContent = "Starting…";
     const r = await getJSON("/api/record/start", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device: Number.isNaN(device) ? -1 : device, source: $("source").value }),
     });
-    if (!r.ok) { toast(r.error ? "Mic error: " + r.error : "Could not start (mic busy?)"); return; }
+    $("recBtn").disabled = false;   // recording is live now (or it failed) — applyStatus owns it from here
+    if (!r.ok) { $("recState").textContent = "Ready"; toast(r.error ? "Mic error: " + r.error : "Could not start (mic busy?)"); return; }
     showRecording();   // no live preview — keep recording light; the accurate transcript appears on stop
   } else {
     $("recBtn").disabled = true;     // debounce; applyStatus is the single owner of re-enabling
@@ -303,7 +343,7 @@ async function toggleRecord() {
     // so we don't call /api/live/stop separately — doing so raced two live_stop() calls.
     const r = await getJSON("/api/record/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: $("model").value, language: $("language").value, diarize: $("diarize").checked }),
+      body: JSON.stringify({ model: $("model").value, language: $("language").value, diarize: (window.VOX_ONDEVICE ? $("diarizeOndevice") : $("diarize")).checked }),
     });
     // On success the SSE job (transcribing -> done/error) re-enables the button; only re-enable
     // here if the stop request itself failed (so the button can't get stuck disabled).
@@ -449,9 +489,10 @@ function render() {
     }
     wrap.appendChild(row);
   });
+  if (window.VOX_CONV) window.VOX_CONV.refresh();   // refresh Graph/Interruptions if one is open
 }
 function showRawMarkdown(stem, dir, text) {
-  CUR = null; CUR_STEM = stem; CUR_DIR = dir || null;
+  CUR = null; LIVE_DOC = null; CUR_STEM = stem; CUR_DIR = dir || null;   // no structured turns → derived modes show empty, not a stale live graph
   setExportEnabled(false);   // no structured JSON behind a raw-markdown view (WAV/delete stay on)
   setView("transcript");
   $("tvTitle").textContent = prettyStem(stem); $("tvMeta").textContent = "(no AI export — raw transcript)";

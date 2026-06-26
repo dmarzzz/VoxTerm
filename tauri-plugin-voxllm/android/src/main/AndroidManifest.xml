@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The on-device LLM is fully local: no microphone, no INTERNET permission. The model is bundled as
+     an app asset and staged to filesDir on first use, so generation makes no network calls. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+</manifest>

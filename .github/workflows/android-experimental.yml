@@ -1,0 +1,184 @@
+# Build + publish the EXPERIMENTAL on-device Android APK — the stable Whisper transcription PLUS the
+# new conversation Graph / Interruptions modes backed by an on-device LLM (MediaPipe LLM Inference +
+# a bundled Qwen2.5-0.5B .task). Publishes to its own rolling `android-experimental` prerelease so it
+# never clobbers the stable `android-latest` build from `main`.
+#
+# Triggers
+#   • push to the feature branch that touches a mobile path  -> rebuild + update `android-experimental`
+#   • manual `workflow_dispatch`                             -> same, with optional model sizes
+#
+# Fully offline (mic only, no INTERNET permission), arm64-v8a, Android 7+ (API 24). Big APK (~0.7 GB)
+# because it bundles BOTH a Whisper model and a ~0.5 GB LLM — sideload only.
+
+name: Android APK (experimental)
+
+on:
+  push:
+    branches: ["RonTuretzky/conversation-graph-interruption-modes"]
+    paths:
+      - "tauri-plugin-voxasr/**"
+      - "tauri-plugin-voxllm/**"
+      - "src-tauri/**"
+      - "gui/static/**"
+      - "mobile-pair/**"
+      - "scripts/stage-mobile.sh"
+      - ".github/workflows/android-experimental.yml"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Bundled Whisper model (plain = multilingual, .en = English-only)"
+        type: choice
+        default: whisper-base
+        options: [whisper-base, whisper-tiny, whisper-small, whisper-base.en, whisper-tiny.en, whisper-small.en]
+      llm_model_url:
+        description: "On-device LLM .task URL (blank = bundled Qwen2.5-0.5B default)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-experimental-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VOXASR_MODEL: ${{ github.event.inputs.model || 'whisper-base' }}
+  VOXLLM_MODEL_URL: ${{ github.event.inputs.llm_model_url || '' }}
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Rust (+ arm64 Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android-aarch64-experimental
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages + NDK
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;34.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Cache native deps (sherpa AAR + Whisper model + LLM model)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/voxterm/sherpa
+            ~/.cache/voxterm/voxllm
+            tauri-plugin-voxasr/android/libs
+          key: voxexp-deps-${{ env.VOXASR_MODEL }}-${{ hashFiles('tauri-plugin-voxasr/fetch-deps.sh', 'tauri-plugin-voxllm/fetch-deps.sh') }}
+
+      - name: Fetch ASR native deps (sherpa AAR + Whisper model)
+        run: ./tauri-plugin-voxasr/fetch-deps.sh
+
+      - name: Fetch on-device LLM model (.task)
+        run: ./tauri-plugin-voxllm/fetch-deps.sh
+
+      - name: Set app version
+        run: |
+          set -euo pipefail
+          VERSION="0.0.0-exp.${{ github.run_number }}"
+          cat > src-tauri/gen/android/app/tauri.properties <<EOF
+          tauri.android.versionCode=${{ github.run_number }}
+          tauri.android.versionName=$VERSION
+          EOF
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "versionCode=${{ github.run_number }} versionName=$VERSION"
+
+      - name: Build APK (arm64)
+        run: cargo tauri android build --apk --target aarch64
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="${ANDROID_SDK_ROOT}/build-tools/34.0.0"
+          UNSIGNED="$(find src-tauri/gen/android -path '*release*' -name '*-unsigned.apk' | head -1)"
+          [ -n "$UNSIGNED" ] || { echo "::error::no unsigned release APK found"; exit 1; }
+          echo "unsigned: $UNSIGNED"
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > /tmp/sign.jks
+            KS=/tmp/sign.jks; SP="$KS_PASS"; AL="$KEY_ALIAS"; KP="$KEY_PASS"
+            echo "RELEASE_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 not set — signing with an ephemeral debug key (installable, but NOT update-compatible)."
+            keytool -genkeypair -keystore /tmp/sign.jks -storepass android -keypass android \
+              -alias voxterm -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=VoxTerm, O=VoxTerm, C=US"
+            KS=/tmp/sign.jks; SP=android; AL=voxterm; KP=android
+            echo "RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+          fi
+          OUT="VoxTerm-android-experimental-arm64.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" /tmp/aligned.apk
+          "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$SP" --key-pass "pass:$KP" \
+            --ks-key-alias "$AL" --out "$OUT" /tmp/aligned.apk
+          "$BT/apksigner" verify "$OUT"
+          rm -f /tmp/sign.jks /tmp/aligned.apk
+          SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
+          echo "APK_FILE=$OUT" >> "$GITHUB_ENV"
+          echo "APK_SHA256=$SHA" >> "$GITHUB_ENV"
+          echo "built $OUT  sha256=$SHA"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoxTerm-android-experimental-arm64
+          path: ${{ env.APK_FILE }}
+          if-no-files-found: error
+
+      - name: Publish rolling experimental release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-experimental
+          name: VoxTerm Android (experimental — conversation graph + interruptions)
+          prerelease: true
+          body: |
+            **Experimental** on-device Android build (run #${{ github.run_number }}, version `${{ env.APP_VERSION }}`).
+
+            On top of the stable offline transcription, this adds two live conversation modes:
+            - **Graph** — a live topic / argument tree (topics → statements, questions, retorts, counter-arguments).
+            - **Interruptions** — a live counter + timeline of overlaps and rapid speaker switches.
+
+            Both are powered by an **on-device LLM** (MediaPipe LLM Inference + a bundled Qwen2.5-0.5B model) — fully offline, no network. If the model can't load on your device, the modes fall back to an offline heuristic so they still work.
+
+            **Install:** download **`${{ env.APK_FILE }}`** below and open it on your phone (allow "install unknown apps"). This APK is large (~0.7 GB) because it bundles both a speech model and the LLM.
+
+            arm64-v8a · Android 7+ (API 24) · fully offline · microphone only.
+
+            - SHA-256: `${{ env.APK_SHA256 }}`
+            - Release-signed: `${{ env.RELEASE_SIGNED }}` — if `false`, this is debug-signed; updating over a previous install may require an uninstall.
+          files: ${{ env.APK_FILE }}

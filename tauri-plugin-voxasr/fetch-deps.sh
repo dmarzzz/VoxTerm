@@ -23,11 +23,16 @@ LIBS="$HERE/android/libs"
 ASSETS="$HERE/android/src/main/assets/voxterm-model"
 mkdir -p "$LIBS" "$ASSETS"
 
+# `.en` tiers are English-only; the plain tiers are MULTILINGUAL (auto-detect language). LANG_TAG is
+# staged into assets/lang.txt and read by the Kotlin recognizer ("en" = force English, "auto" = detect).
 case "${VOXASR_MODEL:-whisper-base.en}" in
-  whisper-tiny.en)  MODEL="sherpa-onnx-whisper-tiny.en" ;;
-  whisper-base.en)  MODEL="sherpa-onnx-whisper-base.en" ;;
-  whisper-small.en) MODEL="sherpa-onnx-whisper-small.en" ;;
-  *) echo "unknown VOXASR_MODEL='${VOXASR_MODEL}' (want whisper-tiny.en | whisper-base.en | whisper-small.en)" >&2; exit 1 ;;
+  whisper-tiny.en)  MODEL="sherpa-onnx-whisper-tiny.en";  LANG_TAG="en" ;;
+  whisper-base.en)  MODEL="sherpa-onnx-whisper-base.en";  LANG_TAG="en" ;;
+  whisper-small.en) MODEL="sherpa-onnx-whisper-small.en"; LANG_TAG="en" ;;
+  whisper-tiny)     MODEL="sherpa-onnx-whisper-tiny";     LANG_TAG="auto" ;;
+  whisper-base)     MODEL="sherpa-onnx-whisper-base";     LANG_TAG="auto" ;;
+  whisper-small)    MODEL="sherpa-onnx-whisper-small";    LANG_TAG="auto" ;;
+  *) echo "unknown VOXASR_MODEL='${VOXASR_MODEL}' (want whisper-{tiny,base,small} or .en variants)" >&2; exit 1 ;;
 esac
 
 AAR="$LIBS/sherpa-onnx-$VER.aar"
@@ -65,4 +70,31 @@ stage "*encoder*.int8.onnx" encoder.int8.onnx
 stage "*decoder*.int8.onnx" decoder.int8.onnx
 stage "*tokens*"            tokens.txt
 cp "$CACHE/test_wavs/0.wav" "$ASSETS/test.wav"   # debug self-test clip (offline decode check)
-echo "voxasr native deps ready ($(du -sh "$ASSETS" | cut -f1) model [$MODEL], $(du -h "$AAR" | cut -f1) aar)."
+printf '%s' "$LANG_TAG" > "$ASSETS/lang.txt"      # read by the recognizer: "en" (English) or "auto" (detect)
+
+# ---- on-device speaker diarization models (opt-in feature) -------------------
+# sherpa-onnx OfflineSpeakerDiarization = pyannote segmentation + a speaker-embedding model + fast
+# clustering. Bundled so diarization is fully offline; the Kotlin plugin loads them by these names.
+DIAR="$HERE/android/src/main/assets/voxterm-diar"
+DIAR_CACHE="$HOME/.cache/voxterm/sherpa/diar"
+mkdir -p "$DIAR" "$DIAR_CACHE"
+SEG_TAR="sherpa-onnx-pyannote-segmentation-3-0"
+EMB_ONNX="3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"   # speaker embeddings (language-agnostic)
+if [ ! -f "$DIAR_CACHE/$SEG_TAR/model.onnx" ]; then
+  echo "fetching ${SEG_TAR}…"
+  curl -fSL -o "/tmp/$SEG_TAR.tar.bz2" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/$SEG_TAR.tar.bz2"
+  tar xjf "/tmp/$SEG_TAR.tar.bz2" -C "$DIAR_CACHE"
+  rm -f "/tmp/$SEG_TAR.tar.bz2"
+fi
+if [ ! -f "$DIAR_CACHE/$EMB_ONNX" ]; then
+  echo "fetching ${EMB_ONNX}…"
+  # NB: the sherpa-onnx release tag is misspelled "recongition" upstream — keep it as-is or this 404s.
+  curl -fSL -o "$DIAR_CACHE/$EMB_ONNX" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$EMB_ONNX"
+fi
+rm -f "$DIAR"/*
+cp "$DIAR_CACHE/$SEG_TAR/model.onnx" "$DIAR/segmentation.onnx"
+cp "$DIAR_CACHE/$EMB_ONNX"           "$DIAR/embedding.onnx"
+
+echo "voxasr native deps ready ($(du -sh "$ASSETS" | cut -f1) asr [$MODEL, lang=$LANG_TAG], $(du -sh "$DIAR" | cut -f1) diar, $(du -h "$AAR" | cut -f1) aar)."

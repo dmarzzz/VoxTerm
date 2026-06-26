@@ -35,21 +35,36 @@
     try { return JSON.parse(localStorage.getItem(LS_PREFIX + stem) || "null"); } catch (_) { return null; }
   }
 
-  // Build the agent-json doc app.js renders, from the plugin's segments. Offline Whisper has no
-  // diarization, so it's a single speaker; each <=30 s decode window is one turn with its start.
-  function buildDoc(stem, segments, durationSec) {
-    const turns = (segments || []).filter((s) => s && s.text).map((s) => ({
-      speaker: "Speaker 1",
-      speaker_id: 0,
-      text: s.text,
-      t_offset: typeof s.start === "number" ? s.start : undefined,
-      t_offset_hms: typeof s.start === "number" ? hms(s.start) : "",
-    }));
-    return {
-      session: { id: stem, duration_hms: hms(durationSec), model: MODEL_LABEL },
-      turns,
-      speakers: [{ id: 0, label: "Speaker 1" }],
-    };
+  // Build the agent-json doc app.js renders. Without diarization it's a single speaker and each <=30 s
+  // decode window is one turn (segments). With diarization the plugin returns speaker-attributed
+  // utterances (text, start, end, speaker, gapBefore) → a real multi-speaker doc that lights up the
+  // interruptions/graph heuristics. `utterances` (when present + non-empty) takes precedence.
+  function buildDoc(stem, segments, durationSec, utterances) {
+    let turns, speakers;
+    if (utterances && utterances.length) {
+      turns = utterances.filter((u) => u && u.text).map((u) => ({
+        speaker: `Speaker ${(u.speaker || 0) + 1}`,
+        speaker_id: u.speaker || 0,
+        text: u.text,
+        t_offset: typeof u.start === "number" ? u.start : undefined,
+        t_offset_hms: typeof u.start === "number" ? hms(u.start) : "",
+        t_end: typeof u.end === "number" ? u.end : undefined,
+        t_end_hms: typeof u.end === "number" ? hms(u.end) : "",
+        gap_before: typeof u.gapBefore === "number" ? u.gapBefore : undefined,
+      }));
+      const ids = [...new Set(turns.map((t) => t.speaker_id))].sort((a, b) => a - b);
+      speakers = ids.map((id) => ({ id, label: `Speaker ${id + 1}` }));
+    } else {
+      turns = (segments || []).filter((s) => s && s.text).map((s) => ({
+        speaker: "Speaker 1",
+        speaker_id: 0,
+        text: s.text,
+        t_offset: typeof s.start === "number" ? s.start : undefined,
+        t_offset_hms: typeof s.start === "number" ? hms(s.start) : "",
+      }));
+      speakers = [{ id: 0, label: "Speaker 1" }];
+    }
+    return { session: { id: stem, duration_hms: hms(durationSec), model: MODEL_LABEL }, turns, speakers };
   }
 
   // ---- export formatters (client-side; the phone has no Python export) ----
@@ -104,6 +119,8 @@
     return toMarkdown(doc, renames);   // md (default; also feeds copy/summarize-for-AI)
   }
 
+  const AUTOSAVE_MS = 20000;   // persist the rough live transcript at least this often while recording
+
   class LocalBackend {
     constructor() {
       window.VOX_ONDEVICE = true;
@@ -114,6 +131,7 @@
       this._done = false;        // terminal (done/error) edge already emitted for this take?
       this._em = null;
       this._timer = null;
+      this._lastSave = 0;        // ms timestamp of the last recording autosave (0 = none yet this take)
     }
 
     // No audio store on-device: return the path as-is. app.js's range-probe fetch 404s → the player
@@ -130,12 +148,14 @@
             return { models: [MODEL_LABEL], default_model: MODEL_LABEL, languages: { en: "English" }, input_devices: [] };
           case "/api/record/start":
             this._stem = newStem();
-            this._lastPhase = "idle"; this._sawActive = false; this._done = false;
+            this._lastPhase = "idle"; this._sawActive = false; this._done = false; this._lastSave = 0;
             this._startPoll();                                 // resume polling for this take
             await invoke("plugin:voxasr|start_transcribe");    // pends on the mic-permission prompt
             return { ok: true };
           case "/api/record/stop":
-            await invoke("plugin:voxasr|stop_transcribe");
+            // Pass the session id (so the take's audio is persisted as <stem>.wav) and the opt-in
+            // diarize flag (run on-device speaker diarization at stop — slower, more memory).
+            await invoke("plugin:voxasr|stop_transcribe", { stem: this._stem, diarize: !!body.diarize });
             return { ok: true };
           case "/api/sessions":
             return { sessions: listStems().map((stem) => ({ stem })) };
@@ -150,6 +170,9 @@
             const key = LS_PREFIX + body.stem;
             const existed = localStorage.getItem(key) !== null;
             localStorage.removeItem(key);
+            // Also delete the session's persisted audio (best-effort — absent on takes recorded before
+            // audio persistence, or when none was kept).
+            try { await invoke("plugin:voxasr|delete_audio", { stem: body.stem }); } catch (_) { /* no audio */ }
             return { ok: true, deleted: existed ? [body.stem] : [] };
           }
           case "/api/export": {
@@ -187,6 +210,23 @@
       if (this._done || st.phase === "idle") this._stopPoll();
     }
 
+    // Crash insurance: while recording, persist the rough live transcript (finalized windows + the
+    // in-progress partial) to localStorage every AUTOSAVE_MS. The authoritative pass at stop overwrites
+    // this under the same stem; if the app dies mid-take, this is what survives — losing at most the
+    // current ~30 s window instead of the whole session. Throttled and best-effort (storage-full is
+    // swallowed; the final pass would surface a real save error).
+    _autosave(st) {
+      if (!this._stem) return;
+      const now = Date.now();
+      if (this._lastSave && now - this._lastSave < AUTOSAVE_MS) return;
+      const segs = (st.liveLines || []).filter((s) => s && s.text).slice();
+      const lp = st.livePartial;
+      if (lp && lp.text) segs.push(lp);     // include the in-progress window so the newest words aren't lost
+      if (!segs.length) return;             // nothing decoded yet — don't write an empty placeholder
+      const doc = buildDoc(this._stem, segs, st.elapsed || 0);
+      try { localStorage.setItem(LS_PREFIX + this._stem, JSON.stringify(doc)); this._lastSave = now; } catch (_) {/* storage full — final pass reports it */}
+    }
+
     _frameFor(st) {
       const phase = st.phase || "idle";
       let frame;
@@ -203,23 +243,27 @@
           recording: true, elapsed: st.elapsed || 0, level: st.level || 0, job: { state: "idle" },
           live: { active: true, lines: lines, partial: partial },
         };
+        this._autosave(st);   // periodically persist the rough live transcript so a crash mid-take isn't total loss
       } else if (phase === "transcribing") {
         this._sawActive = true;
-        frame = { recording: false, job: { state: "transcribing", frac: 0, msg: "Transcribing…" } };
+        const msg = st.stage === "diarizing" ? "Identifying speakers…" : "Transcribing…";
+        frame = { recording: false, job: { state: "transcribing", frac: st.progress || 0, msg } };
       } else if (phase === "error" && this._lastPhase !== "error") {
         this._done = true;
         frame = { recording: false, job: { state: "error", error: st.error || "recording failed" } };
       } else if (phase === "done" && this._lastPhase !== "done" && this._sawActive && this._stem) {
         // Build the transcript once, on the transition into done. Require _sawActive so a stale
         // phase='done' left over from a prior take can't persist the old segments under a new stem.
+        // Prefer speaker-attributed utterances (diarized) over single-speaker windows.
         this._done = true;
-        const doc = buildDoc(this._stem, st.segments, st.durationSec);
+        const doc = buildDoc(this._stem, st.segments, st.durationSec, st.utterances);
+        const nSpk = doc.speakers.length;
         if (doc.turns.length === 0) {
-          frame = { recording: false, job: { state: "done", n_turns: 0, n_speakers: 1, stem: this._stem } };  // no-speech: nothing to persist
+          frame = { recording: false, job: { state: "done", n_turns: 0, n_speakers: nSpk, stem: this._stem } };  // no-speech: nothing to persist
         } else {
           try {
             localStorage.setItem(LS_PREFIX + this._stem, JSON.stringify(doc));
-            frame = { recording: false, job: { state: "done", n_turns: doc.turns.length, n_speakers: 1, stem: this._stem } };
+            frame = { recording: false, job: { state: "done", n_turns: doc.turns.length, n_speakers: nSpk, stem: this._stem } };
           } catch (_) {
             frame = { recording: false, job: { state: "error", error: "storage full — delete old sessions to free space" } };
           }

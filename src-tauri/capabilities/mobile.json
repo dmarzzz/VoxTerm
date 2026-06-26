@@ -4,5 +4,5 @@
   "description": "VoxTerm mobile: on-device transcription (voxasr) by default, with a LAN-pairing fallback to a desktop engine. No shell, no sidecar.",
   "platforms": ["android", "iOS"],
   "windows": ["main"],
-  "permissions": ["core:window:default", "core:webview:default", "core:event:default", "voxasr:default"]
+  "permissions": ["core:window:default", "core:webview:default", "core:event:default", "voxasr:default", "voxllm:default"]
 }

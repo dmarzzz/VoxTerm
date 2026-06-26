@@ -1,5 +1,5 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Allows VoxTerm to start/stop on-device transcription and poll its transcript."
-permissions = ["allow-start-transcribe", "allow-stop-transcribe", "allow-poll-transcript"]
+description = "Allows VoxTerm to start/stop on-device transcription, poll its transcript, and delete a session's audio."
+permissions = ["allow-start-transcribe", "allow-stop-transcribe", "allow-poll-transcript", "allow-delete-audio"]

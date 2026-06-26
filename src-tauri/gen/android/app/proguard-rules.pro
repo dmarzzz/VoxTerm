@@ -29,3 +29,17 @@
 # Keep every sherpa class and all of its members so the JNI field/method lookups resolve.
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
+
+# --- MediaPipe LLM Inference (on-device conversation analysis) ---
+# The tasks-genai AAR ships NO consumer ProGuard rules, and MediaPipe uses JNI + protobuf + reflection
+# internally. Keep the whole tasks namespace so the native LLM engine and its config protos resolve
+# under release minification, and silence warnings about its optional compile-time-only deps.
+-keep class com.google.mediapipe.** { *; }
+-keepclassmembers class com.google.mediapipe.** { *; }
+-keep class com.google.protobuf.** { *; }
+-dontwarn com.google.mediapipe.**
+-dontwarn com.google.protobuf.**
+-dontwarn com.google.common.**
+-dontwarn javax.annotation.**
+-dontwarn javax.lang.model.**
+-dontwarn autovalue.shaded.**

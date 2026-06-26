@@ -1,4 +1,4 @@
-const COMMANDS: &[&str] = &["start_transcribe", "stop_transcribe", "poll_transcript", "delete_audio"];
+const COMMANDS: &[&str] = &["llm_available", "start_generate", "poll_generate", "cancel_generate"];
 
 fn main() {
     tauri_plugin::Builder::new(COMMANDS)
