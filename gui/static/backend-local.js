@@ -226,7 +226,7 @@
         this._autosave(st);   // periodically persist the rough live transcript so a crash mid-take isn't total loss
       } else if (phase === "transcribing") {
         this._sawActive = true;
-        frame = { recording: false, job: { state: "transcribing", frac: 0, msg: "Transcribing…" } };
+        frame = { recording: false, job: { state: "transcribing", frac: st.progress || 0, msg: "Transcribing…" } };
       } else if (phase === "error" && this._lastPhase !== "error") {
         this._done = true;
         frame = { recording: false, job: { state: "error", error: st.error || "recording failed" } };

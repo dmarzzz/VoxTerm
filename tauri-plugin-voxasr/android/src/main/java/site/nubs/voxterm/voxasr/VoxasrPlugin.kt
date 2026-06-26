@@ -70,6 +70,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile private var elapsedSec = 0.0
     @Volatile private var levelRms = 0.0
     @Volatile private var durationSec = 0.0
+    @Volatile private var decodeProgress = 0.0    // 0..1 fraction of the take decoded (drives the GUI progress bar)
     @Volatile private var errorMsg: String? = null
     // Finalized transcript segments (one per <=30 s window): text + its start offset in seconds.
     private val segments = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Double>>())
@@ -310,6 +311,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     // (generation changed) so it never clobbers its phase. Deletes the take file when finished.
     private fun decodeTake(gen: Int) {
         val file = takeFile(gen)
+        decodeProgress = 0.0
         try {
             val total = (if (file.exists()) file.length() else 0L) / 2
             durationSec = total / SAMPLE_RATE.toDouble()
@@ -331,9 +333,10 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
                     val text = decodeChunk(rec, samples)
                     if (text.isNotEmpty()) segments.add(text to off / SAMPLE_RATE.toDouble())
                     off += len
+                    decodeProgress = (off.toDouble() / total).coerceIn(0.0, 1.0)   // advance the GUI bar per window
                 }
             }
-            if (generation == gen) phase = "done"
+            if (generation == gen) { decodeProgress = 1.0; phase = "done" }
         } catch (e: Exception) {
             if (generation == gen) { errorMsg = e.message ?: "transcription error"; phase = "error" }
         } finally {
@@ -429,6 +432,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         res.put("elapsed", elapsedSec)
         res.put("level", levelRms)
         res.put("durationSec", durationSec)
+        res.put("progress", decodeProgress)
         errorMsg?.let { res.put("error", it) }
         val arr = org.json.JSONArray()
         synchronized(segments) {
