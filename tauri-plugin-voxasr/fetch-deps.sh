@@ -71,4 +71,29 @@ stage "*decoder*.int8.onnx" decoder.int8.onnx
 stage "*tokens*"            tokens.txt
 cp "$CACHE/test_wavs/0.wav" "$ASSETS/test.wav"   # debug self-test clip (offline decode check)
 printf '%s' "$LANG_TAG" > "$ASSETS/lang.txt"      # read by the recognizer: "en" (English) or "auto" (detect)
-echo "voxasr native deps ready ($(du -sh "$ASSETS" | cut -f1) model [$MODEL, lang=$LANG_TAG], $(du -h "$AAR" | cut -f1) aar)."
+
+# ---- on-device speaker diarization models (opt-in feature) -------------------
+# sherpa-onnx OfflineSpeakerDiarization = pyannote segmentation + a speaker-embedding model + fast
+# clustering. Bundled so diarization is fully offline; the Kotlin plugin loads them by these names.
+DIAR="$HERE/android/src/main/assets/voxterm-diar"
+DIAR_CACHE="$HOME/.cache/voxterm/sherpa/diar"
+mkdir -p "$DIAR" "$DIAR_CACHE"
+SEG_TAR="sherpa-onnx-pyannote-segmentation-3-0"
+EMB_ONNX="3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"   # speaker embeddings (language-agnostic)
+if [ ! -f "$DIAR_CACHE/$SEG_TAR/model.onnx" ]; then
+  echo "fetching ${SEG_TAR}…"
+  curl -fSL -o "/tmp/$SEG_TAR.tar.bz2" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/$SEG_TAR.tar.bz2"
+  tar xjf "/tmp/$SEG_TAR.tar.bz2" -C "$DIAR_CACHE"
+  rm -f "/tmp/$SEG_TAR.tar.bz2"
+fi
+if [ ! -f "$DIAR_CACHE/$EMB_ONNX" ]; then
+  echo "fetching ${EMB_ONNX}…"
+  curl -fSL -o "$DIAR_CACHE/$EMB_ONNX" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recognition-models/$EMB_ONNX"
+fi
+rm -f "$DIAR"/*
+cp "$DIAR_CACHE/$SEG_TAR/model.onnx" "$DIAR/segmentation.onnx"
+cp "$DIAR_CACHE/$EMB_ONNX"           "$DIAR/embedding.onnx"
+
+echo "voxasr native deps ready ($(du -sh "$ASSETS" | cut -f1) asr [$MODEL, lang=$LANG_TAG], $(du -sh "$DIAR" | cut -f1) diar, $(du -h "$AAR" | cut -f1) aar)."

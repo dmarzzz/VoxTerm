@@ -104,6 +104,9 @@
         <span id="recState" class="rec-state">Ready</span>
       </div>
       <canvas id="recWave" class="rec-wave" width="600" height="56" aria-hidden="true"></canvas>
+      <!-- On-device only: opt in to speaker diarization at stop (slower + more memory, but enables real
+           multi-speaker interruptions). Hidden on desktop, which diarizes in the Python engine. -->
+      <label class="toggle ondevice-only" id="diarizeToggle" title="Identify who spoke at stop — slower, uses more memory, enables multi-speaker interruptions"><input type="checkbox" id="diarizeOndevice"><span>Speakers</span></label>
       <select id="language" class="select" aria-label="Language"></select>
       <details class="menu" id="settingsMenu">
         <summary class="gear-btn" id="gearBtn" aria-label="Settings" aria-haspopup="menu">⚙</summary>

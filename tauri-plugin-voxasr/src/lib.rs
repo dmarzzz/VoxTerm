@@ -39,19 +39,42 @@ async fn start_transcribe<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn stop_transcribe<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+async fn stop_transcribe<R: Runtime>(
+    app: AppHandle<R>,
+    stem: Option<String>,
+    diarize: Option<bool>,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
+        // Forward the session id (to persist <stem>.wav) + the opt-in diarize flag to the native side.
+        let payload = serde_json::json!({ "stem": stem, "diarize": diarize.unwrap_or(false) });
         app.state::<Voxasr<R>>()
             .handle
-            .run_mobile_plugin::<serde_json::Value>("stopTranscribe", ())
+            .run_mobile_plugin::<serde_json::Value>("stopTranscribe", payload)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, stem, diarize);
         Err("on-device transcription is Android-only".into())
+    }
+}
+
+/// Delete a session's persisted audio (`<stem>.wav`) when the session is deleted in the GUI.
+#[tauri::command]
+async fn delete_audio<R: Runtime>(app: AppHandle<R>, stem: String) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        app.state::<Voxasr<R>>()
+            .handle
+            .run_mobile_plugin::<serde_json::Value>("deleteAudio", serde_json::json!({ "stem": stem }))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, stem);
+        Ok(serde_json::json!({ "deleted": false }))
     }
 }
 
@@ -76,7 +99,7 @@ async fn poll_transcript<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Va
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("voxasr")
-        .invoke_handler(tauri::generate_handler![start_transcribe, stop_transcribe, poll_transcript])
+        .invoke_handler(tauri::generate_handler![start_transcribe, stop_transcribe, poll_transcript, delete_audio])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]
             {

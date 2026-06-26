@@ -320,6 +320,11 @@ body.low-signal .rec-wave { opacity: .45; }
 html.on-device #language,
 html.on-device #settingsMenu { display: none !important; }
 
+/* On-device speaker-diarization toggle: hidden everywhere by default, shown only on-device (desktop
+   diarizes in the Python engine and has its own "Detect speakers" in the gear menu). */
+.ondevice-only { display: none; }
+html.on-device .ondevice-only { display: inline-flex; align-items: center; }
+
 /* Export menu: local-LLM summary needs the Python engine; "Summarize for AI (copy prompt)" is
    pure client-side and stays. No recorded-audio store on-device, so hide the WAV download too. */
 html.on-device #summarizeLocal,

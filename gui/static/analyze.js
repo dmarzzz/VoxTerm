@@ -138,11 +138,15 @@
       const ps = typeof prev.t_offset === "number" ? prev.t_offset : null;
       const cs = typeof cur.t_offset === "number" ? cur.t_offset : null;
       const changed = multiSpeaker && cur.speaker_id !== prev.speaker_id;
-      const gap = (ps != null && cs != null) ? cs - ps : null;
+      // Prefer the diarizer's REAL end time + silence gap (t_end / gap_before) when present; fall back
+      // to the word-count estimate for docs without them (desktop, or single-speaker on-device).
+      const realEnd = typeof prev.t_end === "number" ? prev.t_end : null;
+      const gap = typeof cur.gap_before === "number" ? cur.gap_before
+                : (ps != null && cs != null) ? cs - ps : null;
 
       // OVERLAP — someone began before the previous turn plausibly finished.
       if (ps != null && cs != null) {
-        const estEnd = ps + Math.max(CFG.minEndSec, words(prev.text).length / CFG.wordsPerSec);
+        const estEnd = realEnd != null ? realEnd : ps + Math.max(CFG.minEndSec, words(prev.text).length / CFG.wordsPerSec);
         const overlapped = cs < estEnd - CFG.overlapSlackSec;
         const marked = /\b(overlap|crosstalk)\b/i.test((prev.markers || []).concat(cur.markers || []).join(" "));
         if (marked || (overlapped && (changed || (!multiSpeaker && looksCutOff(prev.text))))) {
@@ -177,7 +181,8 @@
     const turns = (doc && doc.turns) || [];
     const speakers = (doc && doc.speakers) || [];
     const multiSpeaker = new Set(turns.map((t) => t.speaker_id)).size > 1 || speakers.length > 1;
-    const durationSec = turns.reduce((m, t) => Math.max(m, typeof t.t_offset === "number" ? t.t_offset : 0), 0);
+    const durationSec = turns.reduce((m, t) => Math.max(m,
+      typeof t.t_end === "number" ? t.t_end : typeof t.t_offset === "number" ? t.t_offset : 0), 0);
     return {
       graph: buildGraph(turns),
       interruptions: detectInterruptions(turns, durationSec, multiSpeaker),

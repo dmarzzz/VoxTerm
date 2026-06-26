@@ -39,6 +39,7 @@ function colorFor(sid) { return PALETTE[((sid || 0) % PALETTE.length + PALETTE.l
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 // localStorage wrappers — private/incognito mode can throw on access, so swallow it.
 const LS_MODEL = "voxterm.model", LS_LANG = "voxterm.language", LS_MIC = "voxterm.mic", LS_DIARIZE = "voxterm.diarize", LS_SOURCE = "voxterm.source", LS_SUMMODEL = "voxterm.summodel";
+const LS_DIARIZE_OD = "voxterm.diarize_ondevice";   // on-device opt-in speaker diarization (default off — it's slow)
 function lsGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function lsSet(key, val) { try { localStorage.setItem(key, val); } catch { /* private mode */ } }
 function setNav(open) {
@@ -156,6 +157,12 @@ async function init() {
   dSel.addEventListener("change", () => lsSet(LS_MIC, dSel.value));
   if (lsGet(LS_DIARIZE) === "0") $("diarize").checked = false;
   $("diarize").addEventListener("change", () => lsSet(LS_DIARIZE, $("diarize").checked ? "1" : "0"));
+  // On-device speaker-diarization opt-in (default OFF — it adds a slow pass at stop).
+  const dOd = $("diarizeOndevice");
+  if (dOd) {
+    if (lsGet(LS_DIARIZE_OD) === "1") dOd.checked = true;
+    dOd.addEventListener("change", () => lsSet(LS_DIARIZE_OD, dOd.checked ? "1" : "0"));
+  }
   const savedSource = lsGet(LS_SOURCE);
   if (savedSource && [...$("source").options].some((op) => op.value === savedSource)) $("source").value = savedSource;
   $("source").addEventListener("change", () => lsSet(LS_SOURCE, $("source").value));
@@ -336,7 +343,7 @@ async function toggleRecord() {
     // so we don't call /api/live/stop separately — doing so raced two live_stop() calls.
     const r = await getJSON("/api/record/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: $("model").value, language: $("language").value, diarize: $("diarize").checked }),
+      body: JSON.stringify({ model: $("model").value, language: $("language").value, diarize: (window.VOX_ONDEVICE ? $("diarizeOndevice") : $("diarize")).checked }),
     });
     // On success the SSE job (transcribing -> done/error) re-enables the button; only re-enable
     // here if the stop request itself failed (so the button can't get stuck disabled).

@@ -10,18 +10,25 @@ import android.util.Log
 import android.webkit.WebView
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
+import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.k2fsa.sherpa.onnx.FastClusteringConfig
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeakerDiarization
+import com.k2fsa.sherpa.onnx.OfflineSpeakerDiarizationConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeakerSegmentationModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeakerSegmentationPyannoteModelConfig
 import com.k2fsa.sherpa.onnx.OfflineStream
 import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
+import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -31,6 +38,7 @@ import kotlin.math.sqrt
 private const val SAMPLE_RATE = 16000
 private const val WHISPER_WINDOW = 29 * SAMPLE_RATE   // just under Whisper's 30 s cap (it truncates >30 s)
 private const val MAX_REPEAT_PHRASE = 12              // longest word-run de-looping scans for (see collapseRepeats)
+private const val DIAR_THRESHOLD = 0.5f               // FastClustering cosine threshold; lower = more speakers
 
 /**
  * On-device speech-to-text. Records the mic with AudioRecord (16 kHz mono PCM16) into a buffer and,
@@ -41,6 +49,15 @@ private const val MAX_REPEAT_PHRASE = 12              // longest word-run de-loo
  * plus, when done, the transcript segments. Whisper decodes <=30 s per pass, so a long clip is split
  * into 30 s windows and the texts joined.
  */
+@InvokeArg
+class StopArgs {
+    var stem: String? = null      // session id → persist the take as <stem>.wav (null = don't keep audio)
+    var diarize: Boolean = false  // run on-device speaker diarization at stop (opt-in: real time + memory)
+}
+
+@InvokeArg
+class StemArgs { var stem: String = "" }
+
 @TauriPlugin(
     permissions = [Permission(strings = [Manifest.permission.RECORD_AUDIO], alias = "microphone")],
 )
@@ -74,6 +91,29 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile private var errorMsg: String? = null
     // Finalized transcript segments (one per <=30 s window): text + its start offset in seconds.
     private val segments = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Double>>())
+
+    // ---- speaker diarization (OPT-IN; runs at stop, costs real time + memory) ----
+    // When enabled for a take, after Whisper decodes we run sherpa's OfflineSpeakerDiarization over the
+    // whole clip to get [{start,end,speaker}] segments, then fill each with the Whisper TEXT whose token
+    // timestamps fall inside it — producing real per-speaker utterances instead of one anonymous window.
+    @Volatile private var diarizer: OfflineSpeakerDiarization? = null
+    @Volatile private var diarizeEnabled = false       // set per-take from stop_transcribe's `diarize` arg
+    @Volatile private var diarStatus = ""              // "" | "diarizing" — surfaced in the progress msg
+    @Volatile private var speakerCount = 0
+    private val diarFiles = listOf("segmentation.onnx", "embedding.onnx")
+    // Speaker-attributed utterances built at stop (empty unless diarization ran). text/start/end seconds,
+    // speaker = 0-based cluster id, gapBefore = silence before this utterance (null for the first).
+    private data class Utt(val text: String, val start: Double, val end: Double, val speaker: Int, val gapBefore: Double?)
+    private val utterances = java.util.Collections.synchronizedList(mutableListOf<Utt>())
+    // One decoded window's result: collapsed text (authoritative transcript) + raw tokens & their
+    // timestamps (seconds, relative to the window start) used only to place text into diar segments.
+    private data class Decoded(val text: String, val tokens: Array<String>, val stamps: FloatArray)
+
+    // Persisted per-session audio (so a session can be replayed / re-diarized): filesDir/voxterm-audio/<stem>.wav.
+    // Saved at stop when a stem is known; deleted by the deleteAudio command when the session is deleted.
+    @Volatile private var takeStem: String? = null
+    private fun audioDir() = File(activity.filesDir, "voxterm-audio").also { it.mkdirs() }
+    private fun audioFile(stem: String) = File(audioDir(), "${stem.replace(Regex("[^A-Za-z0-9_-]"), "_")}.wav")
 
     // ---- live-preview state (only meaningful while phase == "recording") ----
     // Completed <=29 s windows decoded DURING recording (rough, no boundary nudging) plus the
@@ -133,6 +173,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
                     decoder = File(dir, "decoder.int8.onnx").absolutePath,
                     language = whisperLang,   // "" = auto-detect (multilingual); "en" for the *.en models
                     task = "transcribe",      // not "translate"
+                    enableTokenTimestamps = true,   // per-token times → place text into diarization segments
                 ),
                 tokens = File(dir, "tokens.txt").absolutePath,
                 numThreads = 2,
@@ -149,14 +190,55 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     private fun ensureRecognizer(dir: File): OfflineRecognizer =
         recognizer ?: buildRecognizer(dir).also { recognizer = it }
 
+    // Stage the diarization models (pyannote segmentation + speaker embedding) from assets to filesDir,
+    // same atomic-swap pattern as stagedModelDir. Throws if the build didn't bundle them (diarization
+    // is an opt-in extra; a build without the models simply can't diarize).
+    @Synchronized
+    private fun stagedDiarDir(): File {
+        val out = File(activity.filesDir, "voxterm-diar")
+        if (diarFiles.all { File(out, it).exists() }) return out
+        val tmp = File(activity.filesDir, "voxterm-diar.tmp")
+        tmp.deleteRecursively(); tmp.mkdirs()
+        val am = activity.assets
+        for (name in am.list("voxterm-diar") ?: arrayOf()) {
+            am.open("voxterm-diar/$name").use { input -> File(tmp, name).outputStream().use { input.copyTo(it) } }
+        }
+        val missing = diarFiles.filterNot { File(tmp, it).exists() }
+        if (missing.isNotEmpty()) { tmp.deleteRecursively(); throw java.io.IOException("diarization models not bundled; missing: ${missing.joinToString()}") }
+        out.deleteRecursively()
+        if (!tmp.renameTo(out)) { tmp.deleteRecursively(); throw java.io.IOException("could not stage diar dir") }
+        return out
+    }
+
+    @Synchronized
+    private fun ensureDiarizer(): OfflineSpeakerDiarization {
+        diarizer?.let { return it }
+        val dir = stagedDiarDir()
+        val config = OfflineSpeakerDiarizationConfig(
+            segmentation = OfflineSpeakerSegmentationModelConfig(
+                pyannote = OfflineSpeakerSegmentationPyannoteModelConfig(model = File(dir, "segmentation.onnx").absolutePath),
+                numThreads = 2,
+            ),
+            embedding = SpeakerEmbeddingExtractorConfig(model = File(dir, "embedding.onnx").absolutePath, numThreads = 2),
+            // numClusters = -1 → infer speaker count from the audio via the clustering threshold.
+            clustering = FastClusteringConfig(numClusters = -1, threshold = DIAR_THRESHOLD),
+            minDurationOn = 0.3f,
+            minDurationOff = 0.5f,
+        )
+        return OfflineSpeakerDiarization(config = config).also { diarizer = it }
+    }
+
     // Decode one <=30 s window in a single offline pass (no isReady/endpoint loop — that's online).
-    // Serialized via decodeLock so the live loop and the final pass never decode concurrently.
-    private fun decodeChunk(rec: OfflineRecognizer, samples: FloatArray): String = synchronized(decodeLock) {
+    // Serialized via decodeLock so the live loop and the final pass never decode concurrently. Returns
+    // the collapsed (authoritative) text plus raw tokens/timestamps (used only to place text into
+    // diarization segments — the saved transcript always uses `.text`).
+    private fun decodeChunk(rec: OfflineRecognizer, samples: FloatArray): Decoded = synchronized(decodeLock) {
         val stream: OfflineStream = rec.createStream()
         try {
             stream.acceptWaveform(samples, SAMPLE_RATE)   // (samples, sampleRate)
             rec.decode(stream)
-            collapseRepeats(rec.getResult(stream).text.trim())
+            val r = rec.getResult(stream)
+            Decoded(collapseRepeats(r.text.trim()), r.tokens, r.timestamps)
         } finally {
             stream.release()                              // never leak the native stream
         }
@@ -241,6 +323,8 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         samplesWritten = 0
         synchronized(segments) { segments.clear() }
         synchronized(liveSegments) { liveSegments.clear() }
+        synchronized(utterances) { utterances.clear() }
+        speakerCount = 0; diarStatus = ""
         livePartialText = ""; livePartialStart = 0.0
         phase = "recording"; elapsedSec = 0.0; levelRms = 0.0; durationSec = 0.0; errorMsg = null
         worker = thread(start = true) {
@@ -297,6 +381,9 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopTranscribe(invoke: Invoke) {
         if (phase != "recording") { invoke.resolve(JSObject()); return }   // double-stop / never started
+        val args = try { invoke.parseArgs(StopArgs::class.java) } catch (_: Exception) { StopArgs() }
+        takeStem = args.stem
+        diarizeEnabled = args.diarize
         running = false
         worker?.join(2000)                  // the mic worker exits on running=false; beginCapture re-joins
         liveWorker?.join(2000)              // stop the live decoder before the final pass (no concurrent decode)
@@ -306,17 +393,32 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         thread(start = true) { decodeTake(gen) }
     }
 
+    // Delete a session's persisted audio (called from the GUI when a session is deleted on-device).
+    @Command
+    fun deleteAudio(invoke: Invoke) {
+        val args = try { invoke.parseArgs(StemArgs::class.java) } catch (_: Exception) { StemArgs() }
+        val res = JSObject()
+        res.put("deleted", if (args.stem.isNotEmpty() && audioFile(args.stem).delete()) true else false)
+        invoke.resolve(res)
+    }
+
     // Transcribe a finished take by streaming <=29 s windows (under Whisper's 30 s cap) off the spilled
-    // PCM file — only one window is ever resident in RAM. Aborts quietly if a newer take started
-    // (generation changed) so it never clobbers its phase. Deletes the take file when finished.
+    // PCM file — only one window is ever resident in RAM during decode. Aborts quietly if a newer take
+    // started (generation changed). Then, if diarization is enabled for this take, runs sherpa's
+    // OfflineSpeakerDiarization over the whole clip and attributes the transcript to speakers; and if a
+    // stem is known, persists the audio as a WAV. Deletes the spilled PCM when finished.
     private fun decodeTake(gen: Int) {
         val file = takeFile(gen)
-        decodeProgress = 0.0
+        decodeProgress = 0.0; diarStatus = ""
+        // Token (absoluteTimeSec -> tokenString) pairs, collected only when diarizing — used to fill the
+        // speaker segments with the Whisper text whose tokens land inside them.
+        val tokTimes = if (diarizeEnabled) ArrayList<Pair<Double, String>>() else null
         try {
             val total = (if (file.exists()) file.length() else 0L) / 2
             durationSec = total / SAMPLE_RATE.toDouble()
             if (total == 0L) { if (generation == gen) phase = "done"; return }
             val rec = ensureRecognizer(stagedModelDir())
+            val decodeSpan = if (diarizeEnabled) 0.5 else 1.0   // leave the second half of the bar for diarization
             RandomAccessFile(file, "r").use { raf ->
                 var off = 0L
                 while (off < total && generation == gen) {
@@ -330,17 +432,84 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
                         val s = ((win[b + 1].toInt() shl 8) or (win[b].toInt() and 0xff)).toShort()
                         s / 32768.0f
                     }
-                    val text = decodeChunk(rec, samples)
-                    if (text.isNotEmpty()) segments.add(text to off / SAMPLE_RATE.toDouble())
+                    val base = off / SAMPLE_RATE.toDouble()
+                    val dec = decodeChunk(rec, samples)
+                    if (dec.text.isNotEmpty()) segments.add(dec.text to base)
+                    if (tokTimes != null) {
+                        val n = minOf(dec.tokens.size, dec.stamps.size)
+                        for (i in 0 until n) tokTimes.add((base + dec.stamps[i]) to dec.tokens[i])
+                    }
                     off += len
-                    decodeProgress = (off.toDouble() / total).coerceIn(0.0, 1.0)   // advance the GUI bar per window
+                    decodeProgress = (off.toDouble() / total * decodeSpan).coerceIn(0.0, 1.0)
                 }
             }
-            if (generation == gen) { decodeProgress = 1.0; phase = "done" }
+            // Persist the audio for this session (replay / re-diarize) before we drop the spilled PCM.
+            takeStem?.let { stem -> try { savePcmAsWav(file, audioFile(stem)) } catch (e: Exception) { Log.w("voxasr", "audio save failed: ${e.message}") } }
+            // Speaker diarization (opt-in) — failures fall back to the single-speaker window transcript.
+            if (diarizeEnabled && generation == gen) {
+                try { diarize(file, total, tokTimes ?: emptyList(), gen) }
+                catch (e: Exception) { Log.w("voxasr", "diarization failed (using single-speaker): ${e.message}") }
+            }
+            if (generation == gen) { decodeProgress = 1.0; diarStatus = ""; phase = "done" }
         } catch (e: Exception) {
             if (generation == gen) { errorMsg = e.message ?: "transcription error"; phase = "error" }
         } finally {
-            file.delete()   // reclaim the spilled PCM; the transcript now lives in `segments`
+            file.delete()   // reclaim the spilled PCM; the transcript now lives in `segments`/`utterances`
+        }
+    }
+
+    // Run sherpa's OfflineSpeakerDiarization over the whole take and build speaker-attributed utterances
+    // by filling each [start,end,speaker] segment with the Whisper tokens whose timestamps fall inside.
+    // Needs the whole clip in RAM as floats (the time+memory cost the user opted into).
+    private fun diarize(file: File, total: Long, tokTimes: List<Pair<Double, String>>, gen: Int) {
+        diarStatus = "diarizing"
+        val samples = FloatArray(total.toInt())
+        RandomAccessFile(file, "r").use { raf ->
+            val buf = ByteArray(1 shl 16)
+            var idx = 0
+            while (idx < samples.size) {
+                val want = minOf(buf.size, (samples.size - idx) * 2)
+                val got = raf.read(buf, 0, want)
+                if (got <= 0) break
+                var b = 0
+                while (b + 1 < got) { samples[idx++] = (((buf[b + 1].toInt() shl 8) or (buf[b].toInt() and 0xff)).toShort()) / 32768.0f; b += 2 }
+            }
+        }
+        val diar = ensureDiarizer()
+        val segs = diar.processWithCallback(samples, { done, totalc, _ ->
+            if (generation == gen && totalc > 0) decodeProgress = (0.5 + 0.5 * done.toDouble() / totalc).coerceIn(0.0, 1.0)
+            0   // 0 = keep going
+        })
+        var spkMax = -1
+        var prevEnd: Double? = null
+        synchronized(utterances) {
+            utterances.clear()
+            for (s in segs.sortedBy { it.start }) {
+                val txt = tokTimes.filter { it.first >= s.start && it.first < s.end }.joinToString("") { it.second }
+                val clean = collapseRepeats(txt.replace(Regex("\\s+"), " ").trim())
+                if (clean.isEmpty()) continue
+                val gap = prevEnd?.let { (s.start - it).coerceAtLeast(0.0) }
+                utterances.add(Utt(clean, s.start.toDouble(), s.end.toDouble(), s.speaker, gap))
+                if (s.speaker > spkMax) spkMax = s.speaker
+                prevEnd = s.end.toDouble()
+            }
+        }
+        speakerCount = spkMax + 1
+        diarStatus = ""
+    }
+
+    // Write a take's spilled PCM16 (mono, 16 kHz) to a canonical 44-byte-header WAV at `dst`.
+    private fun savePcmAsWav(pcm: File, dst: File) {
+        val dataLen = pcm.length().toInt()
+        dst.outputStream().use { o ->
+            val hdr = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            hdr.put("RIFF".toByteArray()); hdr.putInt(36 + dataLen); hdr.put("WAVE".toByteArray())
+            hdr.put("fmt ".toByteArray()); hdr.putInt(16); hdr.putShort(1.toShort())          // PCM
+            hdr.putShort(1.toShort()); hdr.putInt(SAMPLE_RATE); hdr.putInt(SAMPLE_RATE * 2)    // mono, byte rate
+            hdr.putShort(2.toShort()); hdr.putShort(16.toShort())                             // block align, bits
+            hdr.put("data".toByteArray()); hdr.putInt(dataLen)
+            o.write(hdr.array())
+            pcm.inputStream().use { it.copyTo(o) }
         }
     }
 
@@ -407,7 +576,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
                     val s = ((win[b + 1].toInt() shl 8) or (win[b].toInt() and 0xff)).toShort()
                     s / 32768.0f
                 }
-                val text = try { decodeChunk(rec, samples) } catch (e: Exception) { "" }
+                val text = try { decodeChunk(rec, samples).text } catch (e: Exception) { "" }
                 if (generation != gen) break
                 livePartialStart = base / SAMPLE_RATE.toDouble()
                 livePartialText = text
@@ -433,6 +602,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         res.put("level", levelRms)
         res.put("durationSec", durationSec)
         res.put("progress", decodeProgress)
+        if (diarStatus.isNotEmpty()) res.put("stage", diarStatus)   // "diarizing" → the GUI shows it in the bar msg
         errorMsg?.let { res.put("error", it) }
         val arr = org.json.JSONArray()
         synchronized(segments) {
@@ -441,6 +611,18 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         res.put("segments", arr)
+        // Speaker-attributed utterances (populated only when diarization ran). The GUI prefers these
+        // over `segments` so the saved transcript is multi-speaker.
+        val uttArr = org.json.JSONArray()
+        synchronized(utterances) {
+            for (u in utterances) {
+                val o = org.json.JSONObject().put("text", u.text).put("start", u.start).put("end", u.end).put("speaker", u.speaker)
+                u.gapBefore?.let { o.put("gapBefore", it) }
+                uttArr.put(o)
+            }
+        }
+        res.put("utterances", uttArr)
+        res.put("speakerCount", speakerCount)
         // Live preview (the GUI reads these only while phase == "recording"): finalized windows so
         // far plus the in-progress window's latest decode.
         val liveArr = org.json.JSONArray()
@@ -488,7 +670,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
             val samples = readWav16kMono(test)
             val audioSec = samples.size / 16000.0
             val t0 = System.nanoTime()
-            val text = decodeChunk(rec, samples)
+            val text = decodeChunk(rec, samples).text
             val decodeSec = (System.nanoTime() - t0) / 1e9
             // xRT < 1.0 = faster than real-time; logged so on-device latency is measured, not assumed.
             Log.i("voxasr", "SELFTEST_RESULT=[$text] xRT=%.2f (%.2fs decode / %.2fs audio)"
