@@ -61,7 +61,7 @@ from textual import work
 
 from tui.widgets.header import CyberHeader
 from tui.widgets.waveform import WaveformWidget, _make_style
-from tui.widgets.transcript import TranscriptPanel, Log
+from tui.widgets.transcript import TranscriptPanel, Log, _SPEAKER_COLORS
 from tui.widgets.tag_screen import SpeakerTagScreen
 from tui.widgets.profile_screen import SpeakerProfileScreen
 from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
@@ -85,6 +85,8 @@ from config import (
     DEFAULT_LANGUAGE, AVAILABLE_LANGUAGES,
     LIVE_DIR,
     EVENTS_ENABLED,
+    REDIAR_ENABLED, REDIAR_LIVE, REDIAR_LIVE_MIN_NEW_SEC,
+    REDIAR_MIN_AUDIO_SEC, REDIAR_MAX_SESSION_SEC,
 )
 from config import SESSIONS_DIR, STATE_FILE as _STATE_FILE
 from tui.events import EventLogger, NullEventLogger
@@ -571,6 +573,27 @@ class VoxTerm(App):
         self.transcriber = transcriber
         self.diarizer = DiarizationProxy()
         self.speaker_store = SpeakerStore()
+        # ── Deferred whole-session re-diarization correction pass ─────
+        # Retains the session's mic-only audio + per-entry time spans so a
+        # background worker can re-cluster the whole session offline and
+        # retroactively fix transcript speaker labels. See audio/diarization/
+        # rediarize.py. Fail-soft: disabled if sherpa-onnx/models unavailable.
+        if REDIAR_ENABLED:
+            from audio.diarization.rediarize import SessionRediarizer
+            self._rediarizer = SessionRediarizer()
+        else:
+            self._rediarizer = None
+        self._session_audio_chunks: list[np.ndarray] = []
+        self._session_audio_len = 0          # samples of retained mic-only audio
+        self._session_audio_lock = threading.Lock()
+        self._rediar_entries: list[dict] = []  # {"idx","t0","t1","sid"} in session-sec
+        self._rediar_lock = threading.Lock()   # one correction at a time
+        self._last_rediar_len = 0            # session_audio_len at last correction
+        self._rediar_frozen = False          # hit REDIAR_MAX_SESSION_SEC cap
+        # Monotonic session generation: a snapshot stamped with gen N is dropped
+        # if the transcript was cleared/reset (gen bumped) before its relabels
+        # land, so stale-index relabels can't corrupt a fresh transcript.
+        self._rediar_gen = 0
         self._model_name = model_name
         self._language = language
         self._is_qwen3 = model_name in QWEN3_MODELS
@@ -1285,24 +1308,47 @@ class VoxTerm(App):
             else:
                 segments = [("", 0, 0, len(audio))]
 
+            # Retain the mic-only session audio + per-entry time spans so the
+            # deferred re-diarization pass can re-cluster the whole session.
+            # Only when we have real mic audio (party-merged mono can't diarize).
+            track = self._rediarizer is not None and has_local_audio and bool(text)
+            base_sample = self._record_session_audio(diarize_audio) if track else None
+
             if text:
                 if len(segments) > 1:
                     # Split text across segments proportionally by duration
                     seg_texts = self._split_text_by_segments(text, segments)
-                    for seg_text, seg_label, seg_sid in seg_texts:
+                    for (seg_text, seg_label, seg_sid), seg in zip(seg_texts, segments):
                         if seg_text.strip():
                             seg_overlap = is_overlap and seg_sid == speaker_id
+                            span = None
+                            if base_sample is not None:
+                                span = ((base_sample + seg[2]) / SAMPLE_RATE,
+                                        (base_sample + seg[3]) / SAMPLE_RATE)
                             self.call_from_thread(
                                 self._on_transcription, seg_text, seg_label,
                                 seg_sid, confidence,
-                                seg_overlap,
+                                seg_overlap, span,
                             )
                 else:
+                    span = None
+                    if base_sample is not None:
+                        span = (base_sample / SAMPLE_RATE,
+                                (base_sample + len(diarize_audio)) / SAMPLE_RATE)
                     self.call_from_thread(
                         self._on_transcription, text, speaker_label,
                         speaker_id, confidence,
-                        is_overlap,
+                        is_overlap, span,
                     )
+
+            # Deferred whole-session re-diarization (debounced, live). Fires when
+            # enough NEW speech has accrued since the last correction; the worker
+            # itself skips if one is already running or the session is too short.
+            if track and REDIAR_LIVE and base_sample is not None:
+                with self._session_audio_lock:
+                    new_samples = self._session_audio_len - self._last_rediar_len
+                if new_samples >= int(REDIAR_LIVE_MIN_NEW_SEC * SAMPLE_RATE):
+                    self.call_from_thread(self._rediarize, False)
         except Exception as e:
             self._write_crash_dump("_transcribe_audio", e)
             import traceback
@@ -1366,6 +1412,138 @@ class VoxTerm(App):
                 "medium", match.score,
             )
 
+    # ── deferred whole-session re-diarization correction ──────────
+
+    def _record_session_audio(self, diarize_audio: np.ndarray) -> int | None:
+        """Append mic-only audio to the retained session buffer.
+
+        Returns the base sample offset of this chunk in the session timeline, or
+        None if retention is frozen (hit REDIAR_MAX_SESSION_SEC). Called from the
+        transcription worker thread.
+        """
+        with self._session_audio_lock:
+            if self._rediar_frozen:
+                return None
+            base = self._session_audio_len
+            self._session_audio_chunks.append(
+                np.ascontiguousarray(diarize_audio, dtype=np.float32).copy()
+            )
+            self._session_audio_len += len(diarize_audio)
+            if self._session_audio_len >= int(REDIAR_MAX_SESSION_SEC * SAMPLE_RATE):
+                self._rediar_frozen = True
+                log.info("rediarize: session audio cap reached (%.0fs); "
+                         "freezing correction window", REDIAR_MAX_SESSION_SEC)
+            return base
+
+    def _reset_rediar_state(self) -> None:
+        """Drop retained session audio + entry spans, on clear / new session.
+
+        Bumps the generation so any in-flight correction's relabels (keyed by the
+        now-defunct entry indices) are dropped by _apply_rediar_updates instead
+        of corrupting the fresh transcript.
+        """
+        with self._session_audio_lock:
+            self._session_audio_chunks.clear()
+            self._session_audio_len = 0
+            self._rediar_entries.clear()
+            self._last_rediar_len = 0
+            self._rediar_frozen = False
+            self._rediar_gen += 1
+
+    @work(thread=True, group="rediarization")
+    def _rediarize(self, final: bool = False) -> None:
+        """Re-cluster the whole accumulated session and relabel the transcript.
+
+        Off the hot path on its own worker. The on-stop ``final`` pass blocks for
+        an in-flight live pass so it always runs against the latest audio; live
+        passes skip if a correction is already running.
+        """
+        if self._rediarizer is None:
+            return
+        # The final (on-stop) pass must not be a no-op just because a debounced
+        # live pass holds the lock — block for it (we're on a background worker,
+        # never the UI thread). Live passes stay non-blocking and just skip.
+        if final:
+            self._rediar_lock.acquire()
+        elif not self._rediar_lock.acquire(blocking=False):
+            return  # a correction is already in flight
+        try:
+            with self._session_audio_lock:
+                gen = self._rediar_gen
+                too_short = (
+                    self._session_audio_len < int(REDIAR_MIN_AUDIO_SEC * SAMPLE_RATE)
+                )
+                if not too_short:
+                    audio = (
+                        np.concatenate(self._session_audio_chunks)
+                        if self._session_audio_chunks else np.empty(0, np.float32)
+                    )
+                    entries = [dict(e) for e in self._rediar_entries]
+                    self._last_rediar_len = self._session_audio_len
+            if too_short:
+                return
+
+            global_segs = self._rediarizer.rediarize(audio)
+            if not global_segs or not entries:
+                return
+
+            # Current display name/color per online speaker id (preserve
+            # cross-session names where a cluster lines up with an online speaker).
+            names: dict[int, str] = {}
+            colors: dict[int, str] = {}
+            for e in entries:
+                sid = e["sid"]
+                if sid > 0 and sid not in names:
+                    try:
+                        names[sid] = self.diarizer.get_speaker_name(sid)
+                        colors[sid] = self.diarizer.get_speaker_color(sid)
+                    except Exception:
+                        pass
+
+            from audio.diarization.rediarize import reconcile_labels
+            updates = reconcile_labels(global_segs, entries, names, colors,
+                                       _SPEAKER_COLORS)
+            # Debug heartbeat: report every pass (even 0 corrected) so the user
+            # can see the corrector running and how many speakers it resolved.
+            if self._debug:
+                n_spk = len({c for _, _, c in global_segs})
+                dur = len(audio) / SAMPLE_RATE
+                self.call_from_thread(
+                    self.query_one(TranscriptPanel).system_message,
+                    f"[dbg] re-diar {'final' if final else 'live'}: {len(global_segs)} segs, "
+                    f"{n_spk} speaker(s), {len(updates)} line(s) corrected ({dur:.0f}s)",
+                )
+            if updates:
+                self.call_from_thread(self._apply_rediar_updates, updates, final, gen)
+        except Exception as e:
+            log.warning("rediarize: correction pass failed: %s", e)
+        finally:
+            self._rediar_lock.release()
+
+    def _apply_rediar_updates(
+        self, updates: dict[int, tuple[int, str, str]], final: bool, gen: int,
+    ) -> None:
+        """Apply re-diarization relabels to the transcript (main thread)."""
+        # Drop stale relabels: the transcript was cleared / a new session began
+        # after this correction snapshotted its (now-defunct) entry indices.
+        if gen != self._rediar_gen:
+            return
+        tp = self.query_one(TranscriptPanel)
+        changed = tp.apply_relabels(updates)
+        if not changed:
+            return
+        # Adopt the corrected ids so the next pass sees the corrected state.
+        new_sid = {idx: sid for idx, (sid, _, _) in updates.items()}
+        with self._session_audio_lock:
+            for e in self._rediar_entries:
+                if e["idx"] in new_sid:
+                    e["sid"] = new_sid[e["idx"]]
+        if self._debug or final:
+            self.query_one(TranscriptPanel).system_message(
+                f"re-diarization corrected {changed} line(s)", Log.SYS,
+            )
+        self._update_telemetry()
+
     @staticmethod
     def _split_text_by_segments(
         text: str,
@@ -1382,15 +1560,22 @@ class VoxTerm(App):
     def _on_transcription(
         self, text: str, speaker: str = "", speaker_id: int = 0,
         confidence: str = "", overlap: bool = False,
+        span: tuple[float, float] | None = None,
     ):
         if not speaker:
             import traceback
             log.warning("Empty speaker label for text=%r, stack:\n%s",
                         text[:80], "".join(traceback.format_stack()[-4:]))
-        self.query_one(TranscriptPanel).add_transcript(
+        entry_idx = self.query_one(TranscriptPanel).add_transcript(
             text, speaker, speaker_id, confidence=confidence,
             overlap=overlap,
         )
+        # Register the entry's session-time span for the re-diarization pass.
+        if span is not None:
+            with self._session_audio_lock:
+                self._rediar_entries.append(
+                    {"idx": entry_idx, "t0": span[0], "t1": span[1], "sid": speaker_id}
+                )
         self._append_live_transcript(text, speaker, speaker_id)
 
         # Mirror to hivemind sink (no-op if --hivemind=off or no sink).
@@ -1667,6 +1852,8 @@ class VoxTerm(App):
                 self._recording_pulse.stop()
             transcript.system_message("recording stopped", Log.REC, {"stopped": "#ff4466"})
             self._events.emit("recording", on=False)
+            # Final whole-session re-diarization correction pass.
+            self._rediarize(final=True)
         else:
             self._recording = True
             self._mic_error_shown = False
@@ -2242,6 +2429,7 @@ class VoxTerm(App):
         self.vad.reset()
         if self._diarizer_loaded:
             self.diarizer.reset_session()
+        self._reset_rediar_state()
         self._speaker_profile_map.clear()
         self._prompt_times.clear()
         self._prompt_confirmations.clear()
@@ -2421,6 +2609,7 @@ class VoxTerm(App):
         if self._party.assembler:
             self._party.assembler.clear()
         self._speaker_profile_map.clear()
+        self._reset_rediar_state()
 
     def action_quit(self):
         if self._recording:

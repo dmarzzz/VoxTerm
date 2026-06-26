@@ -195,6 +195,41 @@ _SPEAKER_DIM_REGISTRY = {"eres2net_large": 512, "eres2netv2": 192, "campplus": 5
 SPEAKER_EMBEDDING_DIM = _SPEAKER_DIM_REGISTRY[SPEAKER_MODEL_NAME]
 SPEAKER_MODEL_ONNX_CACHE = __import__("pathlib").Path.home() / ".cache" / "3dspeaker"
 
+# ── Deferred re-diarization correction pass ──────────────────────
+# The live online path assigns one blended embedding per ASR chunk and commits
+# the label permanently (~67-70% DER on AMI fixtures). This pass re-clusters the
+# WHOLE accumulated session offline (sherpa-onnx: pyannote-segmentation-3.0 +
+# ERes2Net embedder + global AHC) and retroactively rewrites transcript speaker
+# labels — empirically ~71% -> ~30% DER on the same fixtures. The win comes from
+# GLOBAL whole-session re-clustering, so the pass MUST see the accumulated
+# session, never a single turn. Off the hot path on its own worker thread.
+REDIAR_ENABLED = _os.environ.get("VOXTERM_REDIAR", "1") != "0"
+# Run a debounced correction DURING recording, not just at stop. Off by default:
+# a live pass re-renders the whole transcript (RichLog has no in-place line edit)
+# which yanks scroll, and causal re-clustering is non-monotonic so labels can flip
+# mid-session. The on-stop final pass is the robust default; opt in with =1.
+REDIAR_LIVE = _os.environ.get("VOXTERM_REDIAR_LIVE", "0") != "0"
+# Minimum NEW retained speech (sec) accumulated since the last correction before
+# a live correction re-runs (debounce — the pass is ~0.2x RTF, and frequent
+# re-runs cause label churn since causal re-clustering is non-monotonic).
+REDIAR_LIVE_MIN_NEW_SEC = float(_os.environ.get("VOXTERM_REDIAR_MIN_NEW_SEC", "20"))
+# Don't bother correcting below this much accumulated speech.
+REDIAR_MIN_AUDIO_SEC = 5.0
+# Cap on retained session speech (RAM bound: 16kHz mono f32 ~= 115 KB/s, so
+# 1800s ~= 200 MB). Beyond this the pass freezes its window to the first N sec to
+# keep entry<->audio time alignment exact rather than dropping audio mid-session.
+REDIAR_MAX_SESSION_SEC = float(_os.environ.get("VOXTERM_REDIAR_MAX_SEC", "1800"))
+# sherpa FastClustering cosine-distance threshold (auto cluster count). Lower =
+# splits more readily. 0.6 minimized DER on the AMI fixtures but COLLAPSED two
+# acoustically-similar speakers into one (measured); 0.5 kept them distinct, so
+# 0.5 is the default — keeping real speakers separate matters more in practice
+# than a point of DER. Lower further (~0.45) if same-room speakers still merge.
+REDIAR_CLUSTER_THRESHOLD = float(_os.environ.get("VOXTERM_REDIAR_THRESHOLD", "0.5"))
+# sherpa-onnx model cache + ungated download URLs (Apache-2.0 / MIT seg).
+REDIAR_MODEL_CACHE = _home / ".cache" / "voxterm" / "sherpa-diar"
+REDIAR_SEG_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+REDIAR_EMBED_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+
 # Clustering (3D-Speaker algorithms for periodic re-clustering)
 CLUSTER_AHC_THRESHOLD = 0.50       # AHC cosine distance stop threshold
 CLUSTER_SPECTRAL_PVAL_BETA = 1.0   # p-value pruning aggressiveness (higher = more pruning)

@@ -123,19 +123,62 @@ class TranscriptPanel(RichLog):
     def add_transcript(
         self, content: str, speaker: str = "", speaker_id: int = 0,
         confidence: str = "", overlap: bool = False,
-    ):
+    ) -> int:
         """Add transcribed text with optional speaker attribution.
 
         confidence: "" = default, "high" = auto-recognized,
                     "medium" = suggested, "new" = unknown new speaker
         overlap: True if overlapping speech detected in this segment
+
+        Returns the entry's index in ``_entries`` so callers (e.g. the deferred
+        re-diarization pass) can retroactively relabel it.
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
         self._entries.append((timestamp, "transcript", content, speaker, speaker_id, confidence))
+        entry_idx = len(self._entries) - 1
 
         if not self._merged_view:
             text = self._render_entry(timestamp, content, speaker, speaker_id, confidence, overlap)
             self.write(text)
+        return entry_idx
+
+    def apply_relabels(self, updates: dict[int, tuple[int, str, str]]) -> int:
+        """Retroactively rewrite speaker labels for many entries, then re-render.
+
+        ``updates`` maps entry_index -> (speaker_id, label, color). Used by the
+        deferred whole-session re-diarization correction pass. Confidence is
+        cleared on a corrected entry (the label is now machine-corrected, not a
+        live cross-session guess). Returns the number of entries changed.
+        """
+        changed = 0
+        for idx, (sid, label, color) in updates.items():
+            if not (0 <= idx < len(self._entries)):
+                continue
+            entry = self._entries[idx]
+            if entry[1] != "transcript":
+                continue
+            if color:
+                self._color_overrides[sid] = color
+            self._speaker_confidence.pop(sid, None)
+            self._entries[idx] = (entry[0], entry[1], entry[2], label, sid, "")
+            changed += 1
+        if changed and not self._merged_view:
+            # Preserve the reader's scroll position across the full re-render
+            # (RichLog has no in-place line edit, and this is an automatic,
+            # periodic caller). Only re-pin to the bottom if the user was
+            # already there; otherwise keep them where they were reading.
+            try:
+                at_bottom = self.scroll_offset.y >= self.max_scroll_y
+                prev_y = self.scroll_offset.y
+            except Exception:
+                at_bottom, prev_y = True, 0
+            self._rerender()
+            if not at_bottom:
+                try:
+                    self.scroll_to(y=prev_y, animate=False)
+                except Exception:
+                    pass
+        return changed
 
     def _render_entry(
         self, timestamp: str, content: str, speaker: str, speaker_id: int,
