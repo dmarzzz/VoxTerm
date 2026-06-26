@@ -89,8 +89,9 @@ if [ ! -f "$DIAR_CACHE/$SEG_TAR/model.onnx" ]; then
 fi
 if [ ! -f "$DIAR_CACHE/$EMB_ONNX" ]; then
   echo "fetching ${EMB_ONNX}…"
+  # NB: the sherpa-onnx release tag is misspelled "recongition" upstream — keep it as-is or this 404s.
   curl -fSL -o "$DIAR_CACHE/$EMB_ONNX" \
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recognition-models/$EMB_ONNX"
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$EMB_ONNX"
 fi
 rm -f "$DIAR"/*
 cp "$DIAR_CACHE/$SEG_TAR/model.onnx" "$DIAR/segmentation.onnx"
