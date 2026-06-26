@@ -26,8 +26,10 @@
   // only when the user taps "Sharpen" — running the ~0.5 GB model automatically on every render can
   // OOM-crash the app (a native crash JS can't catch). llmCache holds the last LLM result for the doc
   // it was computed for, so it survives mode switches but is dropped when the transcript changes.
-  let llmCache = null;               // { sig, data:{graph,interruptions} }
+  let llmCache = null;               // { sig, data:{graph,interruptions}, status:"partial"|"complete" }
   let llmBusy = false;
+  let llmProgress = null;            // { done, total } during a multi-chunk Sharpen run, else null
+  let llmToken = null;               // { canceled } for the in-flight run, so a new run/leave can stop it
 
   function docSig(doc) {
     const turns = (doc && doc.turns) || [];
@@ -89,8 +91,16 @@
   // exactly once for the current transcript; failures fall back to the already-shown heuristic.
   function toolbar(caption, source) {
     let right = "";
-    if (llmBusy) right = `<span class="llm-state" aria-live="polite">Analyzing on-device… first run loads the model (~10s)</span>`;
-    else if (source === "llm") right = `<span class="llm-badge" title="${esc((window.VOX_LLM && window.VOX_LLM.model) || "on-device LLM")}">⚡ on-device LLM</span>`;
+    if (llmBusy) {
+      const prog = (llmProgress && llmProgress.total > 1)
+        ? `Analyzing on-device… chunk ${Math.min(llmProgress.done + 1, llmProgress.total)} / ${llmProgress.total}`
+        : `Analyzing on-device… first run loads the model (~10s)`;
+      right = `<span class="llm-state" aria-live="polite">${esc(prog)}</span>`;
+    }
+    else if (source === "llm") {
+      const partial = llmCache && llmCache.status === "partial";
+      right = `<span class="llm-badge" title="${esc((window.VOX_LLM && window.VOX_LLM.model) || "on-device LLM")}">⚡ on-device LLM${partial ? " · partial" : ""}</span>`;
+    }
     else if (window.VOX_LLM && window.VOX_LLM.available) right = `<button class="llm-sharpen" type="button">✨ Sharpen with on-device AI</button>`;
     return `<div class="conv-toolbar"><span class="conv-cap">${caption}</span>${right}</div>`;
   }
@@ -103,16 +113,30 @@
     const doc = api.getDoc && api.getDoc();
     if (!doc || llmBusy || !(window.VOX_LLM && window.VOX_LLM.available)) return;
     const ds = docSig(doc);
-    llmBusy = true; lastSig = ""; runAnalyze();          // repaint with the busy state
+    if (llmToken) llmToken.canceled = true;              // stop any prior run before starting a new one
+    const token = llmToken = { canceled: false };
+    llmBusy = true; llmProgress = { done: 0, total: 0 }; lastSig = ""; runAnalyze();   // repaint with the busy state
+    // Paint each chunk's merged result as it arrives — a 30–60 s run feels responsive instead of a
+    // single long spinner. The partial is cached (status:"partial") so it survives mode switches.
+    const onProgress = (p) => {
+      if (token.canceled) return;
+      llmProgress = { done: p.done, total: p.total };
+      if (p.phase === "partial" && p.data) { llmCache = { sig: ds, data: p.data, status: "partial" }; }
+      lastSig = ""; runAnalyze();
+    };
     try {
-      const data = await window.VOX_LLM.analyze(doc);
-      llmCache = { sig: ds, data };
+      const data = await window.VOX_LLM.analyze(doc, onProgress, token);
+      if (!token.canceled) llmCache = { sig: ds, data, status: "complete" };
     } catch (e) {
-      llmCache = null;
-      const p = mode === "graph" ? $("graphPanel") : $("interruptPanel");
-      if (p) { const s = document.createElement("div"); s.className = "conv-hint"; s.textContent = "On-device AI couldn't analyze this one — showing the quick estimate."; p.prepend(s); }
+      const m = String((e && e.message) || e);
+      if (m === "canceled") return;                      // superseded by a newer run — leave its state alone
+      if (!(llmCache && llmCache.sig === ds)) {           // keep any partial we already painted
+        llmCache = null;
+        const p = mode === "graph" ? $("graphPanel") : $("interruptPanel");
+        if (p) { const s = document.createElement("div"); s.className = "conv-hint"; s.textContent = "On-device AI couldn't analyze this one — showing the quick estimate."; p.prepend(s); }
+      }
     } finally {
-      llmBusy = false; lastSig = ""; runAnalyze();        // repaint with the LLM result (or heuristic)
+      if (token === llmToken) { llmBusy = false; llmProgress = null; llmToken = null; lastSig = ""; runAnalyze(); }
     }
   }
 

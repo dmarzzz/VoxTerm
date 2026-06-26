@@ -20,9 +20,14 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const CFG = {
-    // The bundled Qwen2.5-0.5B .task has an effective KV cache of 1280 tokens (prompt + output), so
-    // keep the transcript small: ~1400 chars ≈ 400 tokens, leaving room for the schema + JSON output.
-    maxChars: 1400,        // cap transcript fed to the model
+    // The bundled Qwen2.5-0.5B .task has an effective KV cache of ~1280 tokens (prompt + output). The
+    // schema/instructions are ~320 tok and we reserve output, so ONE chunk's transcript body is capped
+    // at ~2000 chars (~600 tok). A long conversation is split into overlapping chunks and the per-chunk
+    // results merged — so the model sees the WHOLE thing, not just the last minute.
+    chunkChars: 2000,      // transcript body per chunk
+    overlapChars: 350,     // trailing context re-included in the next chunk (so a straddling event is seen whole)
+    maxChunks: 16,         // hard cap; anything beyond is logged + dropped (never silently truncated)
+    dedupSec: 3,           // two interruptions within this many seconds + same type = the same event
     maxTokens: 512,        // advisory generation cap (the native side fixes the model's total window)
     temperature: 0.2,      // near-greedy: we want structure, not creativity
     topK: 40,
@@ -30,21 +35,43 @@
     timeoutMs: 180000,     // first call also loads ~550 MB of weights — allow generous headroom
   };
 
-  // ---- transcript -> prompt --------------------------------------------------
-  function transcriptText(turns) {
-    const lines = turns.map((t) => {
-      const ts = t.t_offset_hms ? `[${t.t_offset_hms}] ` : "";
-      const spk = t.speaker ? `${t.speaker}: ` : "";
-      return `${ts}${spk}${(t.text || "").replace(/\s+/g, " ").trim()}`;
-    });
-    let body = lines.join("\n");
-    if (body.length > CFG.maxChars) body = body.slice(body.length - CFG.maxChars); // keep the most recent
-    return body;
+  // ---- transcript -> chunks --------------------------------------------------
+  // One rendered line per turn, carrying its real start time so chunks know their span and the model
+  // sees absolute [hh:mm:ss] stamps (not chunk-relative ones).
+  function renderLines(turns) {
+    return turns.map((t) => ({
+      text: `${t.t_offset_hms ? `[${t.t_offset_hms}] ` : ""}${t.speaker ? `${t.speaker}: ` : ""}${(t.text || "").replace(/\s+/g, " ").trim()}`,
+      t: typeof t.t_offset === "number" ? t.t_offset : null,
+    }));
+  }
+
+  // Greedily pack whole lines into ~chunkChars chunks, backing up ~overlapChars between chunks so an
+  // interruption near a boundary lands whole in at least one chunk. Always makes forward progress.
+  function chunkLines(turns) {
+    const lines = renderLines(turns);
+    const chunks = [];
+    let i = 0;
+    while (i < lines.length && chunks.length < CFG.maxChunks) {
+      let body = "", j = i;
+      while (j < lines.length && (!body || body.length + lines[j].text.length + 1 <= CFG.chunkChars)) {
+        body += (body ? "\n" : "") + lines[j].text; j++;
+      }
+      chunks.push({ body, index: chunks.length });
+      if (j >= lines.length) { i = j; break; }
+      let back = j, ov = 0;                                  // re-include trailing context in the next chunk
+      while (back > i + 1 && ov < CFG.overlapChars) { back--; ov += lines[back].text.length + 1; }
+      i = Math.max(i + 1, back);
+    }
+    if (i < lines.length) console.warn(`voxllm: transcript exceeded ${CFG.maxChunks} chunks — analyzed the first ${i}/${lines.length} turns`);
+    return chunks;
   }
 
   // Compact, small-model-friendly schema (NOT the node/edge graph directly — that's too referential
   // for a 0.5-1.5B model to keep consistent). We transform this into the contract in JS.
-  function buildPrompt(turns) {
+  function buildPrompt(body, ctx) {
+    const seg = (ctx && ctx.total > 1)
+      ? [`This is segment ${ctx.index + 1} of ${ctx.total} of a longer conversation. Report only topics/interruptions visible in THIS segment; use the [hh:mm:ss] timestamps shown.`, ""]
+      : [];
     return [
       "You analyze a conversation transcript. The transcript may be a single ASR speaker label even",
       "when several people talk — INFER distinct speakers from content and turn-taking.",
@@ -66,7 +93,8 @@
       "type=rapid for a fast back-and-forth handoff. Use timestamps from the transcript. Do not invent",
       "content not in the transcript. Keep it concise. Output JSON only.",
       "",
-      'Transcript:\n"""\n' + transcriptText(turns) + '\n"""',
+      ...seg,
+      'Transcript:\n"""\n' + body + '\n"""',
     ].join("\n");
   }
 
@@ -87,6 +115,13 @@
       if (st.phase === "error") throw new Error(st.error || "llm generation failed");
       if (Date.now() - t0 > CFG.timeoutMs) throw new Error("llm timeout");
     }
+  }
+  // Abort an in-flight generation (a multi-chunk run can take 30–60 s; the user can leave the mode or
+  // start a fresh Sharpen). Bumping `gen` makes the poll loop above throw; cancel_generate stops the
+  // native decode so the next chunk/run starts clean.
+  function cancelGenerate() {
+    gen++;
+    invoke("plugin:voxllm|cancel_generate").catch(() => {});
   }
 
   // ---- JSON extraction / repair ----------------------------------------------
@@ -160,6 +195,63 @@
     };
   }
 
+  // ---- merge per-chunk model output ------------------------------------------
+  const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  // Combine the parsed JSON from every chunk into ONE parsed-shaped object, then run it through the
+  // single toContract() below — so all the node/edge id logic stays in one place and chunk-local ids
+  // can never collide. Topics dedup by title (points unioned); interruptions dedup by time+type.
+  function mergeParsed(list) {
+    const topics = [], byTitle = new Map();
+    for (const p of list) {
+      for (const tp of (Array.isArray(p.topics) ? p.topics : [])) {
+        const key = norm(tp.title), pts = Array.isArray(tp.points) ? tp.points : [];
+        if (key && byTitle.has(key)) byTitle.get(key).points.push(...pts);
+        else { const nt = { title: tp.title, points: pts.slice() }; if (key) byTitle.set(key, nt); topics.push(nt); }
+      }
+    }
+    const kept = [];
+    for (const p of list) {
+      for (const e of (Array.isArray(p.interruptions) ? p.interruptions : [])) {
+        const sec = hmsToSec(e.t), type = norm(e.type) === "rapid" ? "rapid" : "overlap";
+        const score = (e.by ? 1 : 0) + (e.of ? 1 : 0) + String(e.note || "").length;
+        const dup = kept.find((x) => x._type === type && (
+          (x._sec != null && sec != null && Math.abs(x._sec - sec) <= CFG.dedupSec) ||
+          (x._sec == null && sec == null && norm(x.by) === norm(e.by) && norm(x.of) === norm(e.of))));
+        if (dup) { if (score > dup._score) Object.assign(dup, e, { _type: type, _sec: sec, _score: score }); }
+        else kept.push(Object.assign({}, e, { _type: type, _sec: sec, _score: score }));
+      }
+    }
+    const interruptions = kept.map(({ _type, _sec, _score, ...e }) => e);
+    return { topics, interruptions };
+  }
+
+  // Run the whole transcript through the model in overlapping chunks, merging as each finishes. Reports
+  // progress (and an incremental merged result) via onProgress so the UI can paint as it goes, and
+  // honors token.canceled so a superseded run stops promptly. Throws only if NOTHING parsed.
+  async function analyzeChunked(doc, onProgress, token) {
+    const turns = (doc && doc.turns) || [];
+    if (!turns.length) throw new Error("no transcript");
+    const chunks = chunkLines(turns);
+    const parsedList = [];
+    for (const ch of chunks) {
+      if (token && token.canceled) throw new Error("canceled");
+      if (onProgress) onProgress({ phase: "chunk", done: ch.index, total: chunks.length });
+      let parsed = null;
+      try { parsed = parseModelJson(await generate(buildPrompt(ch.body, { index: ch.index, total: chunks.length }))); }
+      catch (e) {
+        const m = String((e && e.message) || e);
+        if (m === "canceled" || m === "superseded") throw e;   // abort the whole run
+        /* otherwise: a junk/failed chunk — skip it, keep going */
+      }
+      if (parsed && (Array.isArray(parsed.topics) || Array.isArray(parsed.interruptions))) {
+        parsedList.push(parsed);
+        if (onProgress) onProgress({ phase: "partial", done: ch.index + 1, total: chunks.length, data: toContract(mergeParsed(parsedList), doc) });
+      }
+    }
+    if (!parsedList.length) throw new Error("model returned no usable JSON");
+    return toContract(mergeParsed(parsedList), doc);
+  }
+
   // ---- expose the on-device LLM analyzer (OPT-IN — the UI runs it on demand) --
   // Crucially this does NOT replace window.VOX_ANALYZE (the heuristic). The heuristic keeps rendering
   // the modes instantly and live; the UI calls window.VOX_LLM.analyze() only when the user taps
@@ -170,13 +262,10 @@
       available: true,
       model: model || "on-device LLM",
       // Throws on failure; the caller keeps the heuristic that's already on screen and shows a notice.
-      async analyze(doc) {
-        const turns = (doc && doc.turns) || [];
-        if (!turns.length) throw new Error("no transcript");
-        const parsed = parseModelJson(await generate(buildPrompt(turns)));
-        if (!parsed || !Array.isArray(parsed.topics)) throw new Error("model returned no usable JSON");
-        return toContract(parsed, doc);
-      },
+      // onProgress (optional): {phase:"chunk"|"partial", done, total, data?}. token (optional):
+      // {canceled} — set canceled=true to stop a long multi-chunk run.
+      analyze(doc, onProgress, token) { return analyzeChunked(doc, onProgress, token); },
+      cancel: cancelGenerate,
     };
     if (window.VOX_CONV && window.VOX_CONV.llmReady) window.VOX_CONV.llmReady();   // surface the Sharpen button
   }
