@@ -104,6 +104,8 @@
     return toMarkdown(doc, renames);   // md (default; also feeds copy/summarize-for-AI)
   }
 
+  const AUTOSAVE_MS = 20000;   // persist the rough live transcript at least this often while recording
+
   class LocalBackend {
     constructor() {
       window.VOX_ONDEVICE = true;
@@ -114,6 +116,7 @@
       this._done = false;        // terminal (done/error) edge already emitted for this take?
       this._em = null;
       this._timer = null;
+      this._lastSave = 0;        // ms timestamp of the last recording autosave (0 = none yet this take)
     }
 
     // No audio store on-device: return the path as-is. app.js's range-probe fetch 404s → the player
@@ -130,7 +133,7 @@
             return { models: [MODEL_LABEL], default_model: MODEL_LABEL, languages: { en: "English" }, input_devices: [] };
           case "/api/record/start":
             this._stem = newStem();
-            this._lastPhase = "idle"; this._sawActive = false; this._done = false;
+            this._lastPhase = "idle"; this._sawActive = false; this._done = false; this._lastSave = 0;
             this._startPoll();                                 // resume polling for this take
             await invoke("plugin:voxasr|start_transcribe");    // pends on the mic-permission prompt
             return { ok: true };
@@ -187,6 +190,23 @@
       if (this._done || st.phase === "idle") this._stopPoll();
     }
 
+    // Crash insurance: while recording, persist the rough live transcript (finalized windows + the
+    // in-progress partial) to localStorage every AUTOSAVE_MS. The authoritative pass at stop overwrites
+    // this under the same stem; if the app dies mid-take, this is what survives — losing at most the
+    // current ~30 s window instead of the whole session. Throttled and best-effort (storage-full is
+    // swallowed; the final pass would surface a real save error).
+    _autosave(st) {
+      if (!this._stem) return;
+      const now = Date.now();
+      if (this._lastSave && now - this._lastSave < AUTOSAVE_MS) return;
+      const segs = (st.liveLines || []).filter((s) => s && s.text).slice();
+      const lp = st.livePartial;
+      if (lp && lp.text) segs.push(lp);     // include the in-progress window so the newest words aren't lost
+      if (!segs.length) return;             // nothing decoded yet — don't write an empty placeholder
+      const doc = buildDoc(this._stem, segs, st.elapsed || 0);
+      try { localStorage.setItem(LS_PREFIX + this._stem, JSON.stringify(doc)); this._lastSave = now; } catch (_) {/* storage full — final pass reports it */}
+    }
+
     _frameFor(st) {
       const phase = st.phase || "idle";
       let frame;
@@ -203,6 +223,7 @@
           recording: true, elapsed: st.elapsed || 0, level: st.level || 0, job: { state: "idle" },
           live: { active: true, lines: lines, partial: partial },
         };
+        this._autosave(st);   // periodically persist the rough live transcript so a crash mid-take isn't total loss
       } else if (phase === "transcribing") {
         this._sawActive = true;
         frame = { recording: false, job: { state: "transcribing", frac: 0, msg: "Transcribing…" } };

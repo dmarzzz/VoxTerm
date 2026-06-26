@@ -22,13 +22,15 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineStream
 import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
-import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
 private const val SAMPLE_RATE = 16000
 private const val WHISPER_WINDOW = 29 * SAMPLE_RATE   // just under Whisper's 30 s cap (it truncates >30 s)
+private const val MAX_REPEAT_PHRASE = 12              // longest word-run de-looping scans for (see collapseRepeats)
 
 /**
  * On-device speech-to-text. Records the mic with AudioRecord (16 kHz mono PCM16) into a buffer and,
@@ -56,9 +58,13 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile private var recognizer: OfflineRecognizer? = null
     private val modelFiles = listOf("encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt")
 
-    // Raw PCM16 of the current take. Written by the mic worker; the decode reads a snapshot captured
-    // at stop (after the worker is joined), and a new take reassigns this field.
-    @Volatile private var pcmBytes = ByteArrayOutputStream()
+    // Raw PCM16 of the current take is spilled to a per-generation file on disk (filesDir/take-<gen>.pcm),
+    // NOT held in RAM — a long take (45 min ≈ 86 MB) would otherwise OOM-crash the app, and the live
+    // loop's old full-buffer copy churned the heap every pass. The mic worker appends; readers (live
+    // loop, final decode) mmap-read bounded windows via RandomAccessFile. `samplesWritten` is the count
+    // of PCM16 samples flushed so far — readers only read up to it so they never see unwritten bytes.
+    @Volatile private var samplesWritten = 0
+    private fun takeFile(gen: Int) = File(activity.filesDir, "take-$gen.pcm")
     // Polled state the webview reads. `phase` drives the GUI's record/transcribe/done state machine.
     @Volatile private var phase = "idle"          // idle | recording | transcribing | done | error
     @Volatile private var elapsedSec = 0.0
@@ -149,10 +155,45 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         try {
             stream.acceptWaveform(samples, SAMPLE_RATE)   // (samples, sampleRate)
             rec.decode(stream)
-            rec.getResult(stream).text.trim()
+            collapseRepeats(rec.getResult(stream).text.trim())
         } finally {
             stream.release()                              // never leak the native stream
         }
+    }
+
+    // Whisper (like any autoregressive ASR) can fall into a repetition loop on ambiguous, noisy, or
+    // near-silent audio, emitting the same word or phrase many times in a row ("But it's like. But
+    // it's like. But it's like. …"). Collapse any phrase of 1..MAX_REPEAT_PHRASE words that repeats
+    // 3+ times consecutively down to a single copy. Conservative by design: a phrase must recur at
+    // least twice MORE than its first occurrence, so natural doubles ("no no", "very very") survive.
+    // Applied to every decode result (live preview + final pass), so segments are clean at the source.
+    private fun collapseRepeats(text: String): String {
+        if (text.isEmpty()) return text
+        val words = text.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.size < 2) return text
+        val out = ArrayList<String>(words.size)
+        var i = 0
+        while (i < words.size) {
+            out.add(words[i])
+            var collapsed = false
+            val maxLen = minOf(MAX_REPEAT_PHRASE, out.size)
+            for (len in 1..maxLen) {
+                val tailStart = out.size - len            // the phrase just emitted (its first occurrence)
+                var j = i + 1
+                var reps = 0
+                while (j + len <= words.size && phraseMatches(out, tailStart, words, j, len)) {
+                    reps++; j += len
+                }
+                if (reps >= 2) { i = j; collapsed = true; break }   // keep the one copy in `out`, drop the repeats
+            }
+            if (!collapsed) i++
+        }
+        return out.joinToString(" ")
+    }
+
+    private fun phraseMatches(a: List<String>, aStart: Int, b: List<String>, bStart: Int, len: Int): Boolean {
+        for (k in 0 until len) if (a[aStart + k] != b[bStart + k]) return false
+        return true
     }
 
     @Command
@@ -187,7 +228,16 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         worker?.join(3000)
         liveWorker?.join(3000)            // ditto for the prior take's live decoder
         running = true
-        pcmBytes = ByteArrayOutputStream(SAMPLE_RATE * 2 * 60)   // ~1 min preallocated (32 KB/s)
+        // Reclaim any orphaned take files (e.g. from a take whose process was killed before decode's
+        // cleanup ran) so spilled PCM never accumulates on disk across sessions.
+        activity.filesDir.listFiles { f -> f.name.startsWith("take-") && f.name.endsWith(".pcm") }
+            ?.forEach { it.delete() }
+        // Pre-create THIS take's file so the live reader can open it immediately — without this it could
+        // race the mic worker's FileOutputStream and lose live preview to a FileNotFoundException. The
+        // mic worker's FileOutputStream(...) truncates this empty file in place (same inode), so the
+        // reader's open handle still sees every appended sample.
+        try { takeFile(gen).createNewFile() } catch (_: Exception) {}
+        samplesWritten = 0
         synchronized(segments) { segments.clear() }
         synchronized(liveSegments) { liveSegments.clear() }
         livePartialText = ""; livePartialStart = 0.0
@@ -208,21 +258,25 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
                 }
                 val buf = ShortArray(minBuf)
                 val bytes = ByteArray(minBuf * 2)
-                val out = pcmBytes
-                audio.startRecording()
-                while (running && generation == gen) {
-                    val n = audio.read(buf, 0, buf.size)
-                    if (n <= 0) continue
-                    var sumSq = 0.0
-                    for (i in 0 until n) {
-                        val s = buf[i].toInt()
-                        bytes[2 * i] = (s and 0xff).toByte()
-                        bytes[2 * i + 1] = ((s shr 8) and 0xff).toByte()
-                        val v = s / 32768.0; sumSq += v * v
+                // Spill PCM straight to disk (unbuffered FileOutputStream → each write hits the OS file,
+                // so a RandomAccessFile reader in another thread sees it as soon as samplesWritten is bumped).
+                FileOutputStream(takeFile(gen)).use { out ->
+                    audio.startRecording()
+                    while (running && generation == gen) {
+                        val n = audio.read(buf, 0, buf.size)
+                        if (n <= 0) continue
+                        var sumSq = 0.0
+                        for (i in 0 until n) {
+                            val s = buf[i].toInt()
+                            bytes[2 * i] = (s and 0xff).toByte()
+                            bytes[2 * i + 1] = ((s shr 8) and 0xff).toByte()
+                            val v = s / 32768.0; sumSq += v * v
+                        }
+                        out.write(bytes, 0, n * 2)
+                        samplesWritten += n          // publish AFTER the write so readers never read past it
+                        levelRms = sqrt(sumSq / n)
+                        elapsedSec = samplesWritten / SAMPLE_RATE.toDouble()
                     }
-                    out.write(bytes, 0, n * 2)
-                    levelRms = sqrt(sumSq / n)
-                    elapsedSec = out.size() / 2.0 / SAMPLE_RATE
                 }
             } catch (e: Exception) {
                 fail(e.message ?: "recording error", gen)
@@ -246,52 +300,62 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         worker?.join(2000)                  // the mic worker exits on running=false; beginCapture re-joins
         liveWorker?.join(2000)              // stop the live decoder before the final pass (no concurrent decode)
         invoke.resolve(JSObject())          // resolve now; transcription runs async, reported via poll
-        val gen = generation
-        val take = pcmBytes                 // capture THIS take's buffer (a new take reassigns the field)
+        val gen = generation                // a new take bumps generation → decodeTake aborts cleanly
         phase = "transcribing"
-        thread(start = true) { decodeTake(take.toByteArray(), gen) }
+        thread(start = true) { decodeTake(gen) }
     }
 
-    // Transcribe a finished take: split into <=29 s windows (under Whisper's 30 s cap) and join.
-    // Aborts quietly if a newer take started (generation changed) so it never clobbers its phase.
-    private fun decodeTake(snapshot: ByteArray, gen: Int) {
+    // Transcribe a finished take by streaming <=29 s windows (under Whisper's 30 s cap) off the spilled
+    // PCM file — only one window is ever resident in RAM. Aborts quietly if a newer take started
+    // (generation changed) so it never clobbers its phase. Deletes the take file when finished.
+    private fun decodeTake(gen: Int) {
+        val file = takeFile(gen)
         try {
-            durationSec = snapshot.size / 2.0 / SAMPLE_RATE
-            val total = snapshot.size / 2
-            if (total == 0) { if (generation == gen) phase = "done"; return }
+            val total = (if (file.exists()) file.length() else 0L) / 2
+            durationSec = total / SAMPLE_RATE.toDouble()
+            if (total == 0L) { if (generation == gen) phase = "done"; return }
             val rec = ensureRecognizer(stagedModelDir())
-            var off = 0
-            while (off < total && generation == gen) {
-                val end = windowEnd(snapshot, off, total)
-                val samples = FloatArray(end - off) {
-                    val b = (off + it) * 2
-                    val s = ((snapshot[b + 1].toInt() shl 8) or (snapshot[b].toInt() and 0xff)).toShort()
-                    s / 32768.0f
+            RandomAccessFile(file, "r").use { raf ->
+                var off = 0L
+                while (off < total && generation == gen) {
+                    val hardEnd = minOf(off + WHISPER_WINDOW, total)
+                    val win = ByteArray(((hardEnd - off) * 2).toInt())
+                    raf.seek(off * 2)
+                    raf.readFully(win)
+                    val len = windowLen(win, hardEnd >= total)   // nudge the cut off a quiet frame
+                    val samples = FloatArray(len) {
+                        val b = it * 2
+                        val s = ((win[b + 1].toInt() shl 8) or (win[b].toInt() and 0xff)).toShort()
+                        s / 32768.0f
+                    }
+                    val text = decodeChunk(rec, samples)
+                    if (text.isNotEmpty()) segments.add(text to off / SAMPLE_RATE.toDouble())
+                    off += len
                 }
-                val text = decodeChunk(rec, samples)
-                if (text.isNotEmpty()) segments.add(text to off / SAMPLE_RATE.toDouble())
-                off = end
             }
             if (generation == gen) phase = "done"
         } catch (e: Exception) {
             if (generation == gen) { errorMsg = e.message ?: "transcription error"; phase = "error" }
+        } finally {
+            file.delete()   // reclaim the spilled PCM; the transcript now lives in `segments`
         }
     }
 
-    // End sample of the next decode window: the <=29 s cap, but if more audio remains, nudge the cut
-    // to the quietest 10 ms frame in the last 2 s so a word straddling the boundary isn't sliced.
-    private fun windowEnd(pcm: ByteArray, off: Int, total: Int): Int {
-        val hardEnd = off + WHISPER_WINDOW
-        if (hardEnd >= total) return total
+    // Samples of `win` (one candidate window, starting at the window's first sample) to actually
+    // consume: the whole window if it reaches the take's end, otherwise nudged back to the quietest
+    // 10 ms frame in the last 2 s so a word straddling the boundary isn't sliced.
+    private fun windowLen(win: ByteArray, isLast: Boolean): Int {
+        val samples = win.size / 2
+        if (isLast || samples < WHISPER_WINDOW) return samples
         val frame = SAMPLE_RATE / 100                 // 10 ms
-        var bestIdx = hardEnd
+        var bestIdx = samples
         var bestEnergy = Double.MAX_VALUE
-        var i = off + WHISPER_WINDOW - 2 * SAMPLE_RATE
-        while (i + frame <= hardEnd) {
+        var i = samples - 2 * SAMPLE_RATE
+        while (i + frame <= samples) {
             var sum = 0.0
             for (j in i until i + frame) {
                 val b = j * 2
-                val s = ((pcm[b + 1].toInt() shl 8) or (pcm[b].toInt() and 0xff)).toShort()
+                val s = ((win[b + 1].toInt() shl 8) or (win[b].toInt() and 0xff)).toShort()
                 val v = s / 32768.0; sum += v * v
             }
             if (sum < bestEnergy) { bestEnergy = sum; bestIdx = i + frame }
@@ -315,37 +379,45 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
             Log.w("voxasr", "live preview disabled (recognizer init failed): ${e.message}")
             return
         }
-        val src = pcmBytes                  // this take's growing buffer (the mic worker writes to it)
-        var base = 0                        // first sample of the in-progress window
-        var lastEnd = -1                    // sample count at the last decode (skip if nothing new)
-        val minNew = SAMPLE_RATE / 2        // re-decode once >=0.5 s of fresh audio has accumulated
-        while (running && generation == gen) {
-            val total = src.size() / 2
-            val end = minOf(base + WHISPER_WINDOW, total)
-            val capped = (end - base) >= WHISPER_WINDOW && end != lastEnd   // window just hit 29 s
-            if (end - base < minNew || (end - lastEnd < minNew && !capped)) {
-                try { Thread.sleep(150) } catch (_: InterruptedException) {}
-                continue
+        // Read the in-progress window straight off the spilled PCM file (only `samplesWritten` samples
+        // are flushed), so the live loop never copies the whole growing take like it used to.
+        val raf = try { RandomAccessFile(takeFile(gen), "r") } catch (e: Exception) {
+            Log.w("voxasr", "live preview disabled (take file unavailable): ${e.message}"); return
+        }
+        try {
+            var base = 0                    // first sample of the in-progress window
+            var lastEnd = -1                // sample count at the last decode (skip if nothing new)
+            val minNew = SAMPLE_RATE / 2    // re-decode once >=0.5 s of fresh audio has accumulated
+            while (running && generation == gen) {
+                val total = samplesWritten
+                val end = minOf(base + WHISPER_WINDOW, total)
+                val capped = (end - base) >= WHISPER_WINDOW && end != lastEnd   // window just hit 29 s
+                if (end - base < minNew || (end - lastEnd < minNew && !capped)) {
+                    try { Thread.sleep(150) } catch (_: InterruptedException) {}
+                    continue
+                }
+                val win = ByteArray((end - base) * 2)
+                try { raf.seek(base.toLong() * 2); raf.readFully(win) }
+                catch (e: Exception) { try { Thread.sleep(150) } catch (_: InterruptedException) {}; continue }
+                val samples = FloatArray(end - base) {
+                    val b = it * 2
+                    val s = ((win[b + 1].toInt() shl 8) or (win[b].toInt() and 0xff)).toShort()
+                    s / 32768.0f
+                }
+                val text = try { decodeChunk(rec, samples) } catch (e: Exception) { "" }
+                if (generation != gen) break
+                livePartialStart = base / SAMPLE_RATE.toDouble()
+                livePartialText = text
+                lastEnd = end
+                if (end - base >= WHISPER_WINDOW) {              // window full → finalize, open the next
+                    if (text.isNotEmpty()) liveSegments.add(text to base / SAMPLE_RATE.toDouble())
+                    base = end
+                    livePartialText = ""
+                    lastEnd = -1
+                }
             }
-            val snap = src.toByteArray()    // ByteArrayOutputStream methods are synchronized → consistent prefix
-            val hi = minOf(end, snap.size / 2)
-            if (hi - base < minNew) { try { Thread.sleep(150) } catch (_: InterruptedException) {}; continue }
-            val samples = FloatArray(hi - base) {
-                val b = (base + it) * 2
-                val s = ((snap[b + 1].toInt() shl 8) or (snap[b].toInt() and 0xff)).toShort()
-                s / 32768.0f
-            }
-            val text = try { decodeChunk(rec, samples) } catch (e: Exception) { "" }
-            if (generation != gen) break
-            livePartialStart = base / SAMPLE_RATE.toDouble()
-            livePartialText = text
-            lastEnd = hi
-            if (hi - base >= WHISPER_WINDOW) {              // window full → finalize, open the next
-                if (text.isNotEmpty()) liveSegments.add(text to base / SAMPLE_RATE.toDouble())
-                base = hi
-                livePartialText = ""
-                lastEnd = -1
-            }
+        } finally {
+            try { raf.close() } catch (_: Exception) {}
         }
     }
 
