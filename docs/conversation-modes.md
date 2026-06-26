@@ -35,13 +35,27 @@ interruptions: {
 
 ## Heuristic backend (shipping now, fully offline)
 
-- **Topics** — sequential keyword segmentation: a turn stays on-topic while its keywords overlap the
-  topic's recent window (overlap coefficient); a long silence (`topicGapSec`) forces a boundary.
-- **Graph** — root → topics → utterances, with reply/rebut edges; a reply by a different speaker is a
-  retort/rebut (multi-speaker docs only).
+- **Topics** — sequential keyword segmentation with an **IDF-weighted** overlap coefficient (distinctive
+  words hold a topic together; ubiquitous filler barely counts), **hysteresis** (two off-topic turns in
+  a row before a break, so one stray line doesn't fragment a topic; backchannels are neutral), and a
+  **singleton-merge** post-pass (a lone-turn topic folds into its more-similar neighbor). A long silence
+  (`topicGapSec`) still forces a boundary.
+- **Graph** — root → topics → utterances. Argument typing from cheap lexical cues: an agreement cue
+  ("exactly", "agree", …) makes the tie a **`supports`** edge; a disagreement/contrast cue ("but",
+  "actually", "however", …) makes a **`counter`** (different speaker) or self-**`retort`** and a
+  `rebuts` edge; a different-speaker reply with no cue is a `retort`. Questions also catch short
+  wh-initial turns, since ASR usually drops the "?".
 - **Interruptions** — *overlap*: next turn starts before the previous turn's estimated end (estimated
   from word count × speaking rate), gated on a real speaker change or, single-speaker, a strict
   trailing-dash cut-off cue. *rapidSwitch*: a speaker change within `rapidGapSec`.
+
+### Rendering — top-down, mobile-first
+
+The Graph renders as a **vertical HTML flow** (`gui/static/conversation.js` `renderGraph`): each topic
+is a full-width section header, its utterances are cards beneath it in time order, and argument
+relationships show inline as an indent + `↳ rebuts` / `↳ supports` rather than horizontal edges — so it
+reads cleanly on a phone in portrait (vertical scroll only, no horizontal pan). A filter row offers
+**All · Arguments · by-speaker**. Tapping a card seeks the audio (`data-seek` → `VOX_SEEK`).
 
 ### Honest limits on mobile (single-speaker on-device ASR)
 
@@ -88,10 +102,23 @@ sends (`CFG.maxChars`).
 4. ProGuard keeps for `com.google.mediapipe.**` / protobuf in `gen/android/app/proguard-rules.pro`
    (the AAR ships no consumer rules and release minifies).
 
-**JSON reliability:** MediaPipe has no grammar/constrained decoding, so a 0.5B model can emit malformed
-or truncated JSON. Mitigated by (a) a compact, small-model-friendly schema (topics→points, not raw
-node/edge ids — transformed to the contract in JS), (b) tolerant JSON extraction/repair, and (c)
-heuristic fallback. For hard-guaranteed JSON, the llama.cpp/GBNF path is the documented upgrade.
+**Output reliability:** MediaPipe has no grammar/constrained decoding, so a 0.5B model emits malformed or
+truncated JSON. The prompt now asks for a **flat LINE grammar** instead of nested JSON —
+`T: <title>` / `P: <speaker> | <kind> | <mm:ss> | <text>` / `I: <type> | <mm:ss> | <by> | <of> | <note>`
+— which a small model keeps consistent far better, and where a truncated final line is simply dropped
+rather than losing the whole chunk. `parseModelLines()` turns it back into the same `{topics, points}`
+shape `toContract()` consumes. Belt-and-suspenders: JSON is still accepted as a fallback (now with a
+**truncation repair** that closes unclosed strings/brackets and drops a dangling element), chunk parses
+are **content-addressed cached** (re-Sharpen after a small edit reuses unchanged chunks), and any total
+failure **falls back to the heuristic**. For hard-guaranteed JSON, the llama.cpp/GBNF path remains the
+documented upgrade.
+
+**Tap-to-insight (💡):** in the Graph, each topic header and leaf card carries a `💡` (only when a model
+is loaded). Tapping it runs a **focused single-shot** prompt (`window.VOX_LLM.insight`) over just that
+topic's points — "what is this about and why does it matter" — and shows a 1–2 sentence insight inline
+(cached per node, tap again to collapse). It's much cheaper than the whole-conversation Sharpen, reuses
+the same generic `voxllm` runner (no native change), is disabled while a Sharpen runs, and a new tap
+supersedes an in-flight one.
 
 **Build + publish:** `.github/workflows/android-experimental.yml` builds the arm64 APK (Whisper model +
 LLM `.task` bundled) and publishes a rolling **`android-experimental`** prerelease — separate from the

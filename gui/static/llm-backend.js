@@ -66,44 +66,58 @@
     return chunks;
   }
 
-  // Compact, small-model-friendly schema (NOT the node/edge graph directly — that's too referential
-  // for a 0.5-1.5B model to keep consistent). We transform this into the contract in JS.
+  // Compact LINE grammar — a 0.5-1.5B model keeps a flat one-item-per-line format FAR more reliably
+  // than nested JSON (and a truncated last line is simply dropped, where a truncated JSON object loses
+  // the whole chunk). parseModelLines() turns it back into the same {topics,points} shape toContract()
+  // consumes; JSON is still accepted as a fallback if the model emits it anyway.
   function buildPrompt(body, ctx) {
     const seg = (ctx && ctx.total > 1)
-      ? [`This is segment ${ctx.index + 1} of ${ctx.total} of a longer conversation. Report only topics/interruptions visible in THIS segment; use the [hh:mm:ss] timestamps shown.`, ""]
-      : [];
+      ? `This is segment ${ctx.index + 1} of ${ctx.total} of a longer conversation; report only what is visible in THIS segment.\n`
+      : "";
     return [
-      "You analyze a conversation transcript. The transcript may be a single ASR speaker label even",
-      "when several people talk — INFER distinct speakers from content and turn-taking.",
+      "You analyze a conversation transcript. It may carry a single ASR speaker label even when several",
+      "people talk — INFER distinct speakers from content and turn-taking.",
       "",
-      "Return ONLY a JSON object (no prose, no markdown fence) with this exact shape:",
-      "{",
-      '  "topics": [',
-      '    { "title": "<=6 word topic label",',
-      '      "points": [',
-      '        { "speaker": "inferred name or A/B/C", "kind": "claim|question|statement|retort|counter",',
-      '          "t": "mm:ss or empty", "text": "<=12 word paraphrase of what was said" } ] } ],',
-      '  "interruptions": [',
-      '    { "type": "overlap|rapid", "t": "mm:ss", "by": "speaker who cut in", "of": "speaker cut off",',
-      '      "note": "<=8 words" } ]',
-      "}",
+      "Output ONE item per line and NOTHING else (no prose, no JSON, no markdown). Use exactly these forms:",
+      "T: <short topic title, up to 6 words>",
+      "P: <speaker> | <claim|question|statement|retort|counter> | <mm:ss> | <up to 12 word paraphrase>",
+      "I: <overlap|rapid> | <mm:ss> | <who cut in> | <who was cut off> | <up to 8 word note>",
       "",
-      "Rules: kind=retort when a speaker pushes back on the previous point; kind=counter for a direct",
-      "counter-argument; kind=question for a question. type=overlap when someone speaks over another;",
-      "type=rapid for a fast back-and-forth handoff. Use timestamps from the transcript. Do not invent",
-      "content not in the transcript. Keep it concise. Output JSON only.",
+      "Put each P line under the T line it belongs to. retort = pushes back on the previous point;",
+      "counter = a direct counter-argument; question = a question. overlap = spoke over someone; rapid =",
+      "a fast back-and-forth handoff. Use the [hh:mm:ss] stamps shown. Do not invent content. Lines only.",
       "",
-      ...seg,
-      'Transcript:\n"""\n' + body + '\n"""',
+      seg + 'Transcript:\n"""\n' + body + '\n"""',
     ].join("\n");
+  }
+
+  // A focused, single-shot insight about ONE topic — plain text, one short generation, far cheaper than
+  // the multi-chunk Sharpen. Backs the graph's tap-to-insight (💡).
+  function insightPrompt(payload) {
+    const pts = (payload.points || []).slice(0, 12)
+      .map((p) => `- ${p.speaker ? p.speaker + ": " : ""}${(p.text || "").trim()}`).join("\n");
+    return [
+      "You are a sharp conversation analyst. In 1-2 sentences, explain what this part of the conversation",
+      "is about and why it matters — be concrete and specific to the content, do not restate it verbatim,",
+      "and do not add facts that aren't here. You may end with one short follow-up question.",
+      payload.focus ? `Pay particular attention to this point: "${payload.focus}".` : "",
+      "",
+      `Topic: ${payload.label || "(topic)"}`,
+      `Points:\n${pts || "(none)"}`,
+      "",
+      "Insight:",
+    ].filter((x) => x !== "").join("\n");
   }
 
   // ---- run the native LLM ----------------------------------------------------
   let gen = 0;   // bumped per request so a stale poll loop aborts when a newer analyze starts
-  async function generate(prompt) {
+  async function generate(prompt, opts) {
     const my = ++gen;
     await invoke("plugin:voxllm|start_generate", {
-      prompt, maxTokens: CFG.maxTokens, temperature: CFG.temperature, topK: CFG.topK,
+      prompt,
+      maxTokens: (opts && opts.maxTokens) || CFG.maxTokens,
+      temperature: (opts && opts.temperature != null) ? opts.temperature : CFG.temperature,
+      topK: CFG.topK,
     });
     const t0 = Date.now();
     for (;;) {
@@ -124,15 +138,70 @@
     invoke("plugin:voxllm|cancel_generate").catch(() => {});
   }
 
-  // ---- JSON extraction / repair ----------------------------------------------
+  // ---- model output -> { topics, interruptions } -----------------------------
+  const djb2 = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; };
+
+  // Parse the line grammar (what we now prompt for). Tolerant: unknown lines are ignored and a
+  // truncated final line just contributes nothing — so a cut-off generation still yields everything
+  // before the cut, instead of losing the whole chunk to a JSON parse error.
+  function parseModelLines(text) {
+    if (!text) return null;
+    const topics = [], interruptions = [];
+    let cur = null;
+    for (const raw of String(text).split(/\r?\n/)) {
+      const m = /^\s*([TPI])\s*[:|\-]\s*(.+?)\s*$/.exec(raw);
+      if (!m) continue;
+      const tag = m[1].toUpperCase(), f = m[2].split("|").map((s) => s.trim());
+      if (tag === "T") { cur = { title: (f[0] || "").slice(0, 60), points: [] }; topics.push(cur); }
+      else if (tag === "P") {
+        if (!cur) { cur = { title: "(topic)", points: [] }; topics.push(cur); }
+        cur.points.push({ speaker: f[0] || "", kind: (f[1] || "").toLowerCase(), t: f[2] || "", text: f.slice(3).join(" | ").trim() });
+      } else if (tag === "I") {
+        interruptions.push({ type: (f[0] || "").toLowerCase(), t: f[1] || "", by: f[2] || "", of: f[3] || "", note: f.slice(4).join(" | ").trim() });
+      }
+    }
+    return (topics.length || interruptions.length) ? { topics, interruptions } : null;
+  }
+
+  // JSON fallback (the model may still emit JSON). Tries a clean parse, then a truncation repair that
+  // closes unclosed strings/brackets and drops a dangling final element — salvaging the completed prefix.
   function parseModelJson(text) {
     if (!text) return null;
     let s = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-    const a = s.indexOf("{"), b = s.lastIndexOf("}");
-    if (a < 0 || b <= a) return null;
-    s = s.slice(a, b + 1).replace(/,\s*([}\]])/g, "$1");   // strip trailing commas
-    try { return JSON.parse(s); } catch (_) { return null; }
+    const a = s.indexOf("{");
+    if (a < 0) return null;
+    s = s.slice(a);
+    const b = s.lastIndexOf("}");
+    if (b > 0) { try { return JSON.parse(s.slice(0, b + 1).replace(/,\s*([}\]])/g, "$1")); } catch (_) { /* fall through to repair */ } }
+    return repairTruncatedJson(s);
   }
+  function repairTruncatedJson(s) {
+    let inStr = false, esc = false, cut = -1; const stk = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === "{" || c === "[") stk.push(c === "{" ? "}" : "]");
+      else if (c === "}" || c === "]") { stk.pop(); cut = i; }
+      else if (c === "," && stk.length) cut = i - 1;   // last completed element inside a container
+    }
+    if (cut < 1) return null;
+    let body = s.slice(0, cut + 1).replace(/,\s*$/, "");
+    inStr = false; esc = false; const st = [];
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === "{" || c === "[") st.push(c === "{" ? "}" : "]");
+      else if (c === "}" || c === "]") st.pop();
+    }
+    if (inStr) body += '"';
+    while (st.length) body += st.pop();
+    try { return JSON.parse(body.replace(/,\s*([}\]])/g, "$1")); } catch (_) { return null; }
+  }
+
+  // One entry point: line grammar first, JSON (with repair) as a fallback.
+  function parseModel(text) { return parseModelLines(text) || parseModelJson(text); }
 
   // ---- compact JSON -> {graph, interruptions} contract -----------------------
   const hmsToSec = (t) => {
@@ -228,6 +297,8 @@
   // Run the whole transcript through the model in overlapping chunks, merging as each finishes. Reports
   // progress (and an incremental merged result) via onProgress so the UI can paint as it goes, and
   // honors token.canceled so a superseded run stops promptly. Throws only if NOTHING parsed.
+  const chunkCache = new Map();   // content-addressed (djb2 of the chunk body) so re-Sharpen after a
+                                  // small transcript edit reuses every unchanged chunk's parse.
   async function analyzeChunked(doc, onProgress, token) {
     const turns = (doc && doc.turns) || [];
     if (!turns.length) throw new Error("no transcript");
@@ -236,19 +307,26 @@
     for (const ch of chunks) {
       if (token && token.canceled) throw new Error("canceled");
       if (onProgress) onProgress({ phase: "chunk", done: ch.index, total: chunks.length });
-      let parsed = null;
-      try { parsed = parseModelJson(await generate(buildPrompt(ch.body, { index: ch.index, total: chunks.length }))); }
-      catch (e) {
-        const m = String((e && e.message) || e);
-        if (m === "canceled" || m === "superseded") throw e;   // abort the whole run
-        /* otherwise: a junk/failed chunk — skip it, keep going */
+      const ck = djb2(ch.body);
+      let parsed = chunkCache.get(ck) || null;
+      if (!parsed) {
+        try { parsed = parseModel(await generate(buildPrompt(ch.body, { index: ch.index, total: chunks.length }))); }
+        catch (e) {
+          const m = String((e && e.message) || e);
+          if (m === "canceled" || m === "superseded") throw e;   // abort the whole run
+          /* otherwise: a junk/failed chunk — skip it, keep going */
+        }
+        if (parsed && (Array.isArray(parsed.topics) || Array.isArray(parsed.interruptions))) {
+          if (chunkCache.size > 128) chunkCache.clear();
+          chunkCache.set(ck, parsed);
+        }
       }
       if (parsed && (Array.isArray(parsed.topics) || Array.isArray(parsed.interruptions))) {
         parsedList.push(parsed);
         if (onProgress) onProgress({ phase: "partial", done: ch.index + 1, total: chunks.length, data: toContract(mergeParsed(parsedList), doc) });
       }
     }
-    if (!parsedList.length) throw new Error("model returned no usable JSON");
+    if (!parsedList.length) throw new Error("model returned nothing usable");
     return toContract(mergeParsed(parsedList), doc);
   }
 
@@ -265,6 +343,13 @@
       // onProgress (optional): {phase:"chunk"|"partial", done, total, data?}. token (optional):
       // {canceled} — set canceled=true to stop a long multi-chunk run.
       analyze(doc, onProgress, token) { return analyzeChunked(doc, onProgress, token); },
+      // Focused single-shot insight about one topic/leaf (plain text). Throws on failure; the graph's
+      // 💡 handler shows a short error and the rest of the view is unaffected. Reuses the same generate()
+      // + gen guard, so a Sharpen starting mid-insight cleanly supersedes it.
+      async insight(payload) {
+        const txt = await generate(insightPrompt(payload || {}), { maxTokens: 160 });
+        return String(txt || "").replace(/^\s*insight:\s*/i, "").trim();
+      },
       cancel: cancelGenerate,
     };
     if (window.VOX_CONV && window.VOX_CONV.llmReady) window.VOX_CONV.llmReady();   // surface the Sharpen button

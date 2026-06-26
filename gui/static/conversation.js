@@ -30,6 +30,13 @@
   let llmBusy = false;
   let llmProgress = null;            // { done, total } during a multi-chunk Sharpen run, else null
   let llmToken = null;               // { canceled } for the in-flight run, so a new run/leave can stop it
+  // Graph view state (render-only — no re-analysis needed): which slice of utterances to show, and the
+  // per-node on-device "insight" results. Insight is OPT-IN like Sharpen and reuses the same model.
+  let graphFilter = "all";           // 'all' | 'args' | 'spk:<name>'
+  const insightCache = new Map();    // nodeKey -> insight text ("…" while running)
+  let insightBusy = null;            // nodeKey currently generating, else null
+  let insightTok = 0;
+  let lastDocSig = "";               // drop insight cache when the transcript itself changes
 
   function docSig(doc) {
     const turns = (doc && doc.turns) || [];
@@ -70,6 +77,7 @@
     const doc = api.getDoc && api.getDoc();
     if (!doc || !(doc.turns || []).length) { renderEmpty(); return; }
     const ds = docSig(doc);
+    if (ds !== lastDocSig) { insightCache.clear(); insightBusy = null; lastDocSig = ds; }  // stale insights
     const useLlm = !!(llmCache && llmCache.sig === ds);   // user already sharpened THIS transcript
     const sig = ds + "|" + mode + "|" + (useLlm ? "llm" : "heur") + "|" + (llmBusy ? "busy" : "");
     if (sig === lastSig) return;     // nothing changed since last draw
@@ -150,81 +158,122 @@
     if (mode === "interruptions") $("interruptPanel").innerHTML = html;
   }
 
-  // ---- GRAPH: layered topic/argument tree (root → topics → utterances) -------
-  const GEO = { M: 18, rootX: 18, rootW: 96, topicX: 170, topicW: 150, utterX: 388, utterW: 250, rowH: 58, nodeH: 42 };
-  const EDGE_COLOR = { topic: "#3a3a40", contains: "#34343a", reply: "#40404a", rebuts: "#b56a5a", supports: "#5a8f7a" };
-  // utterance left-accent by type
+  // ---- GRAPH: top-down topic/argument flow (mobile-first, vertical) ----------
+  // A vertical outline: each topic is a full-width section header, its utterances are cards beneath it
+  // in time order. Argument relationships show as an indent + glyph (↳ rebuts / ↳ supports) rather than
+  // horizontal edges, so it reads cleanly on a phone (vertical scroll only). Tapping a card seeks audio;
+  // the 💡 surfaces an on-device insight about the topic (opt-in, mobile LLM only).
   const TYPE_COLOR = { statement: "#7d7d86", question: "#7f9cc4", retort: "#c48f6a", counter: "#c47a7a" };
   const TYPE_LABEL = { statement: "", question: "Q", retort: "↩", counter: "⚔" };
-
-  function bezier(x1, y1, x2, y2) {
-    const dx = Math.max(24, (x2 - x1) * 0.5);
-    return `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`;
-  }
+  const speakerOf = (n) => n.speaker || (n.speaker_id != null ? `Speaker ${n.speaker_id}` : null);
+  function clip(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
   function renderGraph(graph, source) {
-    const g = GEO;
     const nodes = graph.nodes || [], edges = graph.edges || [];
     const byId = {}; nodes.forEach((n) => (byId[n.id] = n));
-    const utter = nodes.filter((n) => n.type !== "root" && n.type !== "topic");
     const topics = nodes.filter((n) => n.type === "topic");
+    const inEdge = {};   // incoming utterance→utterance edge kind per utterance (relationship to prev)
+    edges.forEach((e) => { if (e.kind === "reply" || e.kind === "rebuts" || e.kind === "supports") inEdge[e.to] = e.kind; });
+    const childrenOf = (tid) => edges.filter((e) => e.from === tid && e.kind === "contains").map((e) => byId[e.to]).filter(Boolean);
 
-    // Vertical layout: utterances stack in document order; a topic/root centers on its children.
-    const y = {};
-    utter.forEach((n, i) => (y[n.id] = g.M + i * g.rowH + g.nodeH / 2));
-    const childYs = (parentId, kind) => edges.filter((e) => e.from === parentId && e.kind === kind)
-      .map((e) => y[e.to]).filter((v) => typeof v === "number");
-    topics.forEach((t) => { const ys = childYs(t.id, "contains"); y[t.id] = ys.length ? avg(ys) : g.M + g.nodeH / 2; });
-    const tYs = topics.map((t) => y[t.id]); y.root = tYs.length ? avg(tYs) : g.M + g.nodeH / 2;
+    const spk = [];   // distinct speakers (for the by-speaker filter)
+    nodes.forEach((n) => { const s = speakerOf(n); if (s && !spk.includes(s)) spk.push(s); });
+    const inFilter = (n) => {
+      if (graphFilter === "args") return n.type === "retort" || n.type === "counter" || n.type === "question" || inEdge[n.id] === "rebuts" || inEdge[n.id] === "supports";
+      if (graphFilter.startsWith("spk:")) return speakerOf(n) === graphFilter.slice(4);
+      return true;
+    };
 
-    const W = g.utterX + g.utterW + g.M;
-    const H = Math.max(g.M * 2 + g.nodeH, g.M + utter.length * g.rowH + g.M);
-
-    let paths = "", boxes = "";
-    edges.forEach((e) => {
-      const a = byId[e.from], b = byId[e.to];
-      if (!a || !b || y[e.from] == null || y[e.to] == null) return;
-      let x1, x2;
-      if (e.kind === "topic") { x1 = g.rootX + g.rootW; x2 = g.topicX; }
-      else if (e.kind === "contains") { x1 = g.topicX + g.topicW; x2 = g.utterX; }
-      else { // reply / rebuts / supports — utterance→utterance, drawn on the column's left rail
-        const yy1 = y[e.from] + g.nodeH / 2, yy2 = y[e.to] - g.nodeH / 2, xr = g.utterX - 9;
-        paths += `<path d="M${xr} ${yy1} C${xr - 10} ${yy1 + 8} ${xr - 10} ${yy2 - 8} ${xr} ${yy2}" `
-          + `fill="none" stroke="${EDGE_COLOR[e.kind] || EDGE_COLOR.reply}" stroke-width="${e.kind === "rebuts" ? 2.2 : 1.4}"/>`;
-        return;
-      }
-      paths += `<path d="${bezier(x1, y[e.from], x2, y[e.to])}" fill="none" stroke="${EDGE_COLOR[e.kind]}" stroke-width="1.4"/>`;
+    const llm = !!(window.VOX_LLM && window.VOX_LLM.available);
+    let html = "", shownUtter = 0;
+    topics.forEach((tp) => {
+      const kids = childrenOf(tp.id).filter(inFilter);
+      if (!kids.length) return;
+      html += `<section class="gtopic">`
+        + `<div class="gtopic-head">${insightBtn(tp.id, tp.id, llm)}<span class="gtopic-label">${esc(tp.label)}</span></div>`
+        + insightPanel(tp.id);
+      kids.forEach((n) => {
+        shownUtter++;
+        const col = TYPE_COLOR[n.type] || TYPE_COLOR.statement;
+        const rel = inEdge[n.id], badge = TYPE_LABEL[n.type] || "", sname = speakerOf(n);
+        const seekAttr = typeof n.t_offset === "number" ? ` data-seek="${n.t_offset}" tabindex="0"` : "";
+        html += `<div class="gutter rel-${rel || "none"}" style="--accent:${col}">`
+          + `<button class="gutter-main" type="button"${seekAttr}>`
+          + (rel === "rebuts" ? `<span class="grel reb">↳ rebuts</span>` : rel === "supports" ? `<span class="grel sup">↳ supports</span>` : "")
+          + (badge ? `<span class="gbadge" style="color:${col}">${esc(badge)}</span>` : "")
+          + (sname && spk.length > 1 ? `<span class="gspk">${esc(clip(sname, 16))}</span>` : "")
+          + `<span class="gtext">${esc(n.label)}</span></button>`
+          + insightBtn(tp.id, n.id, llm)
+          + insightPanel(n.id)
+          + `</div>`;
+      });
+      html += `</section>`;
     });
+    if (!html) html = `<p class="conv-empty">${topics.length ? "Nothing matches this filter." : "No topics yet — they appear as people talk."}</p>`;
 
-    // root + topic pills
-    boxes += pill(g.rootX, y.root - g.nodeH / 2, g.rootW, g.nodeH, "Conversation", "root");
-    topics.forEach((t) => { boxes += pill(g.topicX, y[t.id] - g.nodeH / 2, g.topicW, g.nodeH, t.label, "topic"); });
-    // utterance cards
-    utter.forEach((n) => { boxes += utterCard(g.utterX, y[n.id] - g.nodeH / 2, g.utterW, g.nodeH, n); });
-
-    const cap = `Topic map · ${topics.length} topic${topics.length === 1 ? "" : "s"} · ${utter.length} turn${utter.length === 1 ? "" : "s"}`;
-    $("graphPanel").innerHTML = toolbar(cap, source)
-      + `<div class="graph-scroll"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="graph-svg" role="img" aria-label="Conversation topic map">`
-      + paths + boxes + `</svg></div>`;
+    const cap = `Topic map · ${topics.length} topic${topics.length === 1 ? "" : "s"} · ${shownUtter} shown`;
+    $("graphPanel").innerHTML = toolbar(cap, source) + filterBar(spk) + `<div class="graph-flow">${html}</div>`;
     wireSeeks($("graphPanel")); wireToolbar($("graphPanel"));
+    wireFilter($("graphPanel")); wireInsights($("graphPanel"), byId, edges);
   }
-  function avg(a) { return a.reduce((s, v) => s + v, 0) / a.length; }
 
-  function pill(x, y, w, h, label, cls) {
-    return `<g class="gnode ${cls}"><rect x="${x}" y="${y}" rx="9" width="${w}" height="${h}"/>`
-      + `<text x="${x + w / 2}" y="${y + h / 2}" text-anchor="middle" dominant-baseline="central">${esc(clip(label, cls === "root" ? 14 : 20))}</text></g>`;
+  // ---- graph filter (All · Arguments · by speaker) ---------------------------
+  function filterBar(spk) {
+    const seg = (val, lbl) => `<button class="gfilter${graphFilter === val ? " active" : ""}" type="button" data-filter="${val}">${lbl}</button>`;
+    let html = `<div class="graph-filter">${seg("all", "All")}${seg("args", "Arguments")}`;
+    if (spk.length > 1) {
+      const byS = graphFilter.startsWith("spk:");
+      html += `<select class="gspk-sel" aria-label="Filter by speaker"><option value="all"${byS ? "" : " selected"}>All speakers</option>`
+        + spk.map((s) => `<option value="spk:${esc(s)}"${graphFilter === "spk:" + s ? " selected" : ""}>${esc(clip(s, 22))}</option>`).join("") + `</select>`;
+    }
+    return html + `</div>`;
   }
-  function utterCard(x, y, w, h, n) {
-    const col = TYPE_COLOR[n.type] || TYPE_COLOR.statement;
-    const badge = TYPE_LABEL[n.type] || "";
-    const seekAttr = typeof n.t_offset === "number" ? ` data-seek="${n.t_offset}" tabindex="0" role="button"` : "";
-    return `<g class="gnode utter"${seekAttr}>`
-      + `<rect x="${x}" y="${y}" rx="8" width="${w}" height="${h}"/>`
-      + `<rect x="${x}" y="${y}" rx="8" width="5" height="${h}" fill="${col}"/>`
-      + (badge ? `<text class="ubadge" x="${x + 16}" y="${y + h / 2}" dominant-baseline="central" fill="${col}">${esc(badge)}</text>` : "")
-      + `<text class="utext" x="${x + (badge ? 30 : 14)}" y="${y + h / 2}" dominant-baseline="central">${esc(clip(n.label, 34))}</text></g>`;
+  function wireFilter(root) {
+    root.querySelectorAll(".gfilter").forEach((b) => b.addEventListener("click", () => { graphFilter = b.dataset.filter; lastSig = ""; runAnalyze(); }));
+    const sel = root.querySelector(".gspk-sel");
+    if (sel) sel.addEventListener("change", () => { graphFilter = sel.value === "all" ? "all" : sel.value; lastSig = ""; runAnalyze(); });
   }
-  function clip(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  // ---- tap-to-insight on a leaf/topic (opt-in, on-device LLM) -----------------
+  function insightBtn(topicId, key, llm) {
+    if (!llm) return "";
+    const busy = insightBusy === key;
+    return `<button class="ins-btn${busy ? " busy" : ""}" type="button" data-insight="${esc(topicId)}" data-inskey="${esc(key)}" `
+      + `title="Insight about this topic" aria-label="Insight about this topic"${busy ? " disabled" : ""}>${busy ? "…" : "💡"}</button>`;
+  }
+  function insightPanel(key) {
+    if (!insightCache.has(key)) return "";
+    return `<div class="ins-panel">${esc(insightCache.get(key))}</div>`;
+  }
+  function wireInsights(root, byId, edges) {
+    root.querySelectorAll(".ins-btn").forEach((b) => b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      requestInsight(b.dataset.insight, b.dataset.inskey, byId, edges);
+    }));
+  }
+  async function requestInsight(topicId, key, byId, edges) {
+    if (!(window.VOX_LLM && window.VOX_LLM.insight)) return;
+    if (insightCache.has(key)) { insightCache.delete(key); lastSig = ""; runAnalyze(); return; }  // tap again to collapse
+    if (insightBusy || llmBusy) return;   // one insight at a time; never compete with a full Sharpen
+    const tp = byId[topicId];
+    const kids = edges.filter((e) => e.from === topicId && e.kind === "contains").map((e) => byId[e.to]).filter(Boolean);
+    const focus = key !== topicId ? byId[key] : null;
+    const payload = {
+      label: tp ? tp.label : "topic",
+      points: kids.map((n) => ({ type: n.type, speaker: speakerOf(n) || "", text: n.label })),
+      focus: focus ? focus.label : null,
+    };
+    insightBusy = key; insightCache.set(key, "…thinking"); lastSig = ""; runAnalyze();
+    const myTok = ++insightTok;
+    try {
+      const txt = await window.VOX_LLM.insight(payload);
+      if (myTok === insightTok) insightCache.set(key, (txt || "").trim() || "No insight available.");
+    } catch (e) {
+      if (myTok === insightTok) insightCache.set(key, "Couldn't generate an insight — try again.");
+    } finally {
+      if (myTok === insightTok) { insightBusy = null; lastSig = ""; runAnalyze(); }
+    }
+  }
 
   // ---- INTERRUPTIONS: counters + timeline + list -----------------------------
   function renderInterruptions(ir, source) {
