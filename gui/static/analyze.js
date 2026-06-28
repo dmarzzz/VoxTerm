@@ -184,9 +184,13 @@
     return { nodes, edges, topicCount: topics.length };
   }
 
-  function snippet(s, n = 64) {
+  function snippet(s, n = 96) {
     s = String(s || "").replace(/\s+/g, " ").trim();
-    return s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
+    if (s.length <= n) return s;
+    // cut on a word boundary near the limit so cards never end mid-word ("on-devic…")
+    const cut = s.slice(0, n);
+    const sp = cut.lastIndexOf(" ");
+    return (sp > n * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + "…";
   }
 
   function detectInterruptions(turns, durationSec, multiSpeaker) {

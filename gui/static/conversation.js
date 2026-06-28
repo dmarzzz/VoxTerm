@@ -163,7 +163,6 @@
   // in time order. Argument relationships show as an indent + glyph (↳ rebuts / ↳ supports) rather than
   // horizontal edges, so it reads cleanly on a phone (vertical scroll only). Tapping a card seeks audio;
   // the 💡 surfaces an on-device insight about the topic (opt-in, mobile LLM only).
-  const TYPE_COLOR = { statement: "#7d7d86", question: "#7f9cc4", retort: "#c48f6a", counter: "#c47a7a" };
   const TYPE_LABEL = { statement: "", question: "Q", retort: "↩", counter: "⚔" };
   const speakerOf = (n) => n.speaker || (n.speaker_id != null ? `Speaker ${n.speaker_id}` : null);
   function clip(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
@@ -189,18 +188,19 @@
     topics.forEach((tp) => {
       const kids = childrenOf(tp.id).filter(inFilter);
       if (!kids.length) return;
+      // The topic header just labels the section; insight lives on the leaves (tap a card's 💡), so the
+      // header stays clean. Its panel still renders here if a leaf resolved to this topic's key.
       html += `<section class="gtopic">`
-        + `<div class="gtopic-head">${insightBtn(tp.id, tp.id, llm)}<span class="gtopic-label">${esc(tp.label)}</span></div>`
+        + `<div class="gtopic-head"><span class="gtopic-label">${esc(tp.label)}</span></div>`
         + insightPanel(tp.id);
       kids.forEach((n) => {
         shownUtter++;
-        const col = TYPE_COLOR[n.type] || TYPE_COLOR.statement;
         const rel = inEdge[n.id], badge = TYPE_LABEL[n.type] || "", sname = speakerOf(n);
         const seekAttr = typeof n.t_offset === "number" ? ` data-seek="${n.t_offset}" tabindex="0"` : "";
-        html += `<div class="gutter rel-${rel || "none"}" style="--accent:${col}">`
-          + `<button class="gutter-main" type="button"${seekAttr}>`
+        html += `<div class="gutter rel-${rel || "none"}">`
+          + `<button class="gutter-main type-${n.type}" type="button"${seekAttr}>`
           + (rel === "rebuts" ? `<span class="grel reb">↳ rebuts</span>` : rel === "supports" ? `<span class="grel sup">↳ supports</span>` : "")
-          + (badge ? `<span class="gbadge" style="color:${col}">${esc(badge)}</span>` : "")
+          + (badge ? `<span class="gbadge">${esc(badge)}</span>` : "")
           + (sname && spk.length > 1 ? `<span class="gspk">${esc(clip(sname, 16))}</span>` : "")
           + `<span class="gtext">${esc(n.label)}</span></button>`
           + insightBtn(tp.id, n.id, llm)
