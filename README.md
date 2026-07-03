@@ -171,6 +171,13 @@ ultra-fast) and `sherpa-nemotron-en` (NeMo 0.6B, accurate). Fully opt-in: absent
 changes. See [docs/streaming-asr.md](docs/streaming-asr.md) and the
 [benchmark](docs/streaming-asr-benchmark.md).
 
+### Diarization attribution benchmark
+
+Field validation for multi-speaker diarization uses saved `*-events.jsonl` logs plus
+human reference labels. See [docs/diarization-benchmark.md](docs/diarization-benchmark.md)
+and run `python scripts/score_diarization.py <manifest.json> --strict` for the
+issue #87 corpus shape and 90% segment-attribution target.
+
 ### Android: the same GUI, on-device (offline)
 
 The Android app runs the **same web GUI as the desktop**, but with a native on-device engine instead
