@@ -31,6 +31,7 @@ _LOG_CATEGORIES = {
 }
 
 _TIMESTAMP_COLOR = "#306070"
+_REACTION_COLOR = "#ffaa66"
 
 # Rainbow palette for special highlights (dim cyberpunk)
 _RAINBOW = [
@@ -137,6 +138,14 @@ class TranscriptPanel(RichLog):
             text = self._render_entry(timestamp, content, speaker, speaker_id, confidence, overlap)
             self.write(text)
 
+    def add_reaction(self, content: str, author: str = "you"):
+        """Add a non-speech reaction/input row to the transcript timeline."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self._entries.append((timestamp, "reaction", content, author, 0, ""))
+
+        if not self._merged_view:
+            self.write(self._render_reaction(timestamp, content, author))
+
     def _render_entry(
         self, timestamp: str, content: str, speaker: str, speaker_id: int,
         confidence: str = "", overlap: bool = False,
@@ -174,6 +183,16 @@ class TranscriptPanel(RichLog):
             text.append("> ", Style(color="#00e5ff", bold=True))
 
         text.append(content, Style(color="#c0c0c0"))
+        return text
+
+    def _render_reaction(self, timestamp: str, content: str, author: str) -> Text:
+        """Render a non-speech reaction row."""
+        text = Text()
+        text.append(f"[{timestamp}]  ", Style(color=_TIMESTAMP_COLOR))
+        text.append("REACT  ", Style(color=_REACTION_COLOR, bold=True))
+        if author:
+            text.append(f"{author}  ", Style(color="#ccaa88", bold=True))
+        text.append(content, Style(color="#e0c8a0"))
         return text
 
     # ── merged view ──────────────────────────────────────────
@@ -325,6 +344,8 @@ class TranscriptPanel(RichLog):
             if typ == "transcript":
                 text = self._render_entry(ts, content, speaker, speaker_id, conf)
                 self.write(text)
+            elif typ == "reaction":
+                self.write(self._render_reaction(ts, content, speaker))
             else:
                 category = speaker if speaker in _LOG_CATEGORIES else "sys"
                 self._write_system(ts, content, category,
@@ -352,7 +373,10 @@ class TranscriptPanel(RichLog):
         lines = []
         for entry in self._entries:
             ts, _, content, speaker = entry[0], entry[1], entry[2], entry[3]
-            prefix = f"[{speaker}] " if speaker else ""
+            if entry[1] == "reaction":
+                prefix = f"[reaction:{speaker}] " if speaker else "[reaction] "
+            else:
+                prefix = f"[{speaker}] " if speaker else ""
             lines.append(f"[{ts}] {prefix}{content}")
         return "\n".join(lines)
 
@@ -380,7 +404,11 @@ class TranscriptPanel(RichLog):
         ])
         for entry in self._entries:
             ts, _, content, speaker = entry[0], entry[1], entry[2], entry[3]
-            speaker_tag = f" **{speaker}:**" if speaker else ""
-            lines.append(f"**[{ts}]**{speaker_tag} {content}")
+            if entry[1] == "reaction":
+                author = speaker or "reaction"
+                lines.append(f"**[{ts}]** **{author} reacted:** {content}")
+            else:
+                speaker_tag = f" **{speaker}:**" if speaker else ""
+                lines.append(f"**[{ts}]**{speaker_tag} {content}")
             lines.append("")
         return "\n".join(lines)

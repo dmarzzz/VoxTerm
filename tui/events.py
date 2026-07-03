@@ -20,6 +20,7 @@ Kinds emitted by VoxTerm today (see call sites in tui/app.py):
     amplitude  — chunk RMS (~15 Hz)           fields: rms (float 0..1)
     recording  — recording toggle             fields: on (bool)
     party      — party-session join/leave     fields: on (bool)
+    reaction   — non-speech input             fields: emoji, text, author
     session    — session start/end            fields: phase ("start"|"end")
 """
 from __future__ import annotations

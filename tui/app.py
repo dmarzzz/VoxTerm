@@ -53,7 +53,7 @@ from enum import Enum
 import numpy as np
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Static, OptionList
+from textual.widgets import Static, OptionList, Input
 from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
@@ -68,6 +68,13 @@ from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
+from tui.reactions import (
+    REACTION_PRESETS,
+    normalize_reaction,
+    parse_reaction_line,
+    reaction_inbox_path,
+    reaction_label,
+)
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.mix import mix_chunks
@@ -445,6 +452,7 @@ class HelpScreen(ModalScreen):
             yield Static(
                 "[bold #00e5ff]R[/]       [#c0c0c0]Start / stop recording[/]\n"
                 "[bold #00e5ff]T[/]       [#c0c0c0]Tag / name speakers[/]\n"
+                "[bold #00e5ff]A[/]       [#c0c0c0]Add reaction / typed note[/]\n"
                 "[bold #00e5ff]E[/]       [#c0c0c0]Browse saved transcripts[/]\n"
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
@@ -526,6 +534,79 @@ class ExportScreen(ModalScreen):
         self.dismiss(None)
 
 
+class ReactionScreen(ModalScreen):
+    """Modal for adding a non-speech reaction or short typed note."""
+
+    DEFAULT_CSS = """
+    ReactionScreen {
+        align: center middle;
+    }
+    #reaction-dialog {
+        width: 54;
+        height: auto;
+        max-height: 16;
+        border: heavy #cc8844;
+        border-title-color: #ffaa66;
+        border-title-style: bold;
+        background: #0a0e14;
+        padding: 1 2;
+    }
+    #reaction-list {
+        height: auto;
+        max-height: 7;
+        background: #0a0e14;
+        color: #c0c0c0;
+    }
+    #reaction-list > .option-list--option-highlighted {
+        background: #1a1a3a;
+        color: #00ffcc;
+    }
+    #reaction-input {
+        height: 3;
+        margin-top: 1;
+    }
+    #reaction-hint {
+        height: 1;
+        color: #607080;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="reaction-dialog") as dialog:
+            dialog.border_title = "ADD REACTION"
+            yield OptionList(
+                *(Option(f"  {emoji}  {name}", id=name) for name, emoji in REACTION_PRESETS),
+                id="reaction-list",
+            )
+            yield Input(
+                placeholder="optional note, or press enter here for text-only input",
+                id="reaction-input",
+            )
+            yield Static(
+                " [#607080]ENTER[/] add  [#607080]ESC[/] cancel",
+                id="reaction-hint",
+                markup=True,
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        note = self.query_one("#reaction-input", Input).value
+        self.dismiss(normalize_reaction(str(event.option.id or ""), note, "you"))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        try:
+            self.dismiss(normalize_reaction("", event.value, "you"))
+        except ValueError:
+            self.dismiss(None)
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
 class VoxTerm(App):
     """Cyberpunk voice transcription TUI."""
 
@@ -541,6 +622,7 @@ class VoxTerm(App):
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize_and_export", "Summarize"),
+        Binding("a", "add_reaction", "React"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -623,6 +705,11 @@ class VoxTerm(App):
         self._party = PartyManager(self, _get_config())
         self._wire_party_callbacks()
         self._recording_pulse: RecordingPulse | None = None
+        self._reaction_inbox = reaction_inbox_path()
+        try:
+            self._reaction_inbox_pos = self._reaction_inbox.stat().st_size
+        except OSError:
+            self._reaction_inbox_pos = 0
 
         # Event stream — emits JSONL to LIVE_DIR for external consumers
         # (LED matrices, overlays, dashboards). No-op when VOXTERM_EVENTS unset.
@@ -650,6 +737,7 @@ class VoxTerm(App):
         yield Static(
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
             "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
+            "[bold #00e5ff]\\[A][/][#607080] React  [/]"
             "[bold #00e5ff]\\[U][/][#607080] Summarize  [/]"
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
@@ -835,6 +923,7 @@ class VoxTerm(App):
     def _start_audio_timer(self):
         self.set_interval(1.0 / WAVEFORM_FPS, self._process_audio, name="audio_timer")
         self.set_interval(1.0, self._refresh_telemetry, name="telemetry_timer")
+        self.set_interval(0.5, self._poll_reaction_inbox, name="reaction_inbox_timer")
         self.set_interval(60.0, self._periodic_gc, name="gc_timer")
 
     def _refresh_telemetry(self):
@@ -1458,6 +1547,57 @@ class VoxTerm(App):
                 "tip: press [T] to name speakers — VoxTerm will remember them", Log.SYS
             )
 
+    def action_add_reaction(self):
+        """Open a modal to add a non-speech reaction to the transcript."""
+        def on_reaction(result):
+            if result is None:
+                return
+            self._record_reaction(
+                result.get("emoji", ""),
+                result.get("text", ""),
+                result.get("author", "you"),
+            )
+
+        self.push_screen(ReactionScreen(), on_reaction)
+
+    def _record_reaction(self, emoji: str, text: str = "", author: str = "you") -> None:
+        """Record a reaction in every transcript surface."""
+        try:
+            payload = normalize_reaction(emoji, text, author)
+        except ValueError:
+            return
+        content = reaction_label(payload["emoji"], payload["text"])
+        transcript = self.query_one(TranscriptPanel)
+        transcript.add_reaction(content, payload["author"])
+        self._append_live_reaction(content, payload["author"])
+        self._events.emit("reaction", **payload)
+        self._update_telemetry()
+
+    def _poll_reaction_inbox(self) -> None:
+        """Ingest reactions written by external input devices or scripts."""
+        path = self._reaction_inbox
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size < self._reaction_inbox_pos:
+            self._reaction_inbox_pos = 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                f.seek(self._reaction_inbox_pos)
+                lines = f.readlines()
+                self._reaction_inbox_pos = f.tell()
+        except OSError:
+            return
+        for line in lines:
+            payload = parse_reaction_line(line)
+            if payload:
+                self._record_reaction(
+                    payload["emoji"],
+                    payload["text"],
+                    payload["author"],
+                )
+
     def _on_auto_recognition(
         self, speaker_id: int, name: str, color: str,
         tier: str, score: float,
@@ -1535,6 +1675,32 @@ class VoxTerm(App):
             self._last_saved_at = time.time()
         except Exception:
             pass  # never block transcription on I/O failure
+
+    def _append_live_reaction(self, content: str, author: str):
+        """Append a non-speech reaction line to the live file on disk."""
+        try:
+            LIVE_DIR.mkdir(parents=True, exist_ok=True)
+            if self._live_file is None:
+                fname = self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-transcript.md"
+                self._live_file = LIVE_DIR / fname
+                self._live_header_written = False
+
+            with open(self._live_file, "a", encoding="utf-8") as f:
+                if not self._live_header_written:
+                    lang = AVAILABLE_LANGUAGES.get(self._language, self._language) if self._language else "auto"
+                    f.write(f"# VoxTerm Transcript\n\n")
+                    f.write(f"- **Date:** {self._session_start.strftime('%A, %B %d, %Y')}\n")
+                    f.write(f"- **Started:** {self._session_start.strftime('%I:%M %p')}\n")
+                    f.write(f"- **Model:** {self._model_name}\n")
+                    f.write(f"- **Language:** {lang}\n")
+                    f.write(f"\n---\n\n")
+                    self._live_header_written = True
+
+                ts = datetime.now().strftime("%H:%M:%S")
+                f.write(f"**[{ts}]** **{author} reacted:** {content}\n\n")
+            self._last_saved_at = time.time()
+        except Exception:
+            pass
 
     def _load_model(self):
         """Start model loading in a plain thread (not @work — avoids fd inheritance bugs)."""
