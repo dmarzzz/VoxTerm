@@ -342,6 +342,15 @@ _DEFAULTS: dict[str, Any] = {
     # pubkey so a different sink showing up on the LAN doesn't get
     # transcripts by accident. Empty string = "any discovered sink".
     "hivemind_pinned_sink_pubkey": "",
+    # Finalized transcript upload. This is separate from live Hivemind
+    # streaming: it runs only when the user exports/saves a transcript.
+    # `upload_mode` is one of:
+    #   local          write only the local transcript file
+    #   local_remote   write local file and queue remote upload
+    #   remote         queue remote upload only
+    "upload_mode": "local",
+    "upload_endpoint": "",
+    "upload_include_audio": False,
 }
 
 # Expected types per key (for validation)
@@ -360,6 +369,9 @@ _TYPES: dict[str, type] = {
     "hivemind_location": str,
     "hivemind_push_enabled": bool,
     "hivemind_pinned_sink_pubkey": str,
+    "upload_mode": str,
+    "upload_endpoint": str,
+    "upload_include_audio": bool,
 }
 
 
@@ -436,3 +448,69 @@ class ConfigStore:
         """Return a snapshot of all config data."""
         with self._lock:
             return dict(self._data)
+
+
+class SecretStore:
+    """Tiny private JSON store for local secrets.
+
+    VoxTerm already persists preferences through ConfigStore, but remote upload
+    tokens should not live in the normal state file. This store keeps the API
+    intentionally small and writes with owner-only permissions where the OS
+    supports chmod.
+    """
+
+    def __init__(self, path: Optional[_Path] = None) -> None:
+        if path is None:
+            path = DATA_DIR / ".secrets.json"
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: dict[str, str] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                self._data = {
+                    str(key): value
+                    for key, value in raw.items()
+                    if isinstance(value, str)
+                }
+        except Exception:
+            self._data = {}
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+            try:
+                _os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            _os.replace(tmp, self._path)
+            try:
+                _os.chmod(self._path, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            pass
+
+    def get(self, key: str) -> str:
+        with self._lock:
+            return self._data.get(key, "")
+
+    def set(self, key: str, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError(
+                f"Invalid type for secret key '{key}': expected str, "
+                f"got {type(value).__name__}"
+            )
+        with self._lock:
+            self._data[key] = value
+            self._save()
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+            self._save()

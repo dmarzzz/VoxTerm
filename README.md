@@ -7,11 +7,11 @@ Local real-time voice transcription TUI with speaker diarization and P2P collabo
 
 ## Privacy & Storage Policy
 
-VoxTerm is **local first and private by default**. Everything runs on your machine. Nothing is ever sent to a server.
+VoxTerm is **local first and private by default**. Everything runs on your machine. Nothing is sent to a server unless you explicitly enable an upload mode.
 
 - **No audio is stored.** Microphone input is processed in real-time and discarded. Only text transcripts are saved.
 - **Voice profiles are encrypted at rest.** Speaker embeddings (biometric data used to recognize voices across sessions) are encrypted with AES-256-CBC. The key lives in your macOS Keychain — zero config.
-- **Transcripts are yours.** Auto-saved as markdown to `~/Documents/voxterm-transcripts/`. Never uploaded anywhere.
+- **Transcripts are yours.** Auto-saved as markdown to `~/Documents/voxterm-transcripts/`. Final transcript upload is off by default and opt-in from `Y` upload settings.
 - **P2P stays on your LAN.** Party mode shares transcripts over your local network only. No relay servers.
 - **Delete everything anytime.** Press `P` → delete to permanently wipe all voice data from disk.
 
@@ -56,6 +56,7 @@ python3 -m tui.app
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
+| `Y` | Final transcript upload settings |
 | `C` | Clear transcript |
 | `D` | Toggle debug mode |
 | `?` | Help |
@@ -108,6 +109,18 @@ Multiple people in the same room can share transcripts over the local network. E
 - Everyone sees who joins and leaves — no silent surveillance
 
 See [docs/party-mode-design.md](docs/party-mode-design.md) for the full design.
+
+## Finalized transcript upload
+
+Press `Y` to configure what happens when you save/export a finalized transcript:
+
+- **Local only** (default): write the transcript file and do not upload.
+- **Local + Remote**: write the local file, queue a remote upload, and retry failures later.
+- **Remote only**: queue the remote upload without writing a transcript into the sessions folder.
+
+The upload endpoint is configurable in the same screen. Enter an auth token there to store it in VoxTerm's private secret store; leave the field blank to keep the existing token, or type `CLEAR` to remove it. Audio upload is opt-in and only attaches retained audio when a retained audio file exists.
+
+Remote failures never block the local save path. VoxTerm stores pending uploads in a private local retry queue and flushes that queue whenever a transcript export runs.
 
 ## Hivemind mode (transcript streaming to swf-node)
 

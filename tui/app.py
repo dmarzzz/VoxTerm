@@ -53,11 +53,12 @@ from enum import Enum
 import numpy as np
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Static, OptionList
+from textual.widgets import Static, OptionList, Input
 from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work
+from rich.markup import escape
 
 from tui.widgets.header import CyberHeader
 from tui.widgets.waveform import WaveformWidget, _make_style
@@ -77,6 +78,7 @@ from audio.diarization.proxy import DiarizationProxy
 from audio.speakers.store import SpeakerStore
 from audio.vad import SileroVAD
 from config import (
+    VERSION,
     SAMPLE_RATE, CHUNK_SIZE, WAVEFORM_FPS,
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
     MAX_BUFFER_SECONDS, MIN_BUFFER_SECONDS,
@@ -105,9 +107,16 @@ def _clipboard_cmd() -> list[str] | None:
     return None
 
 
+def _ellipsize(text: str, width: int = 48) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
 from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILABLE
 
-from config import ConfigStore
+from config import ConfigStore, SecretStore
+from network.upload import TranscriptUploadClient, UploadMode, UploadQueue
+
 
 def _setup_file_logging() -> None:
     """Best-effort file logging setup that never prevents module import."""
@@ -448,6 +457,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]E[/]       [#c0c0c0]Browse saved transcripts[/]\n"
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
+                "[bold #00e5ff]Y[/]       [#c0c0c0]Upload settings[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
@@ -526,6 +536,154 @@ class ExportScreen(ModalScreen):
         self.dismiss(None)
 
 
+class UploadSettingsScreen(ModalScreen):
+    """Modal for finalized transcript upload settings."""
+
+    DEFAULT_CSS = """
+    UploadSettingsScreen {
+        align: center middle;
+    }
+    #upload-dialog {
+        width: 72;
+        height: auto;
+        max-height: 24;
+        border: heavy #4488cc;
+        border-title-color: #66bbff;
+        border-title-style: bold;
+        background: #0a0e14;
+        padding: 1 2;
+    }
+    #upload-list {
+        height: 6;
+        background: #0a0e14;
+        color: #c0c0c0;
+    }
+    #upload-list > .option-list--option-highlighted {
+        background: #1a1a3a;
+        color: #00ffcc;
+    }
+    #upload-endpoint, #upload-token {
+        margin-top: 1;
+    }
+    #upload-status {
+        height: auto;
+        color: #607080;
+        margin-top: 1;
+    }
+    #upload-hint {
+        height: 1;
+        color: #607080;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("f", "flush", "Flush"),
+        Binding("ctrl+s", "save", "Save"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        mode: str,
+        endpoint: str,
+        include_audio: bool,
+        has_token: bool,
+        queue_pending: int = 0,
+        queue_last_error: str = "",
+    ) -> None:
+        super().__init__()
+        self._mode = UploadMode.parse(mode)
+        self._endpoint = endpoint
+        self._include_audio = include_audio
+        self._has_token = has_token
+        self._queue_pending = int(queue_pending)
+        self._queue_last_error = queue_last_error
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="upload-dialog") as dialog:
+            dialog.border_title = "UPLOAD SETTINGS"
+            yield OptionList(*self._options(), id="upload-list")
+            yield Input(
+                value=self._endpoint,
+                placeholder="https://example.test/voxterm/transcripts",
+                id="upload-endpoint",
+            )
+            yield Input(
+                placeholder="auth token (blank keeps existing, CLEAR removes)",
+                id="upload-token",
+            )
+            yield Static(self._status_text(), id="upload-status", markup=True)
+            yield Static(
+                " [#607080]ENTER[/] choose/toggle  [#607080]F[/] flush  "
+                "[#607080]CTRL+S[/] save  "
+                "[#607080]ESC[/] cancel",
+                id="upload-hint",
+                markup=True,
+            )
+
+    def _options(self) -> list[Option]:
+        def mark(mode: UploadMode) -> str:
+            return "*" if self._mode is mode else " "
+
+        audio = "on" if self._include_audio else "off"
+        return [
+            Option(f"  {mark(UploadMode.LOCAL_ONLY)} Local only", id="mode:local"),
+            Option(
+                f"  {mark(UploadMode.LOCAL_AND_REMOTE)} Local + Remote",
+                id="mode:local_remote",
+            ),
+            Option(f"  {mark(UploadMode.REMOTE_ONLY)} Remote only", id="mode:remote"),
+            Option(f"  include retained audio: {audio}", id="audio"),
+            Option("  Flush queued uploads now", id="flush"),
+        ]
+
+    def _status_text(self) -> str:
+        token = "token saved" if self._has_token else "no token saved"
+        queue = f"{self._queue_pending} pending"
+        if self._queue_last_error:
+            queue += f"; last error: {_ellipsize(self._queue_last_error, 42)}"
+        return f"[#607080]{self._mode.label}; {token}; queue {escape(queue)}[/]"
+
+    def _refresh(self) -> None:
+        self.query_one("#upload-list", OptionList).set_options(self._options())
+        self.query_one("#upload-status", Static).update(self._status_text())
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        choice = str(event.option.id or "")
+        if choice.startswith("mode:"):
+            self._mode = UploadMode.parse(choice.split(":", 1)[1])
+        elif choice == "audio":
+            self._include_audio = not self._include_audio
+        elif choice == "flush":
+            self.action_flush()
+            return
+        self._refresh()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.action_save()
+
+    def action_save(self) -> None:
+        token = self.query_one("#upload-token", Input).value.strip()
+        self.dismiss(
+            {
+                "mode": self._mode.value,
+                "action": "save",
+                "endpoint": self.query_one("#upload-endpoint", Input).value.strip(),
+                "include_audio": self._include_audio,
+                "token": "" if token.upper() == "CLEAR" else token,
+                "clear_token": token.upper() == "CLEAR",
+            }
+        )
+
+    def action_flush(self) -> None:
+        self.dismiss({"action": "flush"})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class VoxTerm(App):
     """Cyberpunk voice transcription TUI."""
 
@@ -541,6 +699,7 @@ class VoxTerm(App):
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize_and_export", "Summarize"),
+        Binding("y", "upload_settings", "Upload"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -651,6 +810,7 @@ class VoxTerm(App):
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
             "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
             "[bold #00e5ff]\\[U][/][#607080] Summarize  [/]"
+            "[bold #00e5ff]\\[Y][/][#607080] Upload  [/]"
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
             "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
@@ -804,12 +964,17 @@ class VoxTerm(App):
 
         # Party mode indicator (delegated to PartyManager)
         p2p_text = self._party.telemetry_text()
+        upload_mode = UploadMode.parse(_get_config().get("upload_mode"))
+        upload_text = ""
+        if upload_mode.uploads_remote:
+            upload_text = f"    [#66bbff]{upload_mode.label}[/] [dim]\\[Y][/]"
 
         self.query_one("#telemetry", Static).update(
             f"  {status}"
             f"    [#00ffcc]{model_text}[/] [dim]\\[M][/]"
             f"    [#ffaa66]{lang_text}[/] [dim]\\[L][/]"
             f"{p2p_text}"
+            f"{upload_text}"
             f"    [dim]\\[E] Transcripts  \\[S] Save  \\[Q] Quit[/]"
         )
 
@@ -1926,6 +2091,73 @@ class VoxTerm(App):
 
         self.push_screen(TranscriptExplorerScreen(SESSIONS_DIR), on_result)
 
+    def action_upload_settings(self):
+        """Open finalized transcript upload settings."""
+        cfg = _get_config()
+        secrets = SecretStore()
+
+        def on_result(result):
+            if result is None:
+                return
+            if result.get("action") == "flush":
+                self._flush_upload_queue_from_config()
+                return
+            mode = UploadMode.parse(result["mode"])
+            endpoint = result["endpoint"]
+            include_audio = bool(result["include_audio"])
+            cfg.update(
+                {
+                    "upload_mode": mode.value,
+                    "upload_endpoint": endpoint,
+                    "upload_include_audio": include_audio,
+                }
+            )
+            if result.get("clear_token"):
+                secrets.delete("upload_auth_token")
+            elif result.get("token"):
+                secrets.set("upload_auth_token", result["token"])
+            self.query_one(TranscriptPanel).system_message(
+                f"upload mode: {mode.label}", Log.SYS
+            )
+            self._events.emit(
+                "upload_settings",
+                mode=mode.value,
+                endpoint_set=bool(endpoint),
+                include_audio=include_audio,
+                token_set=bool(secrets.get("upload_auth_token")),
+            )
+            self._update_telemetry()
+
+        queue_status = UploadQueue().status()
+        self.push_screen(
+            UploadSettingsScreen(
+                mode=cfg.get("upload_mode") or "local",
+                endpoint=cfg.get("upload_endpoint") or "",
+                include_audio=bool(cfg.get("upload_include_audio")),
+                has_token=bool(secrets.get("upload_auth_token")),
+                queue_pending=queue_status.pending,
+                queue_last_error=queue_status.last_error,
+            ),
+            on_result,
+        )
+
+    def _flush_upload_queue_from_config(self) -> None:
+        cfg = _get_config()
+        secrets = SecretStore()
+        status = UploadQueue().status()
+        if status.pending == 0:
+            self.query_one(TranscriptPanel).system_message(
+                "remote upload queue is empty", Log.REC
+            )
+            return
+        self.query_one(TranscriptPanel).system_message(
+            f"remote upload flush requested ({status.pending} pending)", Log.REC
+        )
+        self._flush_upload_queue(
+            cfg.get("upload_endpoint") or "",
+            secrets.get("upload_auth_token"),
+        )
+
     def _swap_model(self, model_key: str):
         self._model_loaded = False
         self._model_name = model_key
@@ -2026,21 +2258,174 @@ class VoxTerm(App):
     def _export_to_file(self):
         """Promote live file to final transcript."""
         transcript = self.query_one(TranscriptPanel)
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        md = transcript.get_markdown(
+            self._model_name,
+            session_start=self._session_start,
+            language=self._language or "",
+        )
+        entry_count = len(transcript.get_entries())
+        filepath, remote_pending, mode = self._finalize_export(
+            md,
+            entry_count,
+            export_kind="transcript",
+        )
+        self._start_new_session()
+        transcript.system_message(
+            self._format_export_status(
+                entry_count,
+                filepath,
+                remote_pending,
+                mode,
+            ),
+            Log.REC,
+        )
+
+    def _finalize_export(
+        self,
+        md: str,
+        entry_count: int,
+        *,
+        export_kind: str,
+        summary_label: str = "",
+    ) -> tuple[Path | None, int | None, UploadMode]:
+        """Write the local artifact if configured and queue remote upload if enabled."""
+        cfg = _get_config()
+        mode = UploadMode.parse(cfg.get("upload_mode"))
         filename = self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-transcript.md"
-        filepath = SESSIONS_DIR / filename
+        filepath: Path | None = None
 
-        # Write the full markdown (cleaner than the append-mode live file)
-        md = transcript.get_markdown(self._model_name, session_start=self._session_start, language=self._language or "")
-        filepath.write_text(md, encoding="utf-8")
+        if mode.saves_local:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            filepath = SESSIONS_DIR / filename
+            filepath.write_text(md, encoding="utf-8")
 
-        # Remove the live file since we promoted it
+        remote_pending: int | None = None
+        if mode.uploads_remote:
+            metadata = self._export_metadata(
+                entry_count=entry_count,
+                export_kind=export_kind,
+                local_path=filepath,
+                summary_label=summary_label,
+                upload_mode=mode,
+            )
+            remote_pending = self._queue_remote_upload(
+                md,
+                metadata,
+                include_audio=bool(cfg.get("upload_include_audio")),
+            )
+
+        # Remove the live file since the transcript has been finalized into
+        # either the sessions folder or the retry queue.
         if self._live_file and self._live_file.exists():
             self._live_file.unlink()
 
-        entry_count = len(transcript.get_entries())
-        self._start_new_session()
-        transcript.system_message(f"exported {entry_count} entries → {filepath}", Log.REC)
+        return filepath, remote_pending, mode
+
+    def _export_metadata(
+        self,
+        *,
+        entry_count: int,
+        export_kind: str,
+        local_path: Path | None,
+        summary_label: str,
+        upload_mode: UploadMode,
+    ) -> dict:
+        return {
+            "voxterm_version": VERSION,
+            "session_id": self._session_start.strftime("%Y-%m-%d_%H%M%S"),
+            "session_start": self._session_start.isoformat(timespec="seconds"),
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "export_kind": export_kind,
+            "summary_label": summary_label,
+            "model": self._model_name,
+            "language": self._language or "",
+            "entry_count": entry_count,
+            "upload_mode": upload_mode.value,
+            "local_saved": local_path is not None,
+            "local_path": str(local_path) if local_path else "",
+        }
+
+    def _queue_remote_upload(
+        self,
+        md: str,
+        metadata: dict,
+        *,
+        include_audio: bool,
+    ) -> int:
+        cfg = _get_config()
+        secrets = SecretStore()
+        client = TranscriptUploadClient(
+            endpoint=cfg.get("upload_endpoint") or "",
+            auth_token=secrets.get("upload_auth_token"),
+        )
+        pending = client.enqueue(
+            md,
+            metadata,
+            include_audio=include_audio,
+        )
+        self._events.emit(
+            "upload",
+            phase="queued",
+            pending=pending,
+            endpoint_set=bool(client.endpoint),
+        )
+        self._flush_upload_queue(client.endpoint, client.auth_token)
+        return pending
+
+    @work(thread=True, exclusive=True, group="upload")
+    def _flush_upload_queue(self, endpoint: str, auth_token: str) -> None:
+        result = TranscriptUploadClient(
+            endpoint=endpoint,
+            auth_token=auth_token,
+        ).flush()
+
+        if result.sent == 0 and result.pending == 0 and not result.last_error:
+            return
+
+        def notify() -> None:
+            transcript = self.query_one(TranscriptPanel)
+            if result.pending == 0:
+                msg = f"remote upload sent ({result.sent})"
+                phase = "sent"
+            elif result.last_error == "missing upload endpoint":
+                msg = f"remote upload queued ({result.pending} pending); set endpoint with [Y]"
+                phase = "pending"
+            else:
+                msg = (
+                    f"remote upload pending ({result.pending}); "
+                    f"last error: {result.last_error}"
+                )
+                phase = "pending"
+            transcript.system_message(msg, Log.REC)
+            self._events.emit(
+                "upload",
+                phase=phase,
+                sent=result.sent,
+                pending=result.pending,
+                error=result.last_error,
+            )
+
+        self.call_from_thread(notify)
+
+    def _format_export_status(
+        self,
+        entry_count: int,
+        filepath: Path | None,
+        remote_pending: int | None,
+        mode: UploadMode,
+        *,
+        summary: bool = False,
+    ) -> str:
+        contents = f"{entry_count} entries + summary" if summary else f"{entry_count} entries"
+        if filepath is not None:
+            msg = f"exported {contents} -> {filepath}"
+        else:
+            msg = f"queued {contents} for remote upload"
+        if remote_pending is not None:
+            msg += f"; remote queue {remote_pending} pending"
+            if mode is UploadMode.REMOTE_ONLY:
+                msg += "; no local transcript written"
+        return msg
 
     def action_summarize_and_export(self):
         """Open template picker, then save transcript with a local-LLM summary header."""
@@ -2161,11 +2546,6 @@ class VoxTerm(App):
     ) -> None:
         """Write the summarized snapshot + summary header to a .md file (main-thread)."""
         transcript = self.query_one(TranscriptPanel)
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        filename = (
-            self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-transcript.md"
-        )
-        filepath = SESSIONS_DIR / filename
 
         # Splice the summary in just after the first `---` divider so the
         # session header stays at the top.
@@ -2181,21 +2561,29 @@ class VoxTerm(App):
             tail = body[idx + len(marker):]
             md = head + summary_block + "\n---\n" + tail
 
-        filepath.write_text(md, encoding="utf-8")
-
-        if self._live_file and self._live_file.exists():
-            self._live_file.unlink()
-
+        filepath, remote_pending, mode = self._finalize_export(
+            md,
+            entry_count,
+            export_kind="summary",
+            summary_label=template_label,
+        )
         self._start_new_session()
         transcript.system_message(
-            f"exported {entry_count} entries + summary → {filepath}", Log.REC
+            self._format_export_status(
+                entry_count,
+                filepath,
+                remote_pending,
+                mode,
+                summary=True,
+            ),
+            Log.REC,
         )
         # Surface the summary immediately so it's reachable (copy/open)
         # without digging through the transcripts folder.
         self.push_screen(
             SummaryResultScreen(
                 summary=summary,
-                path=str(filepath),
+                path=str(filepath) if filepath else "",
                 template_label=template_label,
             )
         )
