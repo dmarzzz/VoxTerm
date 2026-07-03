@@ -68,6 +68,7 @@ from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
+from tui.save_feedback import format_clipboard_saved, format_file_saved
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.mix import mix_chunks
@@ -2039,8 +2040,12 @@ class VoxTerm(App):
             self._live_file.unlink()
 
         entry_count = len(transcript.get_entries())
+        byte_count = filepath.stat().st_size
         self._start_new_session()
-        transcript.system_message(f"exported {entry_count} entries → {filepath}", Log.REC)
+        transcript.system_message(
+            format_file_saved(filepath, entry_count, byte_count),
+            Log.REC,
+        )
 
     def action_summarize_and_export(self):
         """Open template picker, then save transcript with a local-LLM summary header."""
@@ -2182,13 +2187,15 @@ class VoxTerm(App):
             md = head + summary_block + "\n---\n" + tail
 
         filepath.write_text(md, encoding="utf-8")
+        byte_count = filepath.stat().st_size
 
         if self._live_file and self._live_file.exists():
             self._live_file.unlink()
 
         self._start_new_session()
         transcript.system_message(
-            f"exported {entry_count} entries + summary → {filepath}", Log.REC
+            format_file_saved(filepath, entry_count, byte_count, summary=True),
+            Log.REC,
         )
         # Surface the summary immediately so it's reachable (copy/open)
         # without digging through the transcripts folder.
@@ -2213,7 +2220,7 @@ class VoxTerm(App):
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             proc.communicate(text.encode("utf-8"))
             self._start_new_session()
-            transcript.system_message(f"copied {entry_count} entries to clipboard", Log.REC)
+            transcript.system_message(format_clipboard_saved(entry_count), Log.REC)
         except Exception:
             transcript.system_message("clipboard copy failed", Log.REC)
 
