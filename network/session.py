@@ -21,6 +21,9 @@ from config import (
     P2P_PROTO_VERSION,
     P2P_TCP_PORT,
     P2P_UDP_PORT,
+    P2P_HANDSHAKE_FAILURE_LIMIT,
+    P2P_HANDSHAKE_FAILURE_WINDOW,
+    P2P_HANDSHAKE_LOCKOUT,
     SAMPLE_RATE,
     CHANNELS,
 )
@@ -105,6 +108,8 @@ class SessionManager:
 
         self._peers: dict[str, PeerConnection] = {}
         self._lock = threading.Lock()
+        self._handshake_failures: dict[str, list[float]] = {}
+        self._handshake_lockouts: dict[str, float] = {}
 
         self._server_sock: socket.socket | None = None
         self._running = False
@@ -148,6 +153,41 @@ class SessionManager:
         """Check if a peer is currently connected."""
         with self._lock:
             return node_id in self._peers
+
+    def _handshake_locked(self, ip: str, now: float | None = None) -> bool:
+        """Return True if this IP is temporarily locked out."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            locked_until = self._handshake_lockouts.get(ip, 0.0)
+            if locked_until > now:
+                return True
+            if locked_until:
+                self._handshake_lockouts.pop(ip, None)
+            return False
+
+    def _record_handshake_failure(self, ip: str, now: float | None = None) -> None:
+        """Track failed encrypted handshakes and lock out noisy IPs."""
+        if P2P_HANDSHAKE_FAILURE_LIMIT <= 0:
+            return
+        now = time.monotonic() if now is None else now
+        cutoff = now - P2P_HANDSHAKE_FAILURE_WINDOW
+        with self._lock:
+            failures = [
+                ts for ts in self._handshake_failures.get(ip, [])
+                if ts >= cutoff
+            ]
+            failures.append(now)
+            if len(failures) >= P2P_HANDSHAKE_FAILURE_LIMIT:
+                self._handshake_failures[ip] = []
+                self._handshake_lockouts[ip] = now + P2P_HANDSHAKE_LOCKOUT
+            else:
+                self._handshake_failures[ip] = failures
+
+    def _record_handshake_success(self, ip: str) -> None:
+        """Clear any soft failure state after a valid encrypted handshake."""
+        with self._lock:
+            self._handshake_failures.pop(ip, None)
+            self._handshake_lockouts.pop(ip, None)
 
     # ── session lifecycle ─────────────────────────────────────
 
@@ -325,14 +365,21 @@ class SessionManager:
 
     def _handle_incoming(self, conn: socket.socket, addr: tuple[str, int]) -> None:
         """Handle an incoming TCP connection: exchange HELLOs then read loop."""
+        ip = addr[0]
         try:
+            if self._handshake_locked(ip):
+                log.warning("Handshake locked out for %s", ip)
+                conn.close()
+                return
             conn.settimeout(5.0)
 
             # Encrypted handshake — validates session key before HELLO
             if not self._do_handshake_server(conn):
                 log.debug("Handshake failed from %s (wrong session code?)", addr)
+                self._record_handshake_failure(ip)
                 conn.close()
                 return
+            self._record_handshake_success(ip)
 
             # Exchange HELLOs (encrypted)
             my_hello = build_hello(
