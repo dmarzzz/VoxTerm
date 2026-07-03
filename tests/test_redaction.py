@@ -1,0 +1,549 @@
+"""Redaction engine — pure span logic + backend factory + Ollama flow.
+
+The LLM is never invoked: span parsing, regex detection, and masking are
+pure functions, and the Ollama path is mocked. Runs in CI with no model.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import patch
+
+import pytest
+from textual.app import App
+from textual.widgets import SelectionList, Static
+
+import redaction.engine as redaction_engine
+import tui.app as tui_app
+from redaction.engine import (
+    OllamaRedactor,
+    RedactionError,
+    apply_word_lists,
+    apply_redactions,
+    chunk_text,
+    custom_censor_spans,
+    drop_allowed,
+    get_redactor,
+    overwrite_and_delete,
+    parse_spans,
+    redact_live_egress_text,
+    regex_spans,
+    verify_redaction_coverage,
+)
+from redaction.prompts import resolve_profile
+from tui.app import VoxTerm
+from tui.app import _egress_tier_id_for_destination
+from tui.widgets.header import CyberHeader
+from tui.widgets.redaction_screen import RedactionReviewScreen
+from tui.widgets.transcript import TranscriptPanel
+
+
+# --- factory -------------------------------------------------------------
+
+def test_factory_dispatches_ollama_prefix():
+    r = get_redactor("ollama:qwen3:0.6b")
+    assert isinstance(r, OllamaRedactor)
+
+
+def test_factory_rejects_default_mlx_on_intel_macos(monkeypatch):
+    monkeypatch.setattr(redaction_engine.sys, "platform", "darwin")
+    monkeypatch.setattr(redaction_engine.platform, "machine", lambda: "x86_64")
+    redaction_engine._cache.clear()
+    with pytest.raises(RedactionError, match="Apple Silicon macOS"):
+        get_redactor("")
+
+
+def test_factory_caches_by_key():
+    a = get_redactor("ollama:llama3.2")
+    b = get_redactor("ollama:llama3.2")
+    assert a is b
+
+
+def test_empty_model_rejected():
+    with pytest.raises(RedactionError):
+        OllamaRedactor("")
+
+
+# --- parse_spans ---------------------------------------------------------
+
+def test_parse_spans_plain_array():
+    out = '[{"text": "Alice", "type": "NAME"}, {"text": "bob@x.com", "type": "EMAIL"}]'
+    assert parse_spans(out) == [("Alice", "NAME"), ("bob@x.com", "EMAIL")]
+
+
+def test_parse_spans_tolerates_preamble_and_fences():
+    out = 'Sure! Here you go:\n```json\n[{"text": "Acme", "type": "ORG"}]\n```'
+    assert parse_spans(out) == [("Acme", "ORG")]
+
+
+def test_parse_spans_coerces_unknown_type_to_other():
+    assert parse_spans('[{"text": "x", "type": "BANANA"}]') == [("x", "OTHER")]
+
+
+def test_parse_spans_skips_malformed_items():
+    out = '[{"text": "Al", "type": "NAME"}, {"nope": 1}, {"text": "", "type": "NAME"}, 42]'
+    assert parse_spans(out) == [("Al", "NAME")]
+
+
+def test_parse_spans_garbage_returns_empty():
+    assert parse_spans("the model refused to answer") == []
+    assert parse_spans("") == []
+    assert parse_spans("[not valid json}") == []
+
+
+# --- regex_spans ---------------------------------------------------------
+
+def test_regex_catches_structured_pii():
+    text = (
+        "mail me at jane.doe@example.com or call 415-555-0199, "
+        "ssn 123-45-6789, see https://secret.example.com/x, host 10.0.0.2"
+    )
+    found = dict((t, ty) for t, ty in regex_spans(text))
+    assert found.get("jane.doe@example.com") == "EMAIL"
+    assert found.get("123-45-6789") == "ID"
+    assert "https://secret.example.com/x" in found
+    assert any(t == "10.0.0.2" for t, _ in regex_spans(text))
+    assert any(ty == "PHONE" for _, ty in regex_spans(text))
+
+
+def test_regex_ignores_plain_text_and_timestamps():
+    # Colons separate timestamp fields, so a clock time isn't a phone run.
+    found = regex_spans("the meeting at 12:34:56 went well")
+    assert found == []
+
+
+# --- apply_redactions ----------------------------------------------------
+
+def test_apply_masks_verbatim_and_counts():
+    text = "Alice met Alice and Bob."
+    res = apply_redactions(text, [("Alice", "NAME"), ("Bob", "NAME")])
+    assert res.redacted_text == "[NAME] met [NAME] and [NAME]."
+    assert res.counts["NAME"] == 3
+    assert res.total == 3
+
+
+def test_apply_longest_first_prevents_partial_clobber():
+    text = "Alice Smith spoke; Alice nodded."
+    res = apply_redactions(text, [("Alice", "NAME"), ("Alice Smith", "NAME")])
+    # "Alice Smith" masked as one unit first, then the lone "Alice".
+    assert res.redacted_text == "[NAME] spoke; [NAME] nodded."
+    assert res.counts["NAME"] == 2
+
+
+def test_apply_skips_spans_not_present():
+    text = "nothing sensitive here"
+    res = apply_redactions(text, [("Hallucinated Name", "NAME")])
+    assert res.redacted_text == text
+    assert res.total == 0
+
+
+def test_apply_drops_too_short_spans():
+    text = "a b c"
+    res = apply_redactions(text, [("a", "NAME"), ("", "NAME"), (" ", "OTHER")])
+    assert res.redacted_text == text
+    assert res.total == 0
+
+
+def test_coverage_signal_clear_after_masking():
+    signal = verify_redaction_coverage(
+        "[NAME] discussed [PROJECT] with [ORG].",
+        "world",
+    )
+    assert signal.status == "clear"
+    assert signal.findings == ()
+
+
+def test_coverage_signal_warns_on_leftover_structured_pii():
+    signal = verify_redaction_coverage(
+        "Email jane@example.com after the meeting.",
+        "room",
+    )
+    assert signal.status == "review"
+    assert signal.total == 1
+    assert signal.findings[0].type == "EMAIL"
+
+
+def test_coverage_signal_warns_on_world_proper_noun_candidates():
+    signal = verify_redaction_coverage(
+        "[NAME] discussed Reth with Anthropic.",
+        "world",
+    )
+    assert signal.status == "review"
+    assert {finding.text for finding in signal.findings} >= {"Reth", "Anthropic"}
+    assert {finding.type for finding in signal.findings} == {"PROPER"}
+
+
+def test_coverage_signal_off_for_raw():
+    signal = verify_redaction_coverage("Alice jane@example.com", "raw")
+    assert signal.status == "off"
+    assert signal.total == 0
+
+
+def test_live_egress_redacts_structured_pii_at_room_tier():
+    redacted = redact_live_egress_text(
+        "Reth notes: email alice@example.com and call 415-555-0199",
+        "room",
+    )
+    assert "Reth" in redacted
+    assert "alice@example.com" not in redacted
+    assert "415-555-0199" not in redacted
+    assert "[EMAIL]" in redacted
+    assert "[PHONE]" in redacted
+
+
+def test_live_egress_redacts_standalone_speaker_labels_at_room_tier():
+    assert redact_live_egress_text("Alice", "room") == "[NAME]"
+    assert redact_live_egress_text("Speaker 1", "room") == "Speaker 1"
+
+
+def test_live_egress_uses_word_lists_and_allow_list():
+    redacted = redact_live_egress_text(
+        "Bluebird and Acme should travel together.",
+        "room",
+        always_censor=["bluebird"],
+        always_allow=["Acme"],
+    )
+    assert "[CUSTOM]" in redacted
+    assert "Bluebird" not in redacted
+    assert "Acme" in redacted
+
+
+def test_live_egress_world_masks_proper_noun_candidates():
+    redacted = redact_live_egress_text(
+        "Alice discussed Reth with Anthropic.",
+        "world",
+        always_censor=["Alice"],
+    )
+    assert "Alice" not in redacted
+    assert "Reth" not in redacted
+    assert "Anthropic" not in redacted
+    assert "[CUSTOM]" in redacted
+    assert "[ORG]" in redacted
+
+
+def test_egress_destination_default_is_room_or_stricter():
+    assert _egress_tier_id_for_destination("raw", "room") == "room"
+    assert _egress_tier_id_for_destination("inner", "room") == "room"
+    assert _egress_tier_id_for_destination("room", "room") == "room"
+    assert _egress_tier_id_for_destination("world", "room") == "world"
+
+
+# --- chunk_text ----------------------------------------------------------
+
+def test_chunk_covers_all_lines_without_loss():
+    text = "".join(f"line {i}\n" for i in range(200))
+    chunks = chunk_text(text, 100)
+    assert len(chunks) > 1
+    assert "".join(chunks) == text  # nothing dropped, nothing duplicated
+
+
+def test_chunk_hard_splits_one_huge_line():
+    text = "x" * 250
+    chunks = chunk_text(text, 100)
+    assert all(len(c) <= 100 for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_chunk_empty_text():
+    assert chunk_text("", 100) == []
+
+
+# --- end-to-end through a mocked Ollama backend --------------------------
+
+def test_ollama_redact_identifies_then_masks():
+    captured = {}
+
+    def fake_post(self, path, payload):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"message": {"content": '[{"text": "Alice", "type": "NAME"}]'}}
+
+    r = OllamaRedactor("qwen3:0.6b")
+    with patch.object(OllamaRedactor, "_post", fake_post):
+        res = r.redact(
+            "Alice emailed bob@x.com about the deal.",
+            resolve_profile("standard"),
+        )
+
+    # LLM-found NAME + regex-found EMAIL both masked.
+    assert "[NAME]" in res.redacted_text
+    assert "[EMAIL]" in res.redacted_text
+    assert "Alice" not in res.redacted_text
+    assert "bob@x.com" not in res.redacted_text
+    assert captured["path"] == "/api/chat"
+    assert captured["payload"]["model"] == "qwen3:0.6b"
+
+
+def test_ollama_redact_empty_model_reply_is_not_an_error():
+    # An empty/[] reply means "no PII found" — valid, not a failure.
+    r = OllamaRedactor("qwen3:0.6b")
+    with patch.object(OllamaRedactor, "_post", lambda self, p, d: {"message": {"content": "[]"}}):
+        res = r.redact("nothing sensitive at all", resolve_profile("standard"))
+    assert res.total == 0
+    assert res.redacted_text == "nothing sensitive at all"
+
+
+def test_unreachable_host_raises_clean_error():
+    r = OllamaRedactor("qwen3:0.6b@http://localhost:9")
+    with pytest.raises(RedactionError, match="Cannot reach Ollama"):
+        r.redact("x", resolve_profile("standard"))
+
+
+# --- review-step semantics (user edits the span set) --------------------
+
+def test_review_user_deselects_a_false_positive():
+    # The review screen hands back only the spans the user kept. A span
+    # dropped in review must NOT be masked in the finalized output.
+    body = "Paris is nice. Bob lives in Paris."
+    # model proposed both; user unchecked "Paris" (a place they don't mind).
+    kept = [("Bob", "NAME")]
+    res = apply_redactions(body, kept)
+    assert res.redacted_text == "Paris is nice. [NAME] lives in Paris."
+    assert "Paris" in res.redacted_text  # deselected → left intact
+
+
+def test_review_user_adds_a_missed_span():
+    body = "The codeword is bluebird."
+    added = [("bluebird", "OTHER")]
+    res = apply_redactions(body, added)
+    assert res.redacted_text == "The codeword is [OTHER]."
+
+
+# --- shred helper --------------------------------------------------------
+
+def test_overwrite_and_delete_removes_file(tmp_path):
+    p = tmp_path / "secret-transcript.md"
+    p.write_text("Alice said her SSN is 123-45-6789", encoding="utf-8")
+    overwrite_and_delete(p)
+    assert not p.exists()
+
+
+def test_overwrite_and_delete_missing_file_is_noop(tmp_path):
+    p = tmp_path / "nope.md"
+    overwrite_and_delete(p)  # must not raise
+    assert not p.exists()
+
+
+# --- disclosure tiers ----------------------------------------------------
+
+from redaction.tiers import (
+    TIERS,
+    filter_spans,
+    next_tier,
+    resolve_tier,
+    tier_masks,
+)
+
+
+def test_tiers_are_strictly_nested():
+    raw, inner, room, world = (resolve_tier(i) for i in ("raw", "inner", "room", "world"))
+    assert raw.masks < inner.masks < room.masks < world.masks
+    assert raw.masks == frozenset()
+
+
+def test_tier_policy_per_category():
+    world, room, inner, raw = (resolve_tier(i) for i in ("world", "room", "inner", "raw"))
+    # secrets masked everywhere except raw
+    assert tier_masks(inner, "CREDENTIAL") and tier_masks(inner, "ID")
+    assert not tier_masks(inner, "NAME")
+    # room strips people but keeps the work (orgs/projects)
+    assert tier_masks(room, "NAME") and tier_masks(room, "SUBSTANCE")
+    assert not tier_masks(room, "ORG") and not tier_masks(room, "PROJECT")
+    # world strips proper nouns too
+    assert tier_masks(world, "ORG") and tier_masks(world, "PROJECT")
+    # raw masks nothing
+    assert not any(tier_masks(raw, c) for c in ("NAME", "ID", "ORG"))
+
+
+def test_filter_spans_by_tier():
+    spans = [("Alice", "NAME"), ("Reth", "PROJECT"), ("hunter2", "CREDENTIAL")]
+    assert dict(filter_spans(resolve_tier("raw"), spans)) == {}
+    assert dict(filter_spans(resolve_tier("inner"), spans)) == {"hunter2": "CREDENTIAL"}
+    assert "Reth" not in dict(filter_spans(resolve_tier("room"), spans))
+    assert "Alice" in dict(filter_spans(resolve_tier("room"), spans))
+    assert dict(filter_spans(resolve_tier("world"), spans)) == dict(spans)
+
+
+def test_next_tier_wraps():
+    order = [next_tier(TIERS[i]).id for i in range(len(TIERS))]
+    assert order == ["inner", "room", "world", "raw"]
+
+
+def test_resolve_tier_fallback():
+    assert resolve_tier("nonsense").id == "room"
+
+
+# --- user word lists -----------------------------------------------------
+
+def test_custom_censor_is_case_insensitive_distinct_hits():
+    body = "ProjectX shipped; projectX again; unrelated."
+    spans = dict(custom_censor_spans(body, ["projectx"]))
+    assert spans.get("ProjectX") == "CUSTOM"
+    assert spans.get("projectX") == "CUSTOM"
+
+
+def test_custom_censor_ignores_too_short_and_absent():
+    assert custom_censor_spans("hello world", ["x", "absent"]) == []
+
+
+def test_drop_allowed_removes_matching_spans_case_insensitive():
+    spans = [("Acme", "ORG"), ("Alice", "NAME")]
+    assert drop_allowed(spans, ["acme"]) == [("Alice", "NAME")]
+
+
+def test_apply_word_lists_drops_then_adds():
+    body = "Acme hired Alice; codename Bluebird."
+    detected = [("Acme", "ORG"), ("Alice", "NAME")]
+    out = dict(
+        apply_word_lists(
+            body,
+            detected,
+            always_censor=["bluebird"],
+            always_allow=["Acme"],
+        )
+    )
+    assert "Acme" not in out
+    assert out.get("Alice") == "NAME"
+    assert out.get("Bluebird") == "CUSTOM"
+
+
+def test_custom_spans_masked_at_every_redacting_tier():
+    assert tier_masks(resolve_tier("inner"), "CUSTOM")
+    assert tier_masks(resolve_tier("world"), "CUSTOM")
+    assert not tier_masks(resolve_tier("raw"), "CUSTOM")
+
+
+# --- TUI wiring ----------------------------------------------------------
+
+def _binding(action: str):
+    return next(binding for binding in VoxTerm.BINDINGS if binding.action == action)
+
+
+def test_redaction_binding_added_without_removing_gui_binding():
+    assert _binding("redact_and_export").key == "x"
+    assert _binding("redact_and_export").description == "Redact"
+    assert _binding("cycle_redaction_tier").key == "shift+x"
+    assert _binding("toggle_redacted_view").key == "ctrl+r"
+    assert _binding("launch_gui").key == "g"
+
+
+class _FakeConfig:
+    def __init__(self):
+        self.data = {"redaction_tier": "room"}
+
+    def get(self, key: str):
+        return self.data.get(key)
+
+    def update(self, values):
+        self.data.update(values)
+
+
+class _FakeHeader:
+    def __init__(self):
+        self.tiers: list[str] = []
+
+    def set_disclosure_tier(self, tier_id: str):
+        self.tiers.append(tier_id)
+
+
+class _FakeTranscript:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def system_message(self, message, *args, **kwargs):
+        self.messages.append(message)
+
+
+def test_cycle_redaction_tier_updates_config_header_and_transcript(monkeypatch):
+    app = object.__new__(VoxTerm)
+    config = _FakeConfig()
+    header = _FakeHeader()
+    transcript = _FakeTranscript()
+
+    def fake_query(selector):
+        if selector is CyberHeader:
+            return header
+        if selector is TranscriptPanel:
+            return transcript
+        raise AssertionError(selector)
+
+    monkeypatch.setattr(tui_app, "_get_config", lambda: config)
+    monkeypatch.setattr(app, "query_one", fake_query)
+
+    app.action_cycle_redaction_tier()
+
+    assert config.data["redaction_tier"] == "world"
+    assert header.tiers == ["world"]
+    assert transcript.messages == [
+        "disclosure tier: WORLD — strip every identifier and proper noun"
+    ]
+
+
+def test_transcript_redacted_view_toggles_both_directions():
+    panel = TranscriptPanel()
+    panel._merged_view = True
+    panel._entries = [
+        ("12:00:00", "transcript", "Alice said hello", "Alice", 1, ""),
+    ]
+
+    changed = panel.redact_view([("Alice", "NAME")], label="ROOM")
+
+    assert changed == 1
+    assert panel.is_redacted_view() is True
+    assert panel._entries[0][2] == "[NAME] said hello"
+    assert panel._entries[0][3] == "[NAME]"
+
+    panel.system_message("redacted done")
+
+    assert panel.restore_view() is True
+    assert panel.is_redacted_view() is False
+    assert panel._entries[0][2] == "Alice said hello"
+    assert panel._entries[-1][2] == "redacted done"
+
+    assert panel.show_redacted_view() is True
+    assert panel.is_redacted_view() is True
+    assert panel._entries[0][2] == "[NAME] said hello"
+    assert panel._entries[-1][2] == "redacted done"
+
+
+class _ReviewHost(App):
+    def compose(self):
+        yield Static("host")
+
+
+def test_review_screen_tier_dial_resets_span_selection():
+    async def run_screen():
+        screen = RedactionReviewScreen(
+            spans=[
+                ("Alice", "NAME"),
+                ("Reth", "PROJECT"),
+                ("hunter2", "CREDENTIAL"),
+            ],
+            body="Alice discussed Reth with hunter2.",
+            tier_id="room",
+        )
+        app = _ReviewHost()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause(0.1)
+            selection = screen.query_one("#review-spans", SelectionList)
+            assert screen._tier.id == "room"
+            assert sorted(selection.selected) == [0, 2]
+
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.1)
+            assert screen._tier.id == "world"
+            assert sorted(selection.selected) == [0, 1, 2]
+            assert "coverage check clear" in screen.query_one(
+                "#review-coverage", Static
+            ).content
+
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.1)
+            assert screen._tier.id == "raw"
+            assert sorted(selection.selected) == []
+            assert "coverage check off for RAW" in screen.query_one(
+                "#review-coverage", Static
+            ).content
+
+    asyncio.run(run_screen())

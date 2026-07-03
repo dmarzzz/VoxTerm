@@ -437,6 +437,7 @@ class HivemindClient:
         push_enabled: bool = False,
         pinned_sink_pubkey: str = "",
         on_state_change: Callable[[bool, str], None] | None = None,
+        segment_filter: Callable[[str], str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         poster: Callable[[Sink, dict], dict] | None = None,
@@ -459,6 +460,7 @@ class HivemindClient:
         # TUI can persist the choice to ConfigStore without this
         # module depending on the store.
         self._on_state_change = on_state_change
+        self._segment_filter = segment_filter
         self._clock = clock
         self._wall_clock = wall_clock
         self._poster = poster or (lambda s, b: post_batch(s, b))
@@ -577,6 +579,18 @@ class HivemindClient:
         text = (text or "").strip()
         if not text:
             return
+        if self._segment_filter is not None:
+            try:
+                speaker = self._segment_filter(str(speaker or ""))
+                text = self._segment_filter(text).strip()
+            except Exception:
+                log.warning(
+                    "hivemind segment filter failed; dropping segment",
+                    exc_info=True,
+                )
+                return
+            if not text:
+                return
         seg = _PendingSegment(t=float(t), speaker=str(speaker or ""), text=text)
         with self._lock:
             if self._batch_started_wall is None:
@@ -776,6 +790,7 @@ def configure(
     push_enabled: bool = False,
     pinned_sink_pubkey: str = "",
     on_state_change: Callable[[bool, str], None] | None = None,
+    segment_filter: Callable[[str], str] | None = None,
 ) -> HivemindClient | None:
     """Build a configured ``HivemindClient`` for this voxterm session.
 
@@ -887,4 +902,5 @@ def configure(
         push_enabled=effective_push_enabled,
         pinned_sink_pubkey=pinned_sink_pubkey,
         on_state_change=on_state_change,
+        segment_filter=segment_filter,
     )

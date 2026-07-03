@@ -84,6 +84,7 @@ def _make_client(
     # itself can override.
     push_enabled: bool = True,
     pinned_sink_pubkey: str = "",
+    segment_filter=None,
 ) -> tuple[HivemindClient, _CapturingPoster, _FakeClock]:
     poster = poster or _CapturingPoster()
     clock = clock or _FakeClock()
@@ -99,6 +100,7 @@ def _make_client(
         flush_segments=flush_segments,
         push_enabled=push_enabled,
         pinned_sink_pubkey=pinned_sink_pubkey,
+        segment_filter=segment_filter,
         clock=clock,
         poster=poster,
     )
@@ -288,6 +290,35 @@ def test_post_batch_to_sink(http_capture):
         {"t": 1.5, "speaker": "bob",   "text": "world"},
     ]
     assert client.batches_sent == 1
+
+
+def test_segment_filter_masks_payload_before_post():
+    def mask(value: str) -> str:
+        return value.replace("Alice", "[NAME]").replace("alice@example.com", "[EMAIL]")
+
+    client, poster, _ = _make_client(segment_filter=mask)
+
+    client.add_segment(0.0, "Alice", "email alice@example.com")
+    assert client.flush_now() is True
+
+    payload = poster.calls[0][1]
+    assert payload["segments"] == [
+        {"t": 0.0, "speaker": "[NAME]", "text": "email [EMAIL]"}
+    ]
+
+
+def test_segment_filter_failure_drops_segment(caplog):
+    def boom(_value: str) -> str:
+        raise RuntimeError("nope")
+
+    client, poster, _ = _make_client(segment_filter=boom)
+
+    with caplog.at_level("WARNING", logger="voxterm.hivemind"):
+        client.add_segment(0.0, "Alice", "secret")
+
+    assert client.flush_now() is False
+    assert poster.calls == []
+    assert "segment filter failed" in caplog.text
 
 
 # ── 3. Flush cadence: 60s ──────────────────────────────────────────────

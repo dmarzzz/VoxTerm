@@ -66,6 +66,22 @@ from tui.widgets.tag_screen import SpeakerTagScreen
 from tui.widgets.profile_screen import SpeakerProfileScreen
 from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
+from tui.widgets.redaction_screen import (
+    RedactionScreen,
+    RedactionReviewScreen,
+    RedactionResultScreen,
+)
+from redaction import (
+    DETECTION_PROFILE,
+    RedactionError,
+    apply_redactions,
+    get_redactor,
+    next_tier,
+    overwrite_and_delete,
+    redact_live_egress_text,
+    resolve_tier,
+    verify_redaction_coverage,
+)
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
 from audio.capture import AudioCapture
@@ -103,6 +119,13 @@ def _clipboard_cmd() -> list[str] | None:
     if shutil.which("wl-copy"):
         return ["wl-copy"]
     return None
+
+
+def _egress_tier_id_for_destination(current_id: str, default_id: str) -> str:
+    """Use the destination default unless the ambient tier is stricter."""
+    current = resolve_tier(current_id or default_id)
+    default = resolve_tier(default_id)
+    return current.id if current.rank >= default.rank else default.id
 
 
 from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILABLE
@@ -448,6 +471,9 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]E[/]       [#c0c0c0]Browse saved transcripts[/]\n"
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
+                "[bold #00e5ff]X[/]       [#c0c0c0]Save redacted copy (local LLM)[/]\n"
+                "[bold #00e5ff]Shift+X[/] [#c0c0c0]Cycle disclosure tier[/]\n"
+                "[bold #00e5ff]^R[/]      [#c0c0c0]Toggle redacted transcript view[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
@@ -541,6 +567,9 @@ class VoxTerm(App):
         Binding("ctrl+s", "export_transcript", "Save"),
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize_and_export", "Summarize"),
+        Binding("x", "redact_and_export", "Redact"),
+        Binding("shift+x", "cycle_redaction_tier", "Tier", show=False),
+        Binding("ctrl+r", "toggle_redacted_view", "Redacted view", show=False),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -652,6 +681,7 @@ class VoxTerm(App):
             "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
             "[bold #00e5ff]\\[U][/][#607080] Summarize  [/]"
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
+            "[bold #00e5ff]\\[X][/][#607080] Redact  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
             "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
@@ -754,6 +784,7 @@ class VoxTerm(App):
 
     def on_mount(self) -> None:
         self._recording_pulse = RecordingPulse(self)
+        self._refresh_disclosure_badge()
 
         # Open speaker profile store (fast — just SQLite + cache load)
         try:
@@ -843,6 +874,27 @@ class VoxTerm(App):
             self.query_one(CyberHeader).refresh()
         if self._last_saved_at is not None:
             self._update_telemetry()
+
+    def _current_redaction_tier(self):
+        try:
+            return resolve_tier((_get_config().get("redaction_tier") or "room"))
+        except Exception:
+            return resolve_tier("room")
+
+    def _set_redaction_tier(self, tier_id: str):
+        tier = resolve_tier(tier_id)
+        try:
+            _get_config().update({"redaction_tier": tier.id})
+        except Exception:
+            pass
+        try:
+            self.query_one(CyberHeader).set_disclosure_tier(tier.id)
+        except Exception:
+            pass
+        return tier
+
+    def _refresh_disclosure_badge(self) -> None:
+        self._set_redaction_tier(self._current_redaction_tier().id)
 
     def _periodic_gc(self):
         """Prevent memory fragmentation during long sessions + memory watchdog."""
@@ -2200,6 +2252,264 @@ class VoxTerm(App):
             )
         )
 
+    def action_redact_and_export(self):
+        """Open the profile picker, then save a redacted copy of the transcript.
+
+        Non-destructive: unlike summarize-and-export, this does NOT consume the
+        session — it writes a separate ``*-redacted.md`` snapshot and leaves the
+        live transcript (and live file) intact so recording can continue.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        if not transcript.get_entries():
+            transcript.system_message("nothing to redact", Log.REC)
+            return
+
+        cfg = _get_config()
+        default_tier = cfg.get("redaction_tier") or "room"
+        default_model = cfg.get("redaction_model") or ""
+
+        def on_tier_selected(result):
+            if not result:
+                return
+            tier_id = result["tier_id"]
+            redaction_model = result.get("redaction_model", "")
+            # Persist the chosen tier + model (blank model = on-device MLX, an
+            # intentional choice). The tier is your default disclosure posture.
+            self._set_redaction_tier(tier_id)
+            cfg.update({"redaction_model": redaction_model})
+            # Snapshot BEFORE the progress message so it isn't fed to the LLM
+            # or written into the redacted file (same discipline as summarize).
+            body = transcript.get_markdown(
+                self._model_name,
+                session_start=self._session_start,
+                language=self._language or "",
+            )
+            entry_count = len(transcript.get_entries())
+            transcript.system_message(
+                "detecting sensitive spans (local LLM)…", Log.REC
+            )
+            self._run_redact_and_export(tier_id, body, entry_count, redaction_model)
+
+        self.push_screen(
+            RedactionScreen(
+                default_tier_id=default_tier,
+                default_redaction_model=default_model,
+            ),
+            on_tier_selected,
+        )
+
+    def action_cycle_redaction_tier(self):
+        """Cycle the ambient disclosure posture without starting redaction."""
+        tier = self._set_redaction_tier(next_tier(self._current_redaction_tier()).id)
+        self.query_one(TranscriptPanel).system_message(
+            f"disclosure tier: {tier.label} — {tier.description}", Log.SYS
+        )
+
+    @work(thread=True, exclusive=True, group="redaction")
+    def _run_redact_and_export(
+        self,
+        tier_id: str,
+        body: str,
+        entry_count: int,
+        redaction_model: str,
+    ):
+        """Worker: detect the full span vocabulary in one local-LLM pass.
+
+        Detection is tier-independent — we find everything, then the review
+        screen's dial decides what gets masked (so cycling tiers needs no
+        re-inference). The whole pass runs inside the shared single-thread
+        executor + GPU lock that serialize transcription, so it can't overlap
+        a transcribe/model-load on the Metal GPU.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        try:
+            redactor = get_redactor(model_name=redaction_model)
+            with self._transcribe_lock:
+                result = self._mlx_executor.submit(
+                    redactor.redact, body, DETECTION_PROFILE, ""
+                ).result()
+        except RedactionError as e:
+            self.call_from_thread(
+                lambda: transcript.system_message(
+                    f"redaction failed: {e}", Log.REC
+                )
+            )
+            return
+        except Exception as e:
+            self.call_from_thread(
+                lambda: transcript.system_message(
+                    f"redaction error: {e}", Log.REC
+                )
+            )
+            return
+
+        self.call_from_thread(
+            self._review_redaction, tier_id, result, body, entry_count
+        )
+
+    def _review_redaction(
+        self,
+        tier_id: str,
+        result,  # redaction.RedactionResult (all detected spans)
+        body: str,
+        entry_count: int,
+    ) -> None:
+        """Show the pre-write review modal with the tier dial (main-thread).
+
+        Nothing is on disk yet. The user dials the disclosure tier, vets the
+        spans (the tier sets the baseline; manual toggles override), picks
+        what happens to the unredacted original, then confirms — only then do
+        we write. Cancelling writes nothing, which is the point: a small
+        model's silent miss can't slip into a file called ``-redacted``
+        without a human seeing the preview.
+        """
+        transcript = self.query_one(TranscriptPanel)
+        candidate_spans = [(f.text, f.type) for f in result.findings]
+        cfg = _get_config()
+
+        def on_reviewed(res):
+            if not res:
+                transcript.system_message(
+                    "redaction cancelled — nothing written", Log.REC
+                )
+                return
+            # Persist any word-list edits the user made in the review screen.
+            cfg.update(
+                {
+                    "redaction_always_censor": res.get("always_censor", []),
+                    "redaction_always_allow": res.get("always_allow", []),
+                }
+            )
+            self._finalize_redaction_export(
+                res.get("tier_id", tier_id),
+                body,
+                res["spans"],
+                res.get("disposition", "keep"),
+                entry_count,
+            )
+
+        self.push_screen(
+            RedactionReviewScreen(
+                spans=candidate_spans,
+                body=body,
+                tier_id=tier_id,
+                always_censor=cfg.get("redaction_always_censor") or [],
+                always_allow=cfg.get("redaction_always_allow") or [],
+            ),
+            on_reviewed,
+        )
+
+    def _finalize_redaction_export(
+        self,
+        tier_id: str,
+        body: str,
+        spans: list,
+        disposition: str,
+        entry_count: int,
+    ) -> None:
+        """Apply the user-approved spans, write ``*-redacted.md``, and act on
+        the original per the chosen disposition (main-thread)."""
+        transcript = self.query_one(TranscriptPanel)
+        profile_label = resolve_tier(tier_id).label
+        result = apply_redactions(body, spans)
+        coverage = verify_redaction_coverage(result.redacted_text, tier_id)
+
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = (
+            self._session_start.strftime("%Y-%m-%d_%H%M%S") + "-redacted.md"
+        )
+        filepath = SESSIONS_DIR / filename
+
+        if result.total:
+            tally = ", ".join(
+                f"{n} {cat}"
+                for cat, n in sorted(
+                    result.counts.items(), key=lambda kv: kv[1], reverse=True
+                )
+            )
+            note = (
+                f"_Redacted ({profile_label}): {result.total} spans masked "
+                f"— {tally}._"
+            )
+        else:
+            note = f"_Redacted ({profile_label}): no spans masked._"
+
+        # Splice the redaction note just after the first `---` divider so the
+        # session header stays at the top (mirrors the summary export).
+        redacted = result.redacted_text
+        marker = "\n---\n"
+        idx = redacted.find(marker)
+        block = f"\n## Redacted — {profile_label}\n\n{note}\n"
+        if idx == -1:
+            md = redacted + block
+        else:
+            head = redacted[: idx + len(marker)]
+            tail = redacted[idx + len(marker):]
+            md = head + block + "\n---\n" + tail
+
+        filepath.write_text(md, encoding="utf-8")
+
+        # Act on the unredacted original (the live-autosave file).
+        original_note = ""
+        if disposition in ("replace", "shred") and self._live_file and self._live_file.exists():
+            if disposition == "shred":
+                overwrite_and_delete(self._live_file)
+                original_note = "original shredded (best-effort overwrite + delete)"
+            else:
+                self._live_file.unlink()
+                original_note = "original (live autosave) deleted"
+        elif disposition in ("replace", "shred"):
+            original_note = "no live autosave on disk to remove"
+        else:
+            original_note = "original kept on disk"
+
+        # Show the redaction in the live transcript itself — mask the on-screen
+        # entries (non-destructive; ⌃R toggles back to the original view).
+        view_note = ""
+        if result.total:
+            transcript.redact_view(spans, label=profile_label)
+            view_note = "  ·  transcript now showing REDACTED view (⌃R to toggle)"
+
+        coverage_note = ""
+        if coverage.status == "review":
+            coverage_note = f"  ·  {coverage.summary}"
+
+        transcript.system_message(
+            f"🛇 REDACTED [{profile_label}] — {result.total} spans masked → "
+            f"{filepath} [{original_note}]{view_note}{coverage_note}",
+            Log.REC,
+        )
+        if coverage.status == "review":
+            result_coverage = f"[#ff5577]{coverage.summary}[/]"
+        elif coverage.status == "clear":
+            result_coverage = "[#74b6a6]coverage check clear[/]"
+        else:
+            result_coverage = "[#807060]coverage check off for RAW[/]"
+        self.push_screen(
+            RedactionResultScreen(
+                redacted_text=md,
+                counts=result.counts,
+                total=result.total,
+                path=str(filepath),
+                profile_label=profile_label,
+                original_note=original_note,
+                coverage_note=result_coverage,
+            )
+        )
+
+    def action_toggle_redacted_view(self) -> None:
+        """Toggle the transcript between the redacted view and the original."""
+        transcript = self.query_one(TranscriptPanel)
+        if transcript.is_redacted_view():
+            transcript.restore_view()
+            transcript.system_message("transcript: original view restored", Log.REC)
+        elif transcript.show_redacted_view():
+            transcript.system_message("transcript: redacted view restored", Log.REC)
+        else:
+            transcript.system_message(
+                "no redacted view to toggle — run redaction (X) first", Log.REC
+            )
+
     def _export_to_clipboard(self):
         """Copy transcript to clipboard."""
         transcript = self.query_one(TranscriptPanel)
@@ -2708,6 +3018,18 @@ def main():
             except Exception:
                 log.warning("hivemind state persist failed", exc_info=True)
 
+        def _hivemind_segment_filter(value: str) -> str:
+            tier_id = _egress_tier_id_for_destination(
+                _cfg.get("redaction_tier") or "room",
+                "room",
+            )
+            return redact_live_egress_text(
+                str(value or ""),
+                tier_id,
+                _cfg.get("redaction_always_censor") or [],
+                _cfg.get("redaction_always_allow") or [],
+            )
+
         hivemind_client = _hivemind_configure(
             mode=_hm_mode,
             sink_url=args.hivemind_sink_url,
@@ -2715,6 +3037,7 @@ def main():
             push_enabled=_persisted_push_enabled,
             pinned_sink_pubkey=_persisted_pinned_pubkey,
             on_state_change=_on_hivemind_state_change,
+            segment_filter=_hivemind_segment_filter,
         )
         if hivemind_client is not None:
             sink = hivemind_client.active_sink()

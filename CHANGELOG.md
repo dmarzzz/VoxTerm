@@ -21,6 +21,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full punctuation, fully offline (the APK strips the `INTERNET` permission; `RECORD_AUDIO` only).
   Python-only features (diarization, AI summarize, system audio) are hidden on-device. See
   `tauri-plugin-voxasr/README.md`.
+- **Local-LLM transcript redaction** (`X` key). Masks PII in a transcript
+  using an on-device model and writes a `*-redacted.md` copy. The LLM only
+  *identifies* verbatim sensitive spans (returned as JSON); the engine
+  masks them by exact string replacement, so the transcript stays
+  byte-for-byte intact and the model can't paraphrase or drop content. A
+  deterministic regex pass backstops structured PII (emails, URLs, SSNs,
+  phone/IP-like runs). Four profiles (standard / contacts-only /
+  aggressive / custom) and the same MLX + Ollama backend split as
+  summarization (`ollama:model[@host]` works off Apple Silicon).
+  - **Review before write.** Because a small model *will* miss PII — and a
+    miss written into a file named `-redacted` feels safe — nothing is
+    written until you confirm. The found spans are shown as a toggle list
+    (uncheck false positives, type to add missed ones) with a live preview;
+    cancelling writes nothing.
+  - **Original-file disposition.** You choose what happens to the
+    unredacted live autosave: keep / replace (delete) / shred (best-effort
+    overwrite + delete — not a forensic wipe on copy-on-write/SSD storage,
+    and the UI says so). Defaults to keep and is not persisted.
+  - **Disclosure tiers (the dial).** Redaction level is keyed to *audience*,
+    not an abstract amount: RAW → INNER → ROOM → WORLD, a strictly-nested
+    mask-policy over an expanded vocabulary (identifiers + sensitivity
+    content-classes like substances/health/legal/finance). Detection finds
+    everything in one pass; cycling the tier (⌃T on the review screen)
+    re-filters what's masked with no re-inference, and the current tier is
+    shown as a color-coded meter. ROOM keeps the work (projects, orgs) but
+    strips people; WORLD strips proper nouns too; INNER strips only secrets.
+    Persisted as `redaction_tier`. See #150 for the design + roadmap
+    (egress-coupled auto-tier, always-on header badge, live outbound masking).
+  - **OpenAI Privacy Filter backend** (`privacy-filter` model string). A
+    purpose-built token-classification PII model (`openai/privacy-filter`,
+    Apache-2.0) run via **onnxruntime** — already a VoxTerm dep, so no torch
+    and a fully-local detector on *any* platform (not just Apple Silicon).
+    Returns labeled spans with offsets (no JSON-parse fragility); its 8 labels
+    map onto our vocab. Covers identifiers + secrets only — pair with a chat
+    backend for content-classes / proper nouns (the hybrid in #150). Opt-in
+    extra: `pip install 'voxterm[privacy-filter]'`.
+  - **User word lists + in-transcript redaction.** Configure phrases to
+    *always censor* (added as a `CUSTOM` span, masked at every redacting tier,
+    case-insensitive) or *always allow* (never masked). A word-list editor
+    (⌃E from the review screen) **auto-loads the transcript's detected spans as
+    suggestions** to quickly approve/censor; lists persist
+    (`redaction_always_censor` / `redaction_always_allow`). After redacting,
+    the **live transcript shows the masked view in place** (non-destructive;
+    ⌃R toggles back to the original).
+  - New `redaction/` package; mirrors `summarizer/`.
 
 ## [0.3.0] - 2026-06-03
 
