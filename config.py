@@ -245,6 +245,14 @@ NEW_SPEAKER_THRESHOLD = 0.45      # must be below this vs ALL centroids to creat
 CONTINUITY_BONUS = 0.05           # small bias toward keeping the same speaker across short turns
 DIARIZATION_CONFLICT_MARGIN = 0.05  # if top-2 within this → prefer more established speaker
 MERGE_THRESHOLD = 0.65            # pairwise cosine sim above this → merge clusters
+
+# Legacy PyTorch/CAM++ fallback tuning. CAM++ embeddings are less separated than
+# the default ONNX ERes2Net path, so only the PyTorch backend gets these looser
+# discovery/new-speaker/merge thresholds.
+PYTORCH_MATCH_THRESHOLD_DISCOVERY = 0.60
+PYTORCH_NEW_SPEAKER_THRESHOLD = 0.40
+PYTORCH_MERGE_THRESHOLD = 0.55
+
 QUALITY_RMS_THRESHOLD = 0.003     # min RMS energy for quality-gated centroid update
 MERGE_INTERVAL = 5                # check for cluster merges every N identify() calls
 RECLUSTER_INTERVAL = 8            # spectral re-clustering every N identify() calls
