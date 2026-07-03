@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from config import DATA_DIR, SESSIONS_DIR
 from .core import transcribe_file as core_transcribe_file
@@ -158,3 +159,54 @@ def import_recordings(
         )
 
     return results
+
+
+def watch_recordings(
+    *,
+    roots: Iterable[str | Path] | None = None,
+    import_dir: str | Path | None = None,
+    manifest_path: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    transcribe: bool = True,
+    model: str | None = None,
+    language: str = "en",
+    diarize: bool = True,
+    interval_seconds: float = 10.0,
+    on_results: Callable[[list[ImportResult]], None] | None = None,
+    scan_limit: int | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Continuously scan mounted volumes for new Rode recordings.
+
+    This intentionally uses polling instead of platform-specific mount hooks so
+    the same command can run under launchd, systemd user services, or a shell.
+    Already-imported files are ignored between scans.
+    """
+
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    handled = 0
+    scans = 0
+
+    while scan_limit is None or scans < scan_limit:
+        results = import_recordings(
+            roots=roots,
+            import_dir=import_dir,
+            manifest_path=manifest_path,
+            out_dir=out_dir,
+            transcribe=transcribe,
+            model=model,
+            language=language,
+            diarize=diarize,
+        )
+        actionable = [result for result in results if result.action != "skip"]
+        if actionable:
+            handled += len(actionable)
+            if on_results is not None:
+                on_results(actionable)
+        scans += 1
+        if scan_limit is not None and scans >= scan_limit:
+            break
+        sleep(interval_seconds)
+
+    return handled

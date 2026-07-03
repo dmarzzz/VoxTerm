@@ -85,6 +85,16 @@ a local manifest so later runs skip already imported recordings. The device is
 treated as read-only: import means copy-down, not delete-or-move sync. Use
 `--no-transcribe` to copy only and transcribe on a later run.
 
+For plug-in auto-sync, keep a watcher running:
+
+```bash
+voxterm-batch --rode --watch --watch-interval 10
+```
+
+The watcher polls the same macOS/Linux mount roots, imports only new hashes, and
+prints each copy/transcribe action. Run it from a shell, launchd, or a systemd
+user service when you want recordings to sync as soon as the recorder mounts.
+
 ## Party Mode (P2P)
 
 Multiple people in the same room can share transcripts over the local network. Each laptop captures its closest speaker best — the combined result is better than any single mic.

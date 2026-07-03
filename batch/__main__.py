@@ -7,7 +7,15 @@ from pathlib import Path
 
 from gui.transcribe import gui_default_model
 from .core import transcribe_file
-from .rode import import_recordings
+from .rode import ImportResult, import_recordings, watch_recordings
+
+
+def _print_rode_results(results: list[ImportResult]) -> None:
+    for result in results:
+        line = f"[{result.action}] {result.source_path.name} -> {result.local_path}"
+        if result.transcript_path:
+            line += f" -> {result.transcript_path}"
+        print(line, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +25,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("files", nargs="*", help="audio files to transcribe")
     parser.add_argument("--rode", action="store_true", help="scan mounted Rode volumes")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="with --rode, keep scanning for newly mounted recorder volumes",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=float,
+        default=10.0,
+        help="seconds between --rode --watch scans",
+    )
     parser.add_argument(
         "--mount-root",
         action="append",
@@ -32,7 +51,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-diarize", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.watch and not args.rode:
+        parser.error("--watch requires --rode")
+
     if args.rode:
+        if args.watch:
+            print(
+                f"Watching for Rode recordings every {args.watch_interval:g}s. "
+                "Press Ctrl+C to stop.",
+                flush=True,
+            )
+            try:
+                watch_recordings(
+                    roots=args.mount_root or None,
+                    import_dir=args.import_dir,
+                    manifest_path=args.manifest,
+                    out_dir=args.out_dir,
+                    transcribe=not args.no_transcribe,
+                    model=args.model,
+                    language=args.language,
+                    diarize=not args.no_diarize,
+                    interval_seconds=args.watch_interval,
+                    on_results=_print_rode_results,
+                )
+            except KeyboardInterrupt:
+                print("Stopped Rode watch.")
+            return 0
+
         results = import_recordings(
             roots=args.mount_root or None,
             import_dir=args.import_dir,
@@ -46,11 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         if not results:
             print("No Rode recordings found.")
             return 0
-        for result in results:
-            line = f"[{result.action}] {result.source_path.name} -> {result.local_path}"
-            if result.transcript_path:
-                line += f" -> {result.transcript_path}"
-            print(line)
+        _print_rode_results(results)
         return 0
 
     if not args.files:

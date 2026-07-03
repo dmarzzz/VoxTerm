@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import batch.__main__ as batch_cli
 from batch import core, rode
 
 
@@ -164,3 +165,92 @@ def test_import_recordings_imports_and_transcribes_new_file(monkeypatch, tmp_pat
 
     assert [result.action for result in results] == ["import"]
     assert results[0].transcript_path == out_dir / "new-transcript.md"
+
+
+def test_watch_recordings_imports_new_files_without_skip_spam(tmp_path):
+    root = tmp_path / "Volumes"
+    volume = root / "RODE"
+    volume.mkdir(parents=True)
+    source = volume / "00001_Wireless_GO.WAV"
+    source.write_bytes(b"audio")
+    seen = []
+    sleeps = []
+
+    handled = rode.watch_recordings(
+        roots=[root],
+        import_dir=tmp_path / "imports",
+        manifest_path=tmp_path / "manifest.json",
+        transcribe=False,
+        interval_seconds=0.25,
+        scan_limit=2,
+        sleep=sleeps.append,
+        on_results=seen.extend,
+    )
+
+    assert handled == 1
+    assert [result.action for result in seen] == ["copy"]
+    assert sleeps == [0.25]
+
+
+def test_watch_recordings_rejects_nonpositive_interval(tmp_path):
+    with pytest.raises(ValueError, match="interval_seconds"):
+        rode.watch_recordings(
+            roots=[tmp_path],
+            interval_seconds=0,
+            scan_limit=1,
+        )
+
+
+def test_cli_rode_watch_wires_options_and_prints_results(monkeypatch, tmp_path, capsys):
+    root = tmp_path / "Volumes"
+    source = root / "00001_Wireless_GO.WAV"
+    local = tmp_path / "imports" / source.name
+    calls = {}
+
+    def fake_watch(**kwargs):
+        calls.update(kwargs)
+        kwargs["on_results"](
+            [
+                rode.ImportResult(
+                    source_path=source,
+                    local_path=local,
+                    action="copy",
+                    sha256="abc123",
+                )
+            ]
+        )
+        return 1
+
+    monkeypatch.setattr(batch_cli, "watch_recordings", fake_watch)
+
+    rc = batch_cli.main(
+        [
+            "--rode",
+            "--watch",
+            "--watch-interval",
+            "0.5",
+            "--mount-root",
+            str(root),
+            "--import-dir",
+            str(tmp_path / "imports"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--no-transcribe",
+            "--model",
+            "fw-base",
+        ]
+    )
+
+    assert rc == 0
+    assert calls["roots"] == [str(root)]
+    assert calls["interval_seconds"] == 0.5
+    assert calls["transcribe"] is False
+    assert calls["model"] == "fw-base"
+    out = capsys.readouterr().out
+    assert "Watching for Rode recordings every 0.5s" in out
+    assert "[copy] 00001_Wireless_GO.WAV" in out
+
+
+def test_cli_watch_requires_rode():
+    with pytest.raises(SystemExit):
+        batch_cli.main(["--watch"])
