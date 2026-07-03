@@ -6,9 +6,12 @@ pure functions, and the Ollama path is mocked. Runs in CI with no model.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
+from textual.app import App
+from textual.widgets import SelectionList, Static
 
 import redaction.engine as redaction_engine
 from redaction.engine import (
@@ -22,6 +25,8 @@ from redaction.engine import (
     regex_spans,
 )
 from redaction.prompts import resolve_profile
+from tui.app import VoxTerm
+from tui.widgets.redaction_screen import RedactionReviewScreen
 
 
 # --- factory -------------------------------------------------------------
@@ -273,3 +278,52 @@ def test_next_tier_wraps():
 
 def test_resolve_tier_fallback():
     assert resolve_tier("nonsense").id == "room"
+
+
+# --- TUI wiring ----------------------------------------------------------
+
+def _binding(action: str):
+    return next(binding for binding in VoxTerm.BINDINGS if binding.action == action)
+
+
+def test_redaction_binding_added_without_removing_gui_binding():
+    assert _binding("redact_and_export").key == "x"
+    assert _binding("redact_and_export").description == "Redact"
+    assert _binding("launch_gui").key == "g"
+
+
+class _ReviewHost(App):
+    def compose(self):
+        yield Static("host")
+
+
+def test_review_screen_tier_dial_resets_span_selection():
+    async def run_screen():
+        screen = RedactionReviewScreen(
+            spans=[
+                ("Alice", "NAME"),
+                ("Reth", "PROJECT"),
+                ("hunter2", "CREDENTIAL"),
+            ],
+            body="Alice discussed Reth with hunter2.",
+            tier_id="room",
+        )
+        app = _ReviewHost()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause(0.1)
+            selection = screen.query_one("#review-spans", SelectionList)
+            assert screen._tier.id == "room"
+            assert sorted(selection.selected) == [0, 2]
+
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.1)
+            assert screen._tier.id == "world"
+            assert sorted(selection.selected) == [0, 1, 2]
+
+            await pilot.press("ctrl+t")
+            await pilot.pause(0.1)
+            assert screen._tier.id == "raw"
+            assert sorted(selection.selected) == []
+
+    asyncio.run(run_screen())
