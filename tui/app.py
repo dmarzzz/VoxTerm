@@ -2482,6 +2482,8 @@ class VoxTerm(App):
         if transcript.is_redacted_view():
             transcript.restore_view()
             transcript.system_message("transcript: original view restored", Log.REC)
+        elif transcript.show_redacted_view():
+            transcript.system_message("transcript: redacted view restored", Log.REC)
         else:
             transcript.system_message(
                 "no redacted view to toggle — run redaction (X) first", Log.REC

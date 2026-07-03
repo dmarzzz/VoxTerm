@@ -83,6 +83,8 @@ class TranscriptPanel(RichLog):
         # the originals are stashed for exact restore (non-destructive).
         self._redacted_view = False
         self._redacted_backup: list[tuple] | None = None
+        self._redacted_entries: list[tuple] | None = None
+        self._redacted_label = ""
 
     def system_message(self, msg: str, category: str = "sys",
                        highlights: dict[str, str] | None = None):
@@ -95,6 +97,14 @@ class TranscriptPanel(RichLog):
         self._entries.append((timestamp, "system", msg, category, 0, ""))
         if highlights:
             self._entry_highlights[len(self._entries) - 1] = highlights
+        if self._redacted_backup is not None:
+            entry = self._entries[-1]
+            if self._redacted_view:
+                self._redacted_backup.append(entry)
+                if self._redacted_entries is not None:
+                    self._redacted_entries.append(entry)
+            elif self._redacted_entries is not None:
+                self._redacted_entries.append(entry)
         if not self._merged_view:
             self._write_system(timestamp, msg, category, highlights)
 
@@ -346,11 +356,16 @@ class TranscriptPanel(RichLog):
 
         if not spans:
             return 0
+        source_entries = (
+            list(self._redacted_backup)
+            if self._redacted_backup is not None
+            else list(self._entries)
+        )
         if self._redacted_backup is None:
             self._redacted_backup = list(self._entries)
         changed = 0
         masked: list[tuple] = []
-        for entry in self._entries:
+        for entry in source_entries:
             ts, typ, content, spk = entry[0], entry[1], entry[2], entry[3]
             sid = entry[4] if len(entry) > 4 else 0
             conf = entry[5] if len(entry) > 5 else ""
@@ -362,7 +377,9 @@ class TranscriptPanel(RichLog):
                 masked.append((ts, typ, new_content, new_spk, sid, conf))
             else:
                 masked.append(entry)
-        self._entries = masked
+        self._redacted_entries = masked
+        self._redacted_label = label
+        self._entries = list(masked)
         self._redacted_view = True
         if not self._merged_view:
             self._rerender()
@@ -374,12 +391,23 @@ class TranscriptPanel(RichLog):
         """Revert a redacted view to the original entries. True if reverted."""
         if self._redacted_backup is None:
             return False
-        self._entries = self._redacted_backup
-        self._redacted_backup = None
+        self._entries = list(self._redacted_backup)
         self._redacted_view = False
         if not self._merged_view:
             self._rerender()
         self.border_title = "TRANSCRIPT // LIVE"
+        return True
+
+    def show_redacted_view(self) -> bool:
+        """Switch back to the stored redacted entries. True if available."""
+        if self._redacted_entries is None:
+            return False
+        self._entries = list(self._redacted_entries)
+        self._redacted_view = True
+        if not self._merged_view:
+            self._rerender()
+        suffix = f" · {self._redacted_label}" if self._redacted_label else ""
+        self.border_title = f"TRANSCRIPT // REDACTED{suffix}"
         return True
 
     def is_redacted_view(self) -> bool:
@@ -397,6 +425,8 @@ class TranscriptPanel(RichLog):
         self._merged_view = False
         self._redacted_view = False
         self._redacted_backup = None
+        self._redacted_entries = None
+        self._redacted_label = ""
         self.border_title = "TRANSCRIPT // LIVE"
 
     def get_entries(self) -> list[tuple]:

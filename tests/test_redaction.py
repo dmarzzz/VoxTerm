@@ -392,6 +392,33 @@ def test_cycle_redaction_tier_updates_config_header_and_transcript(monkeypatch):
     ]
 
 
+def test_transcript_redacted_view_toggles_both_directions():
+    panel = TranscriptPanel()
+    panel._merged_view = True
+    panel._entries = [
+        ("12:00:00", "transcript", "Alice said hello", "Alice", 1, ""),
+    ]
+
+    changed = panel.redact_view([("Alice", "NAME")], label="ROOM")
+
+    assert changed == 1
+    assert panel.is_redacted_view() is True
+    assert panel._entries[0][2] == "[NAME] said hello"
+    assert panel._entries[0][3] == "[NAME]"
+
+    panel.system_message("redacted done")
+
+    assert panel.restore_view() is True
+    assert panel.is_redacted_view() is False
+    assert panel._entries[0][2] == "Alice said hello"
+    assert panel._entries[-1][2] == "redacted done"
+
+    assert panel.show_redacted_view() is True
+    assert panel.is_redacted_view() is True
+    assert panel._entries[0][2] == "[NAME] said hello"
+    assert panel._entries[-1][2] == "redacted done"
+
+
 class _ReviewHost(App):
     def compose(self):
         yield Static("host")
