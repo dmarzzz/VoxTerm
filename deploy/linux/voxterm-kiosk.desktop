@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=VoxTerm Kiosk
+Comment=Open the local VoxTerm room UI in kiosk mode
+Exec=sh -lc 'token="$(awk -F= "/^VOXTERM_GUI_TOKEN=/ {print \$2}" "$HOME/.config/voxterm/room.env")"; chromium --kiosk --app="http://127.0.0.1:8740/?token=${token}"'
+Terminal=false
+X-GNOME-Autostart-enabled=true

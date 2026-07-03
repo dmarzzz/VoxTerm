@@ -161,6 +161,13 @@ Remote failures never block the local save path. VoxTerm stores pending uploads 
 For hardware sourcing, see
 [docs/hardware-procurement.md](docs/hardware-procurement.md).
 
+## Always-on room devices
+
+For kiosk-style room deployments, see
+[docs/always-on-deployment.md](docs/always-on-deployment.md). It includes
+macOS LaunchAgent and Linux systemd user-unit templates, update-channel hooks,
+labeling inventory, and operator checks.
+
 ## Hivemind mode (transcript streaming to swf-node)
 
 Voxterm can stream transcript batches to a "convent box" running

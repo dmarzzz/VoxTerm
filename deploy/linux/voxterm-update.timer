@@ -1,0 +1,10 @@
+[Unit]
+Description=Run VoxTerm update check weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Update VoxTerm from the latest GitHub release
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -lc 'curl -fsSL https://github.com/dmarzzz/VoxTerm/releases/latest/download/install.sh | bash'
