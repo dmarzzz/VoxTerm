@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import math
 import os
 import platform
 import re
+import struct
 import sys
+import urllib.error
+import urllib.request
 
 import numpy as np
 
@@ -443,6 +448,174 @@ class FasterWhisperTranscriber(_DeduplicatorMixin):
         return self._loaded
 
 
+# --- optional spectrogram -> vision-model backend ----------------------------
+
+def _audio_to_spectrogram_png_base64(
+    audio: np.ndarray,
+    *,
+    sample_rate: int = _ASR_SR,
+    n_fft: int = 1024,
+    hop_length: int = 256,
+    n_mels: int = 128,
+) -> str:
+    """Convert mono float32 audio to a grayscale mel-spectrogram PNG."""
+    audio = np.asarray(audio, dtype=np.float32).ravel()
+    if len(audio) < n_fft:
+        audio = np.pad(audio, (0, n_fft - len(audio)))
+
+    from scipy.signal import stft as scipy_stft
+
+    freqs, _times, zxx = scipy_stft(
+        audio,
+        fs=sample_rate,
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        boundary=None,
+        padded=False,
+    )
+    magnitude = np.abs(zxx)
+
+    def hz_to_mel(hz: np.ndarray | float) -> np.ndarray | float:
+        return 2595.0 * np.log10(1.0 + np.asarray(hz) / 700.0)
+
+    def mel_to_hz(mel: np.ndarray | float) -> np.ndarray | float:
+        return 700.0 * (10.0 ** (np.asarray(mel) / 2595.0) - 1.0)
+
+    mel_points = np.linspace(hz_to_mel(0.0), hz_to_mel(sample_rate / 2.0), n_mels + 2)
+    hz_points = mel_to_hz(mel_points)
+    bins = np.searchsorted(freqs, hz_points)
+    bins = np.clip(bins, 0, len(freqs) - 1)
+
+    filterbank = np.zeros((n_mels, len(freqs)), dtype=np.float32)
+    for i in range(n_mels):
+        left, center, right = int(bins[i]), int(bins[i + 1]), int(bins[i + 2])
+        if center > left:
+            filterbank[i, left:center] = np.linspace(0.0, 1.0, center - left, endpoint=False)
+        if right > center:
+            filterbank[i, center:right] = np.linspace(1.0, 0.0, right - center, endpoint=False)
+
+    mel_spec = filterbank @ magnitude
+    mel_spec_db = 10.0 * np.log10(np.maximum(mel_spec, 1e-10))
+    span = float(mel_spec_db.max() - mel_spec_db.min())
+    if span > 0:
+        mel_norm = (mel_spec_db - mel_spec_db.min()) / span
+    else:
+        mel_norm = np.zeros_like(mel_spec_db)
+
+    image = np.flipud((mel_norm * 255).astype(np.uint8))
+    height, width = image.shape
+
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        payload = kind + data
+        return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
+
+    rows = b"".join(b"\x00" + row.tobytes() for row in image)
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(rows))
+    png += chunk(b"IEND", b"")
+    return base64.b64encode(png).decode("ascii")
+
+
+class SpectrogramTranscriber(_DeduplicatorMixin):
+    """Send mel-spectrogram images to an OpenAI-compatible vision model."""
+
+    def __init__(
+        self,
+        *,
+        server_url: str = "http://localhost:8080",
+        model: str = "",
+        language: str | None = "en",
+        request_timeout: float = 30.0,
+    ):
+        self.server_url = server_url.rstrip("/")
+        self.model = model
+        self._language = language
+        self._timeout = request_timeout
+        self._loaded = False
+        self._init_dedup()
+
+    def load(self):
+        """Verify the configured vision server is reachable."""
+        errors: list[BaseException] = []
+        for path in ("/health", "/v1/models"):
+            try:
+                req = urllib.request.Request(f"{self.server_url}{path}", method="GET")
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response.read(1024)
+                self._loaded = True
+                return
+            except (OSError, urllib.error.URLError, TimeoutError) as exc:
+                errors.append(exc)
+        raise ConnectionError(f"Cannot reach spectrogram vision server at {self.server_url}: {errors[-1]}")
+
+    def transcribe(self, audio: np.ndarray, **kwargs) -> dict:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        spectrogram_b64 = _audio_to_spectrogram_png_base64(audio)
+        lang_hint = ""
+        if self._language:
+            from config import AVAILABLE_LANGUAGES
+            lang_name = AVAILABLE_LANGUAGES.get(self._language, self._language)
+            lang_hint = f" The speech is in {lang_name}."
+
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "This is a mel spectrogram of human speech. The x-axis is time "
+                            "and the y-axis is frequency, low at the bottom and high at the "
+                            "top. Transcribe the spoken words exactly as said. Output only "
+                            f"the transcription text, with no image description.{lang_hint}"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{spectrogram_b64}"},
+                    },
+                ],
+            }],
+            "temperature": 0.1,
+            "max_tokens": 512,
+        }
+        if self.model:
+            payload["model"] = self.model
+
+        req = urllib.request.Request(
+            f"{self.server_url}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as response:
+                result = json.loads(response.read())
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            raise ConnectionError(f"Spectrogram vision request failed: {exc}") from exc
+
+        text = ((result.get("choices") or [{}])[0]
+                .get("message", {}).get("content", "")).strip()
+
+        if _is_hallucination(text, self._language):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        if self._is_duplicate(text):
+            return {"text": "", "speaker": "", "speaker_id": 0}
+
+        return {"text": text, "speaker": "", "speaker_id": 0}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+
 # --- optional cross-platform streaming backend (sherpa-onnx) -----------------
 
 _SHERPA_RELEASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
@@ -604,6 +777,8 @@ def get_transcriber(model_name: str, *, language: str | None = "en"):
         PARAKEET_MODELS,
         QWEN3_MODELS,
         SHERPA_MODELS,
+        SPECTROGRAM_MODELS,
+        SPECTROGRAM_SERVER_URL,
     )
 
     model_repo = AVAILABLE_MODELS[model_name]
@@ -613,6 +788,12 @@ def get_transcriber(model_name: str, *, language: str | None = "en"):
         return ParakeetTranscriber(model=model_repo, language=language)
     if model_name in SHERPA_MODELS:
         return SherpaStreamingTranscriber(model=model_repo, language=language)
+    if model_name in SPECTROGRAM_MODELS:
+        return SpectrogramTranscriber(
+            server_url=SPECTROGRAM_SERVER_URL,
+            model=model_repo,
+            language=language,
+        )
     if model_name in FASTER_WHISPER_MODELS:
         return FasterWhisperTranscriber(model=model_repo, language=language)
     return WhisperTranscriber(model=model_repo)

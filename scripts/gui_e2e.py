@@ -12,17 +12,21 @@ review flow end-to-end against the redesigned UI:
 Saves a screenshot of the loaded transcript.
 
     python scripts/gui_e2e.py [--shot /tmp/voxterm-transcript.png]
-Exit 0 = all assertions passed. Requires: google-chrome + `pip install websocket-client`.
+Exit 0 = all assertions passed. Requires a Chrome/Chromium binary or Playwright's
+cached Chromium/headless shell, plus `pip install websocket-client`.
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
+import wave
 from pathlib import Path
 
 import websocket  # websocket-client (dev dep)
@@ -41,6 +45,40 @@ CSP_COLLECTOR = (
 )
 
 
+def _chrome_candidates() -> list[str]:
+    """Return Chrome/Chromium executables in preference order."""
+    env = os.environ.get("CHROME") or os.environ.get("CHROME_BIN")
+    candidates = [env] if env else []
+    candidates.extend(
+        shutil.which(name)
+        for name in ("google-chrome", "chromium", "chromium-browser")
+    )
+    if sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ])
+        cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+        candidates.extend(
+            str(path)
+            for path in sorted(
+                cache.glob("chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell"),
+                reverse=True,
+            )
+        )
+    return [c for c in candidates if c]
+
+
+def _find_chrome() -> str | None:
+    for candidate in _chrome_candidates():
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
 def _wait(url: str, timeout: float = 30.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -49,6 +87,69 @@ def _wait(url: str, timeout: float = 30.0):
         except Exception:
             time.sleep(0.4)
     raise TimeoutError(f"timed out waiting for {url}")
+
+
+def _seed_session_fixture(out_dir: Path) -> None:
+    """Create one tiny deterministic session for the browser review flow."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = "2026-07-03_070000"
+    doc = {
+        "voxterm_export_version": 1,
+        "session": {
+            "id": stem,
+            "started_at": "2026-07-03T07:00:00",
+            "duration_hms": "00:00:02",
+            "model": "fixture",
+            "source_stream": f"{stem}-events.jsonl",
+        },
+        "speakers": [{"id": 1, "label": "Speaker 1", "peer": False}],
+        "turns": [
+            {
+                "t": "00:00:00",
+                "t_offset": 0.0,
+                "t_offset_hms": "00:00",
+                "t_offset_end": 2.0,
+                "t_offset_end_hms": "00:02",
+                "speaker": "Speaker 1",
+                "speaker_id": 1,
+                "text": "This fixture verifies the interface review flow.",
+                "markers": [],
+            }
+        ],
+    }
+    (out_dir / f"{stem}-agent.json").write_text(json.dumps(doc), encoding="utf-8")
+    (out_dir / f"{stem}-agent.md").write_text(
+        "# VoxTerm Fixture\n\nSpeaker 1: This fixture verifies the interface review flow.\n",
+        encoding="utf-8",
+    )
+    (out_dir / f"{stem}-transcript.md").write_text(
+        "# VoxTerm Transcript\n\n**[00:00:00]** **Speaker 1:** This fixture verifies the interface review flow.\n",
+        encoding="utf-8",
+    )
+    events = [
+        {"t": 0.0, "kind": "recording", "on": True},
+        {
+            "t": 0.0,
+            "kind": "segment",
+            "speaker": "Speaker 1",
+            "speaker_id": 1,
+            "text": "This fixture verifies the interface review flow.",
+            "confidence": "high",
+            "overlap": False,
+            "audio_offset": 0.0,
+            "audio_end": 2.0,
+        },
+        {"t": 2.0, "kind": "recording", "on": False},
+    ]
+    (out_dir / f"{stem}-events.jsonl").write_text(
+        "\n".join(json.dumps(e, separators=(",", ":")) for e in events) + "\n",
+        encoding="utf-8",
+    )
+    with wave.open(str(out_dir / f"{stem}-gui.wav"), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x00" * 32000)
 
 
 class CDP:
@@ -84,11 +185,17 @@ def main(argv=None) -> int:
     shot = "/tmp/voxterm-transcript.png"
     if "--shot" in args:
         shot = args[args.index("--shot") + 1]
-    chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+    chrome = _find_chrome()
     if not chrome:
         print("SKIP: no chrome found"); return 3
+    print(f"  chrome: {chrome}")
 
-    server = subprocess.Popen([sys.executable, "-m", "gui.server"], cwd=str(ROOT),
+    tmp = tempfile.TemporaryDirectory(prefix="voxterm-gui-e2e-")
+    out_dir = Path(tmp.name)
+    _seed_session_fixture(out_dir)
+    env = os.environ.copy()
+    env["VOXTERM_GUI_OUT_DIR"] = str(out_dir)
+    server = subprocess.Popen([sys.executable, "-m", "gui.server"], cwd=str(ROOT), env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     browser = subprocess.Popen([chrome, "--headless", "--disable-gpu", "--no-sandbox",
                                 f"--remote-debugging-port={CDP_PORT}", "--remote-allow-origins=*",
@@ -218,6 +325,7 @@ def main(argv=None) -> int:
     finally:
         browser.terminate()
         server.terminate()
+        tmp.cleanup()
 
     if fails:
         print("FAIL: " + "; ".join(fails)); return 1

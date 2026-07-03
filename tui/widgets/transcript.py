@@ -23,11 +23,13 @@ class Log:
     SYS   = "sys"     # system events, model loading, speaker recognition, errors
     PARTY = "party"   # P2P party mode, peer join/leave, networking
     REC   = "rec"     # recording start/stop, mic events, export/save
+    HIVE  = "hive"    # Hivemind sink discovery / transcript push state
 
 _LOG_CATEGORIES = {
     "sys":   {"tag": "SYS",   "tag_color": "#ff6600", "msg_color": "#cc8866"},
     "party": {"tag": "PARTY", "tag_color": "#00ffcc", "msg_color": "#80ccbb"},
     "rec":   {"tag": "REC",   "tag_color": "#ff4466", "msg_color": "#cc8899"},
+    "hive":  {"tag": "HIVE",  "tag_color": "#00ff88", "msg_color": "#88cc99"},
 }
 
 _TIMESTAMP_COLOR = "#306070"
