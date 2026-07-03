@@ -90,6 +90,7 @@ from config import (
 )
 from config import SESSIONS_DIR, STATE_FILE as _STATE_FILE
 from tui.events import EventLogger, NullEventLogger
+from display_mode import DEFAULT_DISPLAY_PORT, DisplayLaunchResult, launch_display
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -463,6 +464,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
                 "[bold #00e5ff]O[/]       [#c0c0c0]Speaker profiles[/]\n"
                 "[bold #00e5ff]V[/]       [#c0c0c0]Toggle merged transcript view[/]\n"
+                "[bold #00e5ff]Shift+G[/] [#c0c0c0]Open ShaderClaw display mode[/]\n"
                 "[bold #00e5ff]C[/]       [#c0c0c0]Clear transcript[/]\n"
                 "[bold #00e5ff]D[/]       [#c0c0c0]Toggle debug mode[/]\n"
                 "[bold #00e5ff]Q[/]       [#c0c0c0]Quit[/]",
@@ -707,6 +709,7 @@ class VoxTerm(App):
         Binding("v", "toggle_merged_view", "View"),
         Binding("h", "show_hivemind", "Hivemind"),
         Binding("g", "launch_gui", "GUI"),
+        Binding("shift+g", "open_display", "Display", show=False),
         Binding("?", "show_help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", show=False),
@@ -714,7 +717,8 @@ class VoxTerm(App):
 
     def __init__(self, transcriber=None, model_name="qwen3-0.6b", language="en",
                  p2p_name=None, p2p_create=False, p2p_join_code=None,
-                 hivemind_client=None):
+                 display_on_start=False, display_port=DEFAULT_DISPLAY_PORT,
+                 shaderclaw_dir=None, hivemind_client=None):
         super().__init__()
         self._p2p_auto_name = p2p_name
         self._p2p_auto_create = p2p_create
@@ -722,6 +726,10 @@ class VoxTerm(App):
         # Hivemind transcript sink (None when --hivemind=off or no sink).
         # All segments produced in _on_transcription are mirrored to it.
         self._hivemind = hivemind_client
+        self._display_on_start = display_on_start
+        self._display_port = display_port
+        self._shaderclaw_dir = shaderclaw_dir
+        self._display_launching = False
         self.audio_capture = AudioCapture()
         self.system_capture = SystemCapture()
         self.audio_buffer = AudioBuffer()
@@ -814,6 +822,8 @@ class VoxTerm(App):
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
             "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
+            "[bold #00e5ff]\\[G][/][#607080] GUI  [/]"
+            "[bold #00e5ff]\\[Shift+G][/][#607080] Display  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
             id="footer-bar",
             markup=True,
@@ -912,6 +922,35 @@ class VoxTerm(App):
         """Worker thread: blocking party session setup."""
         self._party.start_session_blocking(code, is_creator)
 
+    @work(thread=True, group="display")
+    def _launch_display_worker(self) -> None:
+        """Worker thread: start/reveal ShaderClaw display mode."""
+        result = launch_display(
+            port=self._display_port,
+            shaderclaw_dir=self._shaderclaw_dir,
+            live_dir=LIVE_DIR,
+        )
+        self.call_from_thread(self._on_display_launch_result, result)
+
+    def _open_display_mode(self, announce: bool = False) -> None:
+        if self._display_launching:
+            self.query_one(TranscriptPanel).system_message(
+                "display mode is already starting", Log.SYS
+            )
+            return
+
+        self._display_launching = True
+        if announce:
+            self.query_one(TranscriptPanel).system_message("opening display mode...", Log.SYS)
+        self._launch_display_worker()
+
+    def _on_display_launch_result(self, result: DisplayLaunchResult) -> None:
+        self._display_launching = False
+        message = result.message
+        if result.ok:
+            message = f"{message}  [Space/Tab] shaders  [F] fullscreen"
+        self.query_one(TranscriptPanel).system_message(message, Log.SYS)
+
     def on_mount(self) -> None:
         self._recording_pulse = RecordingPulse(self)
 
@@ -940,6 +979,9 @@ class VoxTerm(App):
         # Start P2P peer discovery on launch (passive — just show who's nearby)
         if _P2P_AVAILABLE:
             self._party_start_passive_discovery_worker()
+
+        if self._display_on_start:
+            self._open_display_mode(announce=True)
 
     def on_screen_resume(self) -> None:
         # Carry the recording border into modals that push on top of the main screen.
@@ -2747,6 +2789,9 @@ class VoxTerm(App):
             log.warning("could not launch GUI", exc_info=True)
             tp.system_message("could not launch the GUI", Log.SYS)
 
+    def action_open_display(self):
+        self._open_display_mode(announce=True)
+
     def action_toggle_debug(self):
         self._debug = not self._debug
         state = "ON" if self._debug else "OFF"
@@ -2951,6 +2996,31 @@ def main():
         help="List available models and exit",
     )
     parser.add_argument(
+        "--display",
+        action="store_true",
+        help="Open ShaderClaw display mode alongside VoxTerm",
+    )
+    parser.add_argument(
+        "--display-only",
+        action="store_true",
+        help="Open ShaderClaw display mode and exit without starting the TUI",
+    )
+    parser.add_argument(
+        "--display-port",
+        type=int,
+        default=int(
+            os.environ.get("VOXTERM_DISPLAY_PORT")
+            or os.environ.get("SHADERCLAW_PORT")
+            or DEFAULT_DISPLAY_PORT
+        ),
+        help=f"Port for ShaderClaw display mode (default: {DEFAULT_DISPLAY_PORT})",
+    )
+    parser.add_argument(
+        "--shaderclaw-dir", "--shader-claw-dir",
+        default=os.environ.get("VOXTERM_SHADERCLAW_DIR"),
+        help="Path to a local shader-claw3 checkout",
+    )
+    parser.add_argument(
         "--name",
         type=str,
         default=None,
@@ -3001,6 +3071,17 @@ def main():
     # (leave the saved value alone); "" = explicitly reset to Apple Silicon MLX.
     if args.summary_model is not None:
         _cfg.set("summarization_model", args.summary_model.strip())
+
+    if args.display_only:
+        result = launch_display(
+            port=args.display_port,
+            shaderclaw_dir=args.shaderclaw_dir,
+            live_dir=LIVE_DIR,
+        )
+        print(f"VOXTERM // {result.message}")
+        if result.log_path and not result.ok:
+            print(f"  log: {result.log_path}")
+        sys.exit(0 if result.ok else 1)
 
     # Validate model choice
     if args.model not in AVAILABLE_MODELS:
@@ -3150,6 +3231,9 @@ def main():
         p2p_name=args.name,
         p2p_create=args.session_create,
         p2p_join_code=args.session_join,
+        display_on_start=args.display,
+        display_port=args.display_port,
+        shaderclaw_dir=args.shaderclaw_dir,
         hivemind_client=hivemind_client,
     )
 
