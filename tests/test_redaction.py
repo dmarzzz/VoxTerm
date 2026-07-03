@@ -14,6 +14,7 @@ from textual.app import App
 from textual.widgets import SelectionList, Static
 
 import redaction.engine as redaction_engine
+import tui.app as tui_app
 from redaction.engine import (
     OllamaRedactor,
     RedactionError,
@@ -26,7 +27,9 @@ from redaction.engine import (
 )
 from redaction.prompts import resolve_profile
 from tui.app import VoxTerm
+from tui.widgets.header import CyberHeader
 from tui.widgets.redaction_screen import RedactionReviewScreen
+from tui.widgets.transcript import TranscriptPanel
 
 
 # --- factory -------------------------------------------------------------
@@ -289,7 +292,60 @@ def _binding(action: str):
 def test_redaction_binding_added_without_removing_gui_binding():
     assert _binding("redact_and_export").key == "x"
     assert _binding("redact_and_export").description == "Redact"
+    assert _binding("cycle_redaction_tier").key == "shift+x"
     assert _binding("launch_gui").key == "g"
+
+
+class _FakeConfig:
+    def __init__(self):
+        self.data = {"redaction_tier": "room"}
+
+    def get(self, key: str):
+        return self.data.get(key)
+
+    def update(self, values):
+        self.data.update(values)
+
+
+class _FakeHeader:
+    def __init__(self):
+        self.tiers: list[str] = []
+
+    def set_disclosure_tier(self, tier_id: str):
+        self.tiers.append(tier_id)
+
+
+class _FakeTranscript:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def system_message(self, message, *args, **kwargs):
+        self.messages.append(message)
+
+
+def test_cycle_redaction_tier_updates_config_header_and_transcript(monkeypatch):
+    app = object.__new__(VoxTerm)
+    config = _FakeConfig()
+    header = _FakeHeader()
+    transcript = _FakeTranscript()
+
+    def fake_query(selector):
+        if selector is CyberHeader:
+            return header
+        if selector is TranscriptPanel:
+            return transcript
+        raise AssertionError(selector)
+
+    monkeypatch.setattr(tui_app, "_get_config", lambda: config)
+    monkeypatch.setattr(app, "query_one", fake_query)
+
+    app.action_cycle_redaction_tier()
+
+    assert config.data["redaction_tier"] == "world"
+    assert header.tiers == ["world"]
+    assert transcript.messages == [
+        "disclosure tier: WORLD — strip every identifier and proper noun"
+    ]
 
 
 class _ReviewHost(App):

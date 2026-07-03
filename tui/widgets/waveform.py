@@ -228,7 +228,8 @@ class WaveformWidget(Widget):
 
         dist_from_curve = np.abs(py - cv)
         fill_w = np.abs(cv - center_py)
-        depth = np.where(fill_w > 0.5, dist_from_curve / fill_w, 0.0)
+        depth = np.zeros_like(dist_from_curve)
+        np.divide(dist_from_curve, fill_w, out=depth, where=fill_w > 0.5)
         depth = np.clip(depth, 0, 1)
         brightness = np.power(np.clip(1.0 - depth, 0, 1), 0.6)
 
@@ -357,7 +358,7 @@ class WaveformWidget(Widget):
     def render_line(self, y: int) -> Strip:
         if y < len(self._frame):
             return self._frame[y]
-        return Strip.blank(self.size.width)
+        return Strip.blank(self.size.width, Style())
 
     def tick(self):
         self._tick_count += 1

@@ -76,6 +76,7 @@ from redaction import (
     RedactionError,
     apply_redactions,
     get_redactor,
+    next_tier,
     overwrite_and_delete,
     resolve_tier,
 )
@@ -462,6 +463,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]S[/]       [#c0c0c0]Save / copy transcript[/]\n"
                 "[bold #00e5ff]U[/]       [#c0c0c0]Save with summary (local LLM)[/]\n"
                 "[bold #00e5ff]X[/]       [#c0c0c0]Save redacted copy (local LLM)[/]\n"
+                "[bold #00e5ff]Shift+X[/] [#c0c0c0]Cycle disclosure tier[/]\n"
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
@@ -556,6 +558,7 @@ class VoxTerm(App):
         Binding("s", "export_transcript", "Export"),
         Binding("u", "summarize_and_export", "Summarize"),
         Binding("x", "redact_and_export", "Redact"),
+        Binding("shift+x", "cycle_redaction_tier", "Tier", show=False),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
         Binding("e", "explore_transcripts", "History"),
@@ -667,6 +670,7 @@ class VoxTerm(App):
             "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
             "[bold #00e5ff]\\[U][/][#607080] Summarize  [/]"
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
+            "[bold #00e5ff]\\[X][/][#607080] Redact  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
             "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
@@ -769,6 +773,7 @@ class VoxTerm(App):
 
     def on_mount(self) -> None:
         self._recording_pulse = RecordingPulse(self)
+        self._refresh_disclosure_badge()
 
         # Open speaker profile store (fast — just SQLite + cache load)
         try:
@@ -858,6 +863,27 @@ class VoxTerm(App):
             self.query_one(CyberHeader).refresh()
         if self._last_saved_at is not None:
             self._update_telemetry()
+
+    def _current_redaction_tier(self):
+        try:
+            return resolve_tier((_get_config().get("redaction_tier") or "room"))
+        except Exception:
+            return resolve_tier("room")
+
+    def _set_redaction_tier(self, tier_id: str):
+        tier = resolve_tier(tier_id)
+        try:
+            _get_config().update({"redaction_tier": tier.id})
+        except Exception:
+            pass
+        try:
+            self.query_one(CyberHeader).set_disclosure_tier(tier.id)
+        except Exception:
+            pass
+        return tier
+
+    def _refresh_disclosure_badge(self) -> None:
+        self._set_redaction_tier(self._current_redaction_tier().id)
 
     def _periodic_gc(self):
         """Prevent memory fragmentation during long sessions + memory watchdog."""
@@ -2238,7 +2264,8 @@ class VoxTerm(App):
             redaction_model = result.get("redaction_model", "")
             # Persist the chosen tier + model (blank model = on-device MLX, an
             # intentional choice). The tier is your default disclosure posture.
-            cfg.update({"redaction_tier": tier_id, "redaction_model": redaction_model})
+            self._set_redaction_tier(tier_id)
+            cfg.update({"redaction_model": redaction_model})
             # Snapshot BEFORE the progress message so it isn't fed to the LLM
             # or written into the redacted file (same discipline as summarize).
             body = transcript.get_markdown(
@@ -2258,6 +2285,13 @@ class VoxTerm(App):
                 default_redaction_model=default_model,
             ),
             on_tier_selected,
+        )
+
+    def action_cycle_redaction_tier(self):
+        """Cycle the ambient disclosure posture without starting redaction."""
+        tier = self._set_redaction_tier(next_tier(self._current_redaction_tier()).id)
+        self.query_one(TranscriptPanel).system_message(
+            f"disclosure tier: {tier.label} — {tier.description}", Log.SYS
         )
 
     @work(thread=True, exclusive=True, group="redaction")
