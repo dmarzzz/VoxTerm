@@ -1,0 +1,16 @@
+[Unit]
+Description=VoxTerm room GUI server
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=VOXTERM_GUI_LAN=1 VOXTERM_GUI_PORT=8740
+EnvironmentFile=%h/.config/voxterm/room.env
+WorkingDirectory=%h/.local/share/voxterm
+ExecStart=%h/.local/share/voxterm/.venv/bin/python -m gui.server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
