@@ -12,6 +12,7 @@ VoxTerm is **local first and private by default**. Everything runs on your machi
 - **No audio is stored.** Microphone input is processed in real-time and discarded. Only text transcripts are saved.
 - **Voice profiles are encrypted at rest.** Speaker embeddings (biometric data used to recognize voices across sessions) are encrypted with AES-256-CBC. The key lives in your macOS Keychain — zero config.
 - **Transcripts are yours.** Auto-saved as markdown to `~/Documents/voxterm-transcripts/`. Final transcript upload is off by default and opt-in from `Y` upload settings.
+- **Experimental remote backends are opt-in.** The spectrogram vision backend is hidden by default and only sends spectrogram images to the server URL you configure.
 - **P2P stays on your LAN.** Party mode shares transcripts over your local network only. No relay servers.
 - **Delete everything anytime.** Press `P` → delete to permanently wipe all voice data from disk.
 
@@ -51,6 +52,16 @@ VoxTerm auto-detects `~/shader-claw3` or a sibling `../shader-claw3` checkout. I
 ```bash
 export VOXTERM_SHADERCLAW_DIR=/path/to/shader-claw3
 ```
+
+Optional experimental spectrogram vision transcription:
+
+```bash
+export VOXTERM_SPECTROGRAM_MODEL=qwen2.5-vl-3b
+export VOXTERM_SPECTROGRAM_SERVER_URL=http://localhost:8080
+voxterm -m spec-vl
+```
+
+This converts each audio chunk to a mel-spectrogram PNG and sends it to an OpenAI-compatible local vision server. Leave `VOXTERM_SPECTROGRAM_MODEL` unset to keep the backend hidden from the model picker.
 
 <details>
 <summary>Manual setup (for developers)</summary>
