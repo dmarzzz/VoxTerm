@@ -14,18 +14,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 
 from summarizer.prompts import TEMPLATES
-
-
-def _clipboard_cmd() -> list[str] | None:
-    if sys.platform == "darwin":
-        return ["pbcopy"]
-    if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard"]
-    if shutil.which("xsel"):
-        return ["xsel", "--clipboard", "--input"]
-    if shutil.which("wl-copy"):
-        return ["wl-copy"]
-    return None
+from tui.clipboard import clipboard_cmd
 
 
 def _open_cmd() -> str | None:
@@ -300,7 +289,7 @@ class SummaryResultScreen(ModalScreen):
         self.query_one("#summary-result-status", Static).update(msg)
 
     def action_copy(self) -> None:
-        cmd = _clipboard_cmd()
+        cmd = clipboard_cmd()
         if cmd is None:
             self._status(
                 "[#ff5577]no clipboard tool found "
@@ -310,9 +299,12 @@ class SummaryResultScreen(ModalScreen):
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             proc.communicate(self._summary.encode("utf-8"))
+            if proc.returncode != 0:
+                self._status(f"[#ff5577]clipboard copy failed (exit {proc.returncode})[/]")
+                return
             self._status("[#00ffcc]✓ summary copied to clipboard[/]")
-        except Exception:
-            self._status("[#ff5577]clipboard copy failed[/]")
+        except Exception as e:
+            self._status(f"[#ff5577]clipboard copy failed: {e}[/]")
 
     def action_open_file(self) -> None:
         if not self._path:
