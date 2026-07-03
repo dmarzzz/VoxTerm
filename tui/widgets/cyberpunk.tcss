@@ -27,7 +27,7 @@ Screen.--recording.--recording-pulse {
 
 #footer-bar {
     dock: bottom;
-    height: 1;
+    height: 2;
     background: #0a0e14;
     border-top: heavy #003344;
     color: #607080;

@@ -7,7 +7,6 @@ import gc
 import logging
 import sys
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -53,12 +52,13 @@ from enum import Enum
 import numpy as np
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Static, OptionList
+from textual.widgets import LoadingIndicator, Static, OptionList
 from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work
 
+from tui.clipboard import clipboard_cmd
 from tui.widgets.header import CyberHeader
 from tui.widgets.waveform import WaveformWidget, _make_style
 from tui.widgets.transcript import TranscriptPanel, Log
@@ -88,21 +88,6 @@ from config import (
 )
 from config import SESSIONS_DIR, STATE_FILE as _STATE_FILE
 from tui.events import EventLogger, NullEventLogger
-
-
-def _clipboard_cmd() -> list[str] | None:
-    """Return the clipboard copy command for this platform."""
-    if sys.platform == "darwin":
-        return ["pbcopy"]
-    if sys.platform == "win32":
-        return ["clip.exe"]
-    if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard"]
-    if shutil.which("xsel"):
-        return ["xsel", "--clipboard", "--input"]
-    if shutil.which("wl-copy"):
-        return ["wl-copy"]
-    return None
 
 
 from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILABLE
@@ -535,7 +520,7 @@ class VoxTerm(App):
     BINDINGS = [
         Binding("r", "toggle_recording", "Record/Pause"),
         Binding("t", "tag_speakers", "Tag"),
-        Binding("o", "manage_profiles", "Profiles", show=False),
+        Binding("o", "manage_profiles", "Profiles"),
         Binding("m", "switch_model", "Model"),
         Binding("l", "switch_language", "Language"),
         Binding("ctrl+s", "export_transcript", "Save"),
@@ -543,7 +528,7 @@ class VoxTerm(App):
         Binding("u", "summarize_and_export", "Summarize"),
         Binding("d", "toggle_debug", "Debug"),
         Binding("c", "clear_transcript", "Clear"),
-        Binding("e", "explore_transcripts", "History"),
+        Binding("e", "explore_transcripts", "Transcripts"),
         Binding("p", "toggle_party", "Party"),
         Binding("v", "toggle_merged_view", "View"),
         Binding("h", "show_hivemind", "Hivemind"),
@@ -639,6 +624,9 @@ class VoxTerm(App):
 
     def compose(self) -> ComposeResult:
         yield CyberHeader()
+        loader = LoadingIndicator(id="model-loading-indicator")
+        loader.display = False
+        yield loader
         with Vertical(id="main-container"):
             yield WaveformWidget()
             yield TranscriptPanel()
@@ -650,10 +638,17 @@ class VoxTerm(App):
         yield Static(
             " [bold #00e5ff]\\[R][/][#607080] Record  [/]"
             "[bold #00e5ff]\\[T][/][#607080] Tag  [/]"
-            "[bold #00e5ff]\\[U][/][#607080] Summarize  [/]"
+            "[bold #00e5ff]\\[U][/][#607080] Summary  [/]"
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
-            "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
+            "[bold #00e5ff]\\[V][/][#607080] View[/]\n"
+            " [bold #00e5ff]\\[O][/][#607080] Profiles  [/]"
+            "[bold #00e5ff]\\[C][/][#607080] Clear  [/]"
+            "[bold #00e5ff]\\[D][/][#607080] Debug  [/]"
+            "[bold #00e5ff]\\[M][/][#607080] Model  [/]"
+            "[bold #00e5ff]\\[L][/][#607080] Lang  [/]"
+            "[bold #00e5ff]\\[H][/][#607080] Hive  [/]"
+            "[bold #00e5ff]\\[G][/][#607080] GUI  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
             id="footer-bar",
             markup=True,
@@ -774,6 +769,7 @@ class VoxTerm(App):
             self._load_diarizer()
         else:
             self.query_one(TranscriptPanel).system_message(f"loading model: {self._model_name}...", Log.SYS, {self._model_name: "rainbow"})
+            self._show_loading_indicator(True)
             self._start_audio_timer()
             self._load_model()
 
@@ -1575,6 +1571,7 @@ class VoxTerm(App):
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
+                self.call_from_thread(self._show_loading_indicator, False)
                 self.call_from_thread(
                     self.query_one(TranscriptPanel).system_message,
                     f"model load failed: {e}\n{tb}"
@@ -1583,10 +1580,17 @@ class VoxTerm(App):
 
     def _on_model_loaded(self):
         self._model_loaded = True
+        self._show_loading_indicator(False)
         self.query_one(TranscriptPanel).system_message(f"model loaded: {self._model_name}", Log.SYS, {self._model_name: "rainbow"})
         if not self._diarizer_loaded:
             self._load_diarizer()
         self._update_telemetry()
+
+    def _show_loading_indicator(self, visible: bool) -> None:
+        try:
+            self.query_one("#model-loading-indicator", LoadingIndicator).display = visible
+        except Exception:
+            pass
 
     @work(thread=True, group="diarizer_loading")
     def _load_diarizer(self):
@@ -1930,6 +1934,7 @@ class VoxTerm(App):
         self._model_loaded = False
         self._model_name = model_key
         self._update_telemetry()
+        self._show_loading_indicator(True)
         # Don't null the old model here — a transcription worker may still be
         # using it. _do_swap acquires _transcribe_lock for the load, which
         # waits for any active MLX work to finish before constructing the new
@@ -1961,6 +1966,7 @@ class VoxTerm(App):
         self._model_name = model_key
         self._is_qwen3 = model_key in QWEN3_MODELS
         self._model_loaded = True
+        self._show_loading_indicator(False)
         # Drop the previous model and flush Metal so a swap doesn't strand
         # a whole model (~0.6–1.5GB) in the GPU cache. Done as two serialized
         # tasks on the single MLX thread: _unload releases the old model
@@ -2002,6 +2008,7 @@ class VoxTerm(App):
     def _on_swap_error(self, msg: str):
         self.query_one(TranscriptPanel).system_message(msg)
         self._model_loaded = True
+        self._show_loading_indicator(False)
         self._update_telemetry()
 
     def action_export_transcript(self):
@@ -2203,7 +2210,7 @@ class VoxTerm(App):
     def _export_to_clipboard(self):
         """Copy transcript to clipboard."""
         transcript = self.query_one(TranscriptPanel)
-        cmd = _clipboard_cmd()
+        cmd = clipboard_cmd()
         if cmd is None:
             transcript.system_message("no clipboard tool found (install xclip, xsel, or wl-copy)", Log.REC)
             return
@@ -2212,10 +2219,15 @@ class VoxTerm(App):
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             proc.communicate(text.encode("utf-8"))
+            if proc.returncode != 0:
+                transcript.system_message(
+                    f"clipboard copy failed (exit {proc.returncode})", Log.REC
+                )
+                return
             self._start_new_session()
             transcript.system_message(f"copied {entry_count} entries to clipboard", Log.REC)
-        except Exception:
-            transcript.system_message("clipboard copy failed", Log.REC)
+        except Exception as e:
+            transcript.system_message(f"clipboard copy failed: {e}", Log.REC)
 
     def _discard_transcript(self):
         """Discard transcript and delete the live file."""
@@ -2402,6 +2414,8 @@ class VoxTerm(App):
 
     def action_clear_transcript(self):
         """Confirm before clearing — guards against an accidental C press."""
+        if not self.query_one(TranscriptPanel).get_entries():
+            return
         self.push_screen(ClearConfirmScreen(), self._on_clear_confirm)
 
     def _on_clear_confirm(self, confirmed: bool) -> None:
