@@ -50,9 +50,13 @@ python3 -m tui.app
 | Key | Action |
 |-----|--------|
 | `R` | Start/pause recording |
-| `N` | Party mode — join or leave P2P sessions |
 | `T` | Tag/name speakers |
-| `P` | Speaker profiles |
+| `A` | Add a reaction or typed non-speech note |
+| `E` | Browse saved transcripts |
+| `P` | Party mode — join or leave P2P sessions |
+| `O` | Speaker profiles |
+| `U` | Save with summary |
+| `V` | Toggle merged transcript view |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
@@ -65,7 +69,7 @@ python3 -m tui.app
 
 Multiple people in the same room can share transcripts over the local network. Each laptop captures its closest speaker best — the combined result is better than any single mic.
 
-**Press N** to join the party. Press N again to leave. No codes, no configuration.
+**Press P** to join the party. Press P again to leave. No codes, no configuration.
 
 - Auto-discovers nearby VoxTerm peers via mDNS
 - Auto-joins the nearest party, or hosts one if none found
@@ -74,6 +78,35 @@ Multiple people in the same room can share transcripts over the local network. E
 - Everyone sees who joins and leaves — no silent surveillance
 
 See [docs/party-mode-design.md](docs/party-mode-design.md) for the full design.
+
+## Reactions and non-speech input
+
+Press `A` to add a reaction or short typed note to the transcript timeline.
+Reactions are saved in Markdown exports and emitted to the optional JSONL event
+stream as `kind: "reaction"`.
+
+External devices can inject the same events by appending to the reaction inbox:
+
+```bash
+voxterm-react clap
+voxterm-react question "source?"
+voxterm-react idea "save this" --author macro-pad
+```
+
+For a persistent USB/HID/serial bridge, stream one reaction per line:
+
+```bash
+some-pad-bridge | voxterm-react --stdin --author macro-pad
+```
+
+Lines can be simple commands like `clap` or `question "source?"`, or the same
+JSONL reaction objects used by the inbox.
+
+Set `VOXTERM_REACTION_INBOX=/path/to/reactions.jsonl` to point hardware or
+automation at a custom inbox file.
+
+See [docs/reaction-pad.md](docs/reaction-pad.md) for physical button-pad setup
+patterns.
 
 ## Hivemind mode (transcript streaming to swf-node)
 
