@@ -295,6 +295,9 @@ P2P_MERGE_DELAY_MS = 60            # jitter buffer delay for audio merging
 P2P_AUDIO_QUALITY_GATE = 0.003     # min RMS to include a source in the mix
 P2P_CLOCK_SYNC_WINDOW = 20         # sliding window of offset samples
 P2P_SERVICE_TYPE = "_voxterm._tcp.local."
+P2P_HANDSHAKE_FAILURE_LIMIT = 8    # failed encrypted handshakes before lockout
+P2P_HANDSHAKE_FAILURE_WINDOW = 60.0  # seconds to count failures per IP
+P2P_HANDSHAKE_LOCKOUT = 60.0       # seconds to refuse handshakes after limit
 
 
 # ── ConfigStore (merged from config_store.py) ────────────────

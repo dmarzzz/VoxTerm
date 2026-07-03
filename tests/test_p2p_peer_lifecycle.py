@@ -9,6 +9,10 @@ import pytest
 from network.crypto import derive_session_key
 from network.peer import PeerConnection
 from network.session import SessionManager
+from config import (
+    P2P_HANDSHAKE_FAILURE_LIMIT,
+    P2P_HANDSHAKE_LOCKOUT,
+)
 
 
 class TestPeerConnection:
@@ -68,6 +72,31 @@ class TestSessionManagerLifecycle:
         mgr.leave_session()
         assert not mgr.is_in_session
         assert mgr.session_code is None
+
+    def test_failed_handshakes_temporarily_lock_out_ip(self):
+        mgr = SessionManager("alice", node_id="node-a", tcp_port=0)
+        ip = "10.0.0.5"
+
+        for offset in range(P2P_HANDSHAKE_FAILURE_LIMIT - 1):
+            mgr._record_handshake_failure(ip, now=float(offset))
+            assert not mgr._handshake_locked(ip, now=float(offset))
+
+        now = float(P2P_HANDSHAKE_FAILURE_LIMIT)
+        mgr._record_handshake_failure(ip, now=now)
+        assert mgr._handshake_locked(ip, now=now)
+        assert mgr._handshake_locked(ip, now=now + P2P_HANDSHAKE_LOCKOUT - 0.1)
+        assert not mgr._handshake_locked(ip, now=now + P2P_HANDSHAKE_LOCKOUT + 0.1)
+
+    def test_handshake_success_clears_failures(self):
+        mgr = SessionManager("alice", node_id="node-a", tcp_port=0)
+        ip = "10.0.0.5"
+
+        mgr._record_handshake_failure(ip, now=1.0)
+        mgr._record_handshake_success(ip)
+
+        for offset in range(2, 2 + P2P_HANDSHAKE_FAILURE_LIMIT - 1):
+            mgr._record_handshake_failure(ip, now=float(offset))
+        assert not mgr._handshake_locked(ip, now=float(2 + P2P_HANDSHAKE_FAILURE_LIMIT))
 
 
 @pytest.mark.timeout(10)
