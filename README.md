@@ -156,6 +156,11 @@ The upload endpoint is configurable in the same screen. Enter an auth token ther
 
 Remote failures never block the local save path. VoxTerm stores pending uploads in a private local retry queue and flushes that queue whenever a transcript export runs.
 
+## Room rollout
+
+For hardware sourcing, see
+[docs/hardware-procurement.md](docs/hardware-procurement.md).
+
 ## Hivemind mode (transcript streaming to swf-node)
 
 Voxterm can stream transcript batches to a "convent box" running
