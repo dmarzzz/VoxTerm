@@ -75,6 +75,11 @@ Multiple people in the same room can share transcripts over the local network. E
 
 See [docs/party-mode-design.md](docs/party-mode-design.md) for the full design.
 
+## Room rollout
+
+For hardware sourcing, see
+[docs/hardware-procurement.md](docs/hardware-procurement.md).
+
 ## Hivemind mode (transcript streaming to swf-node)
 
 Voxterm can stream transcript batches to a "convent box" running
