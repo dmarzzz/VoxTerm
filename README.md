@@ -61,6 +61,30 @@ python3 -m tui.app
 | `?` | Help |
 | `Q` | Quit |
 
+## Batch transcription and Rode import
+
+Transcribe existing WAV files without opening the live mic UI:
+
+```bash
+voxterm-batch meeting.wav interview.wav --out-dir ~/Documents/voxterm-transcripts
+```
+
+The batch path reuses VoxTerm's headless transcription engine, VAD, diarization,
+event log, and Markdown transcript writer.
+
+For Rode Wireless GO-style USB recorders, plug in the device so its mass-storage
+volume mounts, then run:
+
+```bash
+voxterm-batch --rode
+```
+
+VoxTerm scans mounted volumes for `*_Wireless_GO.WAV`, copies new recordings
+into its local data directory, deduplicates by SHA-256 content hash, and writes
+a local manifest so later runs skip already imported recordings. The device is
+treated as read-only: import means copy-down, not delete-or-move sync. Use
+`--no-transcribe` to copy only and transcribe on a later run.
+
 ## Party Mode (P2P)
 
 Multiple people in the same room can share transcripts over the local network. Each laptop captures its closest speaker best — the combined result is better than any single mic.
