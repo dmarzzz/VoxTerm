@@ -52,7 +52,7 @@ _rt._resource_tracker._stop = lambda **kwargs: None
 from enum import Enum
 import numpy as np
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, OptionList
 from textual.widgets.option_list import Option
 from textual.binding import Binding
@@ -68,6 +68,8 @@ from tui.widgets.summary_screen import SummaryScreen, SummaryResultScreen
 from summarizer import SummarizerError, get_summarizer, resolve_template
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
+from tui.widgets.flowchart import FlowchartPanel
+from tui.llm.flowchart_gen import FlowchartGenError, generate_flowchart
 from audio.capture import AudioCapture
 from audio.buffer import AudioBuffer
 from audio.mix import mix_chunks
@@ -451,6 +453,7 @@ class HelpScreen(ModalScreen):
                 "[bold #00e5ff]M[/]       [#c0c0c0]Switch transcription model[/]\n"
                 "[bold #00e5ff]L[/]       [#c0c0c0]Switch language[/]\n"
                 "[bold #00e5ff]P[/]       [#c0c0c0]Party mode — join / leave[/]\n"
+                "[bold #00e5ff]F[/]       [#c0c0c0]Toggle flowchart panel[/]\n"
                 "[bold #00e5ff]O[/]       [#c0c0c0]Speaker profiles[/]\n"
                 "[bold #00e5ff]V[/]       [#c0c0c0]Toggle merged transcript view[/]\n"
                 "[bold #00e5ff]C[/]       [#c0c0c0]Clear transcript[/]\n"
@@ -548,6 +551,7 @@ class VoxTerm(App):
         Binding("v", "toggle_merged_view", "View"),
         Binding("h", "show_hivemind", "Hivemind"),
         Binding("g", "launch_gui", "GUI"),
+        Binding("f", "toggle_flowchart", "Flowchart"),
         Binding("?", "show_help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", show=False),
@@ -623,6 +627,11 @@ class VoxTerm(App):
         self._party = PartyManager(self, _get_config())
         self._wire_party_callbacks()
         self._recording_pulse: RecordingPulse | None = None
+        self._flowchart_enabled = False
+        self._flowchart_last_signature = ""
+        self._flowchart_inflight = False
+        self._flowchart_min_interval_sec = 15.0
+        self._flowchart_last_run = 0.0
 
         # Event stream — emits JSONL to LIVE_DIR for external consumers
         # (LED matrices, overlays, dashboards). No-op when VOXTERM_EVENTS unset.
@@ -641,7 +650,9 @@ class VoxTerm(App):
         yield CyberHeader()
         with Vertical(id="main-container"):
             yield WaveformWidget()
-            yield TranscriptPanel()
+            with Horizontal(id="transcript-row"):
+                yield TranscriptPanel()
+                yield FlowchartPanel()
             yield Static(
                 "  [bold #607080]● IDLE[/]    [#00ffcc]loading...[/]",
                 id="telemetry",
@@ -654,6 +665,7 @@ class VoxTerm(App):
             "[bold #00e5ff]\\[E][/][#607080] Transcripts  [/]"
             "[bold #00e5ff]\\[P][/][#607080] Party  [/]"
             "[bold #00e5ff]\\[V][/][#607080] Merged  [/]"
+            "[bold #00e5ff]\\[F][/][#607080] Flow  [/]"
             "[bold #00e5ff]\\[?][/][#607080] Help[/]",
             id="footer-bar",
             markup=True,
@@ -836,6 +848,7 @@ class VoxTerm(App):
         self.set_interval(1.0 / WAVEFORM_FPS, self._process_audio, name="audio_timer")
         self.set_interval(1.0, self._refresh_telemetry, name="telemetry_timer")
         self.set_interval(60.0, self._periodic_gc, name="gc_timer")
+        self.set_interval(2.0, self._maybe_refresh_flowchart, name="flowchart_timer")
 
     def _refresh_telemetry(self):
         """Periodic refresh for saved counter and recording timer."""
@@ -2368,6 +2381,124 @@ class VoxTerm(App):
             debug_text = self._party.format_debug_text(tp.merged_view)
             if debug_text:
                 tp.system_message(debug_text)
+
+    def _flowchart_model_name(self) -> str:
+        try:
+            return (_get_config().get("summarization_model") or "").strip()
+        except Exception:
+            return ""
+
+    def _flowchart_backend_label(self, model_name: str) -> str:
+        if model_name:
+            return model_name
+        import platform as _platform
+        if sys.platform == "darwin" and _platform.machine() == "arm64":
+            return "MLX default"
+        return "no LLM configured (set summarization_model to ollama:<model>)"
+
+    def action_toggle_flowchart(self):
+        """Toggle the LLM-generated mermaid flowchart side panel."""
+        try:
+            panel = self.query_one(FlowchartPanel)
+        except Exception:
+            return
+        self._flowchart_enabled = not self._flowchart_enabled
+        panel.set_visible(self._flowchart_enabled)
+        tp = self.query_one(TranscriptPanel)
+        if self._flowchart_enabled:
+            model_name = self._flowchart_model_name()
+            label = self._flowchart_backend_label(model_name)
+            panel.set_status(f"[#607080]idle · {label}[/]")
+            tp.system_message(f"flowchart mode ON ({label})", Log.SYS)
+            self._flowchart_last_run = 0.0
+            self._flowchart_last_signature = ""
+            self._maybe_refresh_flowchart()
+        else:
+            tp.system_message("flowchart mode OFF", Log.SYS)
+
+    @staticmethod
+    def _transcript_signature(entries: list[tuple]) -> str:
+        if not entries:
+            return "0:"
+        last = entries[-1]
+        last_content = last[2] if len(last) > 2 else ""
+        return f"{len(entries)}:{last_content[-80:]}"
+
+    def _maybe_refresh_flowchart(self):
+        if not self._flowchart_enabled or self._flowchart_inflight:
+            return
+        now = time.time()
+        if now - self._flowchart_last_run < self._flowchart_min_interval_sec:
+            return
+        try:
+            tp = self.query_one(TranscriptPanel)
+            entries = tp.get_entries()
+        except Exception:
+            return
+        turns = [entry for entry in entries if len(entry) > 1 and entry[1] == "transcript"]
+        if not turns:
+            try:
+                self.query_one(FlowchartPanel).set_status("[#607080]waiting for transcript[/]")
+            except Exception:
+                pass
+            return
+        signature = self._transcript_signature(turns)
+        if signature == self._flowchart_last_signature:
+            return
+        transcript_lines = []
+        for entry in turns:
+            timestamp = entry[0] if len(entry) > 0 else "--:--:--"
+            text = entry[2] if len(entry) > 2 else ""
+            if not text:
+                continue
+            speaker = entry[3] if len(entry) > 3 and entry[3] else "speaker"
+            transcript_lines.append(f"[{timestamp}] {speaker}: {text}")
+        transcript_text = "\n".join(transcript_lines)
+        if not transcript_text:
+            try:
+                self.query_one(FlowchartPanel).set_status("[#607080]waiting for transcript[/]")
+            except Exception:
+                pass
+            return
+        self._flowchart_last_signature = signature
+        self._flowchart_last_run = now
+        self._flowchart_inflight = True
+        try:
+            self.query_one(FlowchartPanel).set_status("[#ffaa00]generating...[/]")
+        except Exception:
+            pass
+        self._run_flowchart_worker(transcript_text, self._flowchart_model_name())
+
+    @work(exclusive=True, thread=True, group="flowchart")
+    def _run_flowchart_worker(self, transcript_text: str, model_name: str) -> None:
+        try:
+            if model_name.startswith("ollama:"):
+                mermaid = generate_flowchart(transcript_text, model_name=model_name)
+            else:
+                with self._transcribe_lock:
+                    mermaid = self._mlx_executor.submit(
+                        generate_flowchart,
+                        transcript_text,
+                        model_name=model_name,
+                    ).result()
+            self.call_from_thread(self._apply_flowchart_result, mermaid, None)
+        except FlowchartGenError as exc:
+            self.call_from_thread(self._apply_flowchart_result, None, str(exc))
+        except Exception as exc:
+            self.call_from_thread(self._apply_flowchart_result, None, f"unexpected: {exc}")
+
+    def _apply_flowchart_result(self, mermaid: str | None, error: str | None) -> None:
+        self._flowchart_inflight = False
+        try:
+            panel = self.query_one(FlowchartPanel)
+        except Exception:
+            return
+        if error:
+            panel.show_error(error)
+            panel.set_status("[#ff6644]error[/]")
+            return
+        panel.update_flowchart(mermaid or "")
+        panel.set_status(f"[#607080]updated {datetime.now().strftime('%H:%M:%S')}[/]")
 
     def action_toggle_merged_view(self):
         """Toggle between local and merged transcript view (P2P only)."""
