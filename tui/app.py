@@ -93,6 +93,31 @@ from tui.events import EventLogger, NullEventLogger
 from display_mode import DEFAULT_DISPLAY_PORT, DisplayLaunchResult, launch_display
 
 
+def _hivemind_header_state(hivemind_client) -> tuple[bool, str]:
+    """Return the header chip state for the optional Hivemind sink."""
+    if hivemind_client is None:
+        return False, ""
+    try:
+        if not bool(hivemind_client.push_enabled):
+            return False, ""
+    except Exception:
+        return False, ""
+    try:
+        sink = hivemind_client.active_sink()
+    except Exception:
+        sink = None
+    if sink is None:
+        try:
+            pinned = str(hivemind_client.pinned_sink_pubkey or "")
+        except Exception:
+            pinned = ""
+        if pinned.startswith("ed25519:"):
+            pinned = pinned.split(":", 1)[1]
+        return True, (pinned[:8] + "..") if pinned else "waiting"
+    label = getattr(sink, "node", "") or getattr(sink, "host", "") or "sink"
+    return True, str(label)
+
+
 def _clipboard_cmd() -> list[str] | None:
     """Return the clipboard copy command for this platform."""
     if sys.platform == "darwin":
@@ -982,6 +1007,8 @@ class VoxTerm(App):
 
         if self._display_on_start:
             self._open_display_mode(announce=True)
+
+        self._refresh_hivemind_header()
 
     def on_screen_resume(self) -> None:
         # Carry the recording border into modals that push on top of the main screen.
@@ -2761,9 +2788,20 @@ class VoxTerm(App):
         """Open the hivemind discovery + opt-in menu."""
         try:
             from tui.widgets.hivemind_screen import HivemindScreen
-            self.push_screen(HivemindScreen(self._hivemind))
+
+            def _after_hivemind(_result=None):
+                self._refresh_hivemind_header()
+
+            self.push_screen(HivemindScreen(self._hivemind), _after_hivemind)
         except Exception:
             log.warning("could not open hivemind screen", exc_info=True)
+
+    def _refresh_hivemind_header(self) -> None:
+        active, label = _hivemind_header_state(self._hivemind)
+        try:
+            self.query_one(CyberHeader).set_hivemind(active, label)
+        except Exception:
+            pass
 
     def action_launch_gui(self):
         """Open the VoxTerm web GUI in the browser, out-of-process.
