@@ -50,9 +50,15 @@ class PeerHarness:
         session_code: Shared session code for all peers.
     """
 
-    def __init__(self, peer_count: int = 3, session_code: str = "test-bacon-horse"):
+    def __init__(
+        self,
+        peer_count: int = 3,
+        session_code: str = "test-bacon-horse",
+        node_prefix: str = "node",
+    ):
         self._session_code = session_code
         self._peer_count = peer_count
+        self._node_prefix = node_prefix
         self.peers: list[VirtualPeer] = []
         self._started = False
 
@@ -61,7 +67,7 @@ class PeerHarness:
         # Create peers
         for i in range(self._peer_count):
             name = f"peer-{i}"
-            node_id = f"node-{i:012d}"
+            node_id = f"{self._node_prefix}-{i:012d}"
             mgr = SessionManager(name, node_id=node_id, tcp_port=0)
             vp = VirtualPeer(name=name, node_id=node_id, mgr=mgr)
 
@@ -130,6 +136,13 @@ class PeerHarness:
             end_ts=time.monotonic() + 1.0,
             confidence=0.9,
         )
+
+    def server_port(self, peer_index: int = 0) -> int:
+        """Return the TCP listener port for a virtual peer."""
+        sock = self.peers[peer_index].mgr._server_sock
+        if sock is None:
+            raise RuntimeError("peer server is not running")
+        return sock.getsockname()[1]
 
     def wait_for_finals(self, count: int, timeout: float = 5.0) -> bool:
         """Wait until the total finals received across all peers reaches count."""

@@ -25,11 +25,8 @@ ctl.pulse {\n\
 # Install CPU-only PyTorch first (much smaller than full torch)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install Python deps (only Linux-relevant ones)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy project
+# Copy project and install Python deps through pyproject metadata.
 COPY . .
+RUN pip install --no-cache-dir -e .
 
 CMD ["sh"]

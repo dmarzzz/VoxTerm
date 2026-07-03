@@ -23,6 +23,8 @@ from config import (
     SCD_CHANGE_THRESHOLD, SCD_WINDOW_SEC, SCD_HOP_SEC,
     CENTROID_EMA_ALPHA, CENTROID_UPDATE_MIN_SIM, MAX_EMBEDDINGS_PER_SPEAKER,
     MAX_SEGMENT_ORDER, DISCOVERY_PHASE_CALLS,
+    PYTORCH_MATCH_THRESHOLD_DISCOVERY, PYTORCH_NEW_SPEAKER_THRESHOLD,
+    PYTORCH_MERGE_THRESHOLD,
 )
 
 log = logging.getLogger(__name__)
@@ -56,6 +58,9 @@ class DiarizationEngine:
     MAX_EMBEDDINGS_PER_SPEAKER = MAX_EMBEDDINGS_PER_SPEAKER
     MAX_SEGMENT_ORDER = MAX_SEGMENT_ORDER
     DISCOVERY_PHASE_CALLS = DISCOVERY_PHASE_CALLS
+    PYTORCH_MATCH_THRESHOLD_DISCOVERY = PYTORCH_MATCH_THRESHOLD_DISCOVERY
+    PYTORCH_NEW_SPEAKER_THRESHOLD = PYTORCH_NEW_SPEAKER_THRESHOLD
+    PYTORCH_MERGE_THRESHOLD = PYTORCH_MERGE_THRESHOLD
 
     def __init__(self):
         self._model = None
@@ -244,6 +249,20 @@ class DiarizationEngine:
         """
         return self._last_identify_meta.copy()
 
+    def _effective_thresholds(self) -> tuple[float, float, float]:
+        """Return discovery/new-speaker/merge thresholds for the active backend."""
+        if self._backend == "pytorch":
+            return (
+                self.PYTORCH_MATCH_THRESHOLD_DISCOVERY,
+                self.PYTORCH_NEW_SPEAKER_THRESHOLD,
+                self.PYTORCH_MERGE_THRESHOLD,
+            )
+        return (
+            self.MATCH_THRESHOLD_DISCOVERY,
+            self.NEW_SPEAKER_THRESHOLD,
+            self.MERGE_THRESHOLD,
+        )
+
     # ── speaker identification ────────────────────────────
 
     def identify(self, audio: np.ndarray, sample_rate: int = 16000) -> tuple[str, int]:
@@ -374,18 +393,19 @@ class DiarizationEngine:
         # Discovery phase: use stricter match threshold during early session
         # to aggressively discover who's in the room, then relax
         in_discovery = self._identify_count < self.DISCOVERY_PHASE_CALLS
+        discovery_threshold, new_speaker_threshold, _merge_threshold = self._effective_thresholds()
         effective_match_threshold = (
-            self.MATCH_THRESHOLD_DISCOVERY if in_discovery
+            discovery_threshold if in_discovery
             else self.MATCH_THRESHOLD
         )
 
         # Adaptive new-speaker threshold
         n_existing = len(self._speaker_centroids)
         can_create_new = is_high_quality
-        adaptive_new_threshold = self.NEW_SPEAKER_THRESHOLD
+        adaptive_new_threshold = new_speaker_threshold
         if not in_discovery and n_existing >= 2:
             # Stricter threshold per extra speaker (post-discovery)
-            adaptive_new_threshold = max(0.10, self.NEW_SPEAKER_THRESHOLD - 0.05 * (n_existing - 2))
+            adaptive_new_threshold = max(0.10, new_speaker_threshold - 0.05 * (n_existing - 2))
         # After discovery + many speakers: freeze speaker creation
         if not in_discovery and self._next_id > 4:
             total_created = self._next_id - 1
@@ -497,6 +517,9 @@ class DiarizationEngine:
         if self._backend == "onnx" and self._onnx_embedder is not None:
             return self._onnx_embedder.extract(audio, sample_rate)
 
+        if self._backend == "mock":
+            return self._extract_mock_embedding(audio)
+
         # PyTorch path
         if self._model is None:
             return None
@@ -510,6 +533,22 @@ class DiarizationEngine:
         with torch.no_grad():
             embedding = self._model(feats_t).squeeze().cpu().detach().numpy()
         return embedding
+
+    @staticmethod
+    def _extract_mock_embedding(audio: np.ndarray) -> np.ndarray:
+        """Return a deterministic embedding for tests without torch/torchaudio."""
+        from config import SPEAKER_EMBEDDING_DIM
+
+        audio = np.asarray(audio, dtype=np.float32)
+        fingerprint = np.concatenate([
+            audio[: min(len(audio), 2048)],
+            np.array([len(audio), float(audio.mean()), float(audio.std())], dtype=np.float32),
+        ])
+        seed = int(abs(float(fingerprint.sum())) * 1_000_000) % (2 ** 31)
+        rng = np.random.RandomState(seed)
+        emb = rng.randn(SPEAKER_EMBEDDING_DIM).astype(np.float32)
+        emb /= np.linalg.norm(emb) + 1e-10
+        return emb
 
     def _compute_fbank(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
         """Compute 80-dim Fbank features with CMN.
@@ -1248,11 +1287,12 @@ class DiarizationEngine:
         """Merge speaker clusters whose centroids are too similar.
 
         Compares all centroid pairs; merges the smaller cluster into the larger
-        when cosine similarity exceeds MERGE_THRESHOLD.
+        when cosine similarity exceeds the active backend's merge threshold.
         """
         sids = list(self._speaker_centroids.keys())
         if len(sids) < 2:
             return
+        _discovery_threshold, _new_speaker_threshold, merge_threshold = self._effective_thresholds()
 
         # Find the most similar pair
         best_sim, best_pair = -1.0, None
@@ -1266,7 +1306,7 @@ class DiarizationEngine:
                     best_sim = sim
                     best_pair = (sids[i], sids[j])
 
-        if best_sim < self.MERGE_THRESHOLD or best_pair is None:
+        if best_sim < merge_threshold or best_pair is None:
             return
 
         # Merge smaller cluster into larger (by segment count)
