@@ -22,7 +22,11 @@ from textual.widgets.selection_list import Selection
 from textual.binding import Binding
 from textual.screen import ModalScreen
 
-from redaction.engine import apply_redactions, apply_word_lists
+from redaction.engine import (
+    apply_redactions,
+    apply_word_lists,
+    verify_redaction_coverage,
+)
 from redaction.tiers import TIERS, filter_spans, next_tier, resolve_tier, tier_masks
 
 # Disposition of the unredacted live-autosave file once the redacted copy is
@@ -44,6 +48,20 @@ def _tier_meter(tier) -> str:
     filled = "▰" * (tier.rank + 1)
     empty = "▱" * (len(TIERS) - tier.rank - 1)
     return f"[{tier.color}]{filled}[/][#3a332c]{empty}[/]"
+
+
+def _coverage_line(signal) -> str:
+    if signal.status == "off":
+        return "[#807060]coverage check off for RAW[/]"
+    if signal.status == "clear":
+        return "[#74b6a6]coverage check clear[/]"
+    examples = " · ".join(
+        f"{finding.type}:{_ellipsize(finding.text, 24)}"
+        for finding in signal.findings[:3]
+    )
+    if len(signal.findings) > 3:
+        examples += " · …"
+    return f"[#ff5577]{signal.summary}[/] [#807060]{examples}[/]"
 
 
 def _clipboard_cmd() -> list[str] | None:
@@ -232,6 +250,11 @@ class RedactionResultScreen(ModalScreen):
         color: #ffb38a;
         margin-bottom: 1;
     }
+    #redact-result-coverage {
+        height: auto;
+        color: #807060;
+        margin-bottom: 1;
+    }
     #redact-result-body {
         height: auto;
         max-height: 20;
@@ -276,6 +299,7 @@ class RedactionResultScreen(ModalScreen):
         path: str = "",
         profile_label: str = "",
         original_note: str = "",
+        coverage_note: str = "",
     ):
         super().__init__()
         self._redacted = redacted_text
@@ -284,6 +308,7 @@ class RedactionResultScreen(ModalScreen):
         self._path = path
         self._label = profile_label
         self._original_note = original_note
+        self._coverage_note = coverage_note
 
     def _tally_line(self) -> str:
         if self._total == 0:
@@ -303,6 +328,12 @@ class RedactionResultScreen(ModalScreen):
                 f"REDACTED — {self._label}" if self._label else "REDACTED"
             )
             yield Static(self._tally_line(), id="redact-result-tally", markup=True)
+            if self._coverage_note:
+                yield Static(
+                    self._coverage_note,
+                    id="redact-result-coverage",
+                    markup=True,
+                )
             with VerticalScroll(id="redact-result-body"):
                 yield Markdown(self._redacted)
             if self._path:
@@ -410,6 +441,11 @@ class RedactionReviewScreen(ModalScreen):
         color: #ffb38a;
     }
     #review-preview-label { height: 1; color: #807060; margin-top: 1; }
+    #review-coverage {
+        height: auto;
+        color: #807060;
+        margin-bottom: 1;
+    }
     #review-preview {
         height: auto;
         max-height: 9;
@@ -505,6 +541,7 @@ class RedactionReviewScreen(ModalScreen):
             yield disp
 
             yield Static("[#807060]preview[/]", id="review-preview-label", markup=True)
+            yield Static("", id="review-coverage", markup=True)
             with VerticalScroll(id="review-preview"):
                 yield Static("", id="review-preview-body")
 
@@ -588,6 +625,8 @@ class RedactionReviewScreen(ModalScreen):
         marker = "\n---\n"
         idx = text.find(marker)
         shown = text[idx + len(marker):] if idx != -1 else text
+        signal = verify_redaction_coverage(shown, self._tier.id)
+        self.query_one("#review-coverage", Static).update(_coverage_line(signal))
         body = self.query_one("#review-preview-body", Static)
         if result.total == 0:
             body.update("[#807060](nothing will be masked)[/]\n\n" + shown)

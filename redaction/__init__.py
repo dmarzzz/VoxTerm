@@ -1,6 +1,7 @@
 """Local LLM redaction for VoxTerm transcripts."""
 
 from .engine import (
+    CoverageSignal,
     Finding,
     Redactor,
     RedactionError,
@@ -11,6 +12,7 @@ from .engine import (
     drop_allowed,
     get_redactor,
     overwrite_and_delete,
+    verify_redaction_coverage,
 )
 from .prompts import (
     CATEGORIES,
@@ -30,6 +32,7 @@ from .tiers import (
 
 __all__ = [
     "CATEGORIES",
+    "CoverageSignal",
     "DETECTION_PROFILE",
     "Finding",
     "PROFILES",
@@ -50,4 +53,5 @@ __all__ = [
     "resolve_profile",
     "resolve_tier",
     "tier_masks",
+    "verify_redaction_coverage",
 ]

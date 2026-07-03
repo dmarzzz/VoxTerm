@@ -61,6 +61,16 @@ class RedactionResult:
     total: int  # total spans masked (sum of counts)
 
 
+@dataclass(frozen=True)
+class CoverageSignal:
+    """Second-pass warning for likely sensitive text left after masking."""
+
+    status: str  # clear | review | off
+    findings: tuple[Finding, ...]
+    total: int
+    summary: str
+
+
 class Redactor(Protocol):
     """A local-LLM redactor."""
 
@@ -90,6 +100,34 @@ _REGEX_SPANS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 # Spans shorter than this (after stripping) are dropped — masking 1-char
 # fragments would shred the transcript for no privacy gain.
 _MIN_SPAN_LEN = 2
+_PLACEHOLDER_RE = re.compile(r"\[[A-Z_]+\]")
+_WORLD_PROPER_NOUN_RE = re.compile(
+    r"\b[A-Z][A-Za-z0-9]+(?:[ -][A-Z][A-Za-z0-9]+){0,3}\b"
+)
+_WORLD_PROPER_NOUN_IGNORE = {
+    "A",
+    "An",
+    "And",
+    "But",
+    "I",
+    "If",
+    "In",
+    "It",
+    "No",
+    "Or",
+    "So",
+    "The",
+    "Then",
+    "This",
+    "We",
+    "You",
+    "Speaker",
+    "VoxTerm",
+    "RAW",
+    "INNER",
+    "ROOM",
+    "WORLD",
+}
 
 
 def chunk_text(text: str, max_chars: int) -> list[str]:
@@ -252,6 +290,70 @@ def apply_redactions(
         findings=tuple(findings),
         counts=counts,
         total=total,
+    )
+
+
+def _coverage_findings(text: str, spans: list[tuple[str, str]]) -> tuple[Finding, ...]:
+    seen: dict[str, str] = {}
+    for span_text, typ in spans:
+        st = span_text.strip()
+        if len(st) >= _MIN_SPAN_LEN and st not in seen:
+            seen[st] = typ
+
+    findings: list[Finding] = []
+    for span_text in sorted(seen, key=len, reverse=True):
+        n = text.count(span_text)
+        if n:
+            findings.append(Finding(text=span_text, type=seen[span_text], count=n))
+    return tuple(findings)
+
+
+def verify_redaction_coverage(redacted_text: str, tier_id: str) -> CoverageSignal:
+    """Second-pass signal for likely misses in a redacted preview.
+
+    This is intentionally deterministic and local: structured PII is checked
+    with the same regex backstop after masking, and WORLD gets an additional
+    conservative proper-noun candidate pass. It is a warning surface for human
+    review, not an automatic rewrite or a claim of perfect recall.
+    """
+
+    tier = (tier_id or "").lower()
+    if tier == "raw":
+        return CoverageSignal(
+            status="off",
+            findings=(),
+            total=0,
+            summary="coverage check off for RAW",
+        )
+
+    spans = regex_spans(redacted_text)
+    if tier == "world":
+        # Avoid treating our own placeholders as fresh capitalized tokens.
+        plain = _PLACEHOLDER_RE.sub(" ", redacted_text)
+        for match in _WORLD_PROPER_NOUN_RE.finditer(plain):
+            candidate = match.group(0).strip()
+            if candidate in _WORLD_PROPER_NOUN_IGNORE:
+                continue
+            if candidate.isupper() or candidate.isdigit():
+                continue
+            spans.append((candidate, "PROPER"))
+
+    findings = _coverage_findings(redacted_text, spans)
+    total = sum(f.count for f in findings)
+    if not findings:
+        return CoverageSignal(
+            status="clear",
+            findings=(),
+            total=0,
+            summary="coverage check clear",
+        )
+    kinds = ", ".join(sorted({f.type for f in findings}))
+    span_word = "span" if total == 1 else "spans"
+    return CoverageSignal(
+        status="review",
+        findings=findings,
+        total=total,
+        summary=f"coverage check: review {total} possible leftover {span_word} ({kinds})",
     )
 
 

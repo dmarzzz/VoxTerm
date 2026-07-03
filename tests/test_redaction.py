@@ -27,6 +27,7 @@ from redaction.engine import (
     overwrite_and_delete,
     parse_spans,
     regex_spans,
+    verify_redaction_coverage,
 )
 from redaction.prompts import resolve_profile
 from tui.app import VoxTerm
@@ -139,6 +140,41 @@ def test_apply_drops_too_short_spans():
     res = apply_redactions(text, [("a", "NAME"), ("", "NAME"), (" ", "OTHER")])
     assert res.redacted_text == text
     assert res.total == 0
+
+
+def test_coverage_signal_clear_after_masking():
+    signal = verify_redaction_coverage(
+        "[NAME] discussed [PROJECT] with [ORG].",
+        "world",
+    )
+    assert signal.status == "clear"
+    assert signal.findings == ()
+
+
+def test_coverage_signal_warns_on_leftover_structured_pii():
+    signal = verify_redaction_coverage(
+        "Email jane@example.com after the meeting.",
+        "room",
+    )
+    assert signal.status == "review"
+    assert signal.total == 1
+    assert signal.findings[0].type == "EMAIL"
+
+
+def test_coverage_signal_warns_on_world_proper_noun_candidates():
+    signal = verify_redaction_coverage(
+        "[NAME] discussed Reth with Anthropic.",
+        "world",
+    )
+    assert signal.status == "review"
+    assert {finding.text for finding in signal.findings} >= {"Reth", "Anthropic"}
+    assert {finding.type for finding in signal.findings} == {"PROPER"}
+
+
+def test_coverage_signal_off_for_raw():
+    signal = verify_redaction_coverage("Alice jane@example.com", "raw")
+    assert signal.status == "off"
+    assert signal.total == 0
 
 
 # --- chunk_text ----------------------------------------------------------
@@ -447,10 +483,16 @@ def test_review_screen_tier_dial_resets_span_selection():
             await pilot.pause(0.1)
             assert screen._tier.id == "world"
             assert sorted(selection.selected) == [0, 1, 2]
+            assert "coverage check clear" in screen.query_one(
+                "#review-coverage", Static
+            ).content
 
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert screen._tier.id == "raw"
             assert sorted(selection.selected) == []
+            assert "coverage check off for RAW" in screen.query_one(
+                "#review-coverage", Static
+            ).content
 
     asyncio.run(run_screen())

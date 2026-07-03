@@ -79,6 +79,7 @@ from redaction import (
     next_tier,
     overwrite_and_delete,
     resolve_tier,
+    verify_redaction_coverage,
 )
 from tui.widgets.transcript_explorer import TranscriptExplorerScreen
 from tui.widgets.recording_pulse import RecordingPulse
@@ -2403,6 +2404,7 @@ class VoxTerm(App):
         transcript = self.query_one(TranscriptPanel)
         profile_label = resolve_tier(tier_id).label
         result = apply_redactions(body, spans)
+        coverage = verify_redaction_coverage(result.redacted_text, tier_id)
 
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         filename = (
@@ -2460,11 +2462,21 @@ class VoxTerm(App):
             transcript.redact_view(spans, label=profile_label)
             view_note = "  ·  transcript now showing REDACTED view (⌃R to toggle)"
 
+        coverage_note = ""
+        if coverage.status == "review":
+            coverage_note = f"  ·  {coverage.summary}"
+
         transcript.system_message(
             f"🛇 REDACTED [{profile_label}] — {result.total} spans masked → "
-            f"{filepath} [{original_note}]{view_note}",
+            f"{filepath} [{original_note}]{view_note}{coverage_note}",
             Log.REC,
         )
+        if coverage.status == "review":
+            result_coverage = f"[#ff5577]{coverage.summary}[/]"
+        elif coverage.status == "clear":
+            result_coverage = "[#74b6a6]coverage check clear[/]"
+        else:
+            result_coverage = "[#807060]coverage check off for RAW[/]"
         self.push_screen(
             RedactionResultScreen(
                 redacted_text=md,
@@ -2473,6 +2485,7 @@ class VoxTerm(App):
                 path=str(filepath),
                 profile_label=profile_label,
                 original_note=original_note,
+                coverage_note=result_coverage,
             )
         )
 
