@@ -231,6 +231,25 @@ class TestPeriodicMerge:
 
         assert len(mock_engine._speaker_centroids) == 2
 
+    def test_pytorch_backend_uses_lower_merge_threshold(self, mock_engine):
+        emb1 = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        emb1[0] = 1.0
+        emb2 = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        emb2[0] = 0.60
+        emb2[1] = np.sqrt(1.0 - emb2[0] ** 2)
+
+        for backend, expected_count in (("onnx", 2), ("pytorch", 1)):
+            mock_engine._backend = backend
+            mock_engine._speaker_centroids = {1: emb1.copy(), 2: emb2.copy()}
+            mock_engine._segment_embeddings = {
+                1: [(emb1.copy(), 2.0)] * 3,
+                2: [(emb2.copy(), 2.0)],
+            }
+
+            mock_engine._maybe_merge_clusters()
+
+            assert len(mock_engine._speaker_centroids) == expected_count
+
     def test_merge_triggered_at_interval(self, loaded_mock_engine):
         engine = loaded_mock_engine
         assert engine._identify_count == 0
@@ -243,14 +262,23 @@ class TestPeriodicMerge:
 
 
 class TestThresholdConstants:
-    """Verify Phase 1 threshold values."""
+    """Verify backend-specific diarization threshold values."""
 
-    def test_similarity_threshold(self):
+    def test_default_thresholds_remain_onnx_tuned(self):
         assert DiarizationEngine.MATCH_THRESHOLD == 0.55
+        assert DiarizationEngine.MATCH_THRESHOLD_DISCOVERY == 0.70
         assert DiarizationEngine.NEW_SPEAKER_THRESHOLD == 0.45
-
-    def test_merge_threshold(self):
         assert DiarizationEngine.MERGE_THRESHOLD == 0.65
+
+    def test_pytorch_backend_uses_camplus_tuning(self):
+        engine = DiarizationEngine()
+        engine._backend = "pytorch"
+        assert engine._effective_thresholds() == (0.60, 0.40, 0.55)
+
+    def test_onnx_backend_uses_default_tuning(self):
+        engine = DiarizationEngine()
+        engine._backend = "onnx"
+        assert engine._effective_thresholds() == (0.70, 0.45, 0.65)
 
     def test_min_speech_samples(self):
         from audio.diarization.engine import _MIN_SPEECH_SAMPLES

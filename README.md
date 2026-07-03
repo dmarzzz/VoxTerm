@@ -7,11 +7,12 @@ Local real-time voice transcription TUI with speaker diarization and P2P collabo
 
 ## Privacy & Storage Policy
 
-VoxTerm is **local first and private by default**. Everything runs on your machine. Nothing is ever sent to a server.
+VoxTerm is **local first and private by default**. Everything runs on your machine. Nothing is sent to a server unless you explicitly enable an upload mode.
 
 - **No audio is stored.** Microphone input is processed in real-time and discarded. Only text transcripts are saved.
 - **Voice profiles are encrypted at rest.** Speaker embeddings (biometric data used to recognize voices across sessions) are encrypted with AES-256-CBC. The key lives in your macOS Keychain — zero config.
-- **Transcripts are yours.** Auto-saved as markdown to `~/Documents/voxterm-transcripts/`. Never uploaded anywhere.
+- **Transcripts are yours.** Auto-saved as markdown to `~/Documents/voxterm-transcripts/`. Final transcript upload is off by default and opt-in from `Y` upload settings.
+- **Experimental remote backends are opt-in.** The spectrogram vision backend is hidden by default and only sends spectrogram images to the server URL you configure.
 - **P2P stays on your LAN.** Party mode shares transcripts over your local network only. No relay servers.
 - **Delete everything anytime.** Press `P` → delete to permanently wipe all voice data from disk.
 
@@ -30,6 +31,37 @@ voxterm
 ```
 
 Runs on macOS and Linux, Python 3.12+. Apple Silicon Macs use MLX models; Intel Macs and Linux use the CPU-compatible faster-whisper / Qwen3-ASR (PyTorch) backends. Models download automatically on first use.
+
+Optional full-screen ShaderClaw transcript visuals:
+
+```bash
+voxterm --display
+```
+
+Display mode uses a local ShaderClaw checkout. Install it once:
+
+```bash
+cd ~
+git clone https://github.com/G3993/ShaderClaw3.git shader-claw3
+cd shader-claw3
+npm install
+```
+
+VoxTerm auto-detects `~/shader-claw3` or a sibling `../shader-claw3` checkout. If ShaderClaw lives somewhere else:
+
+```bash
+export VOXTERM_SHADERCLAW_DIR=/path/to/shader-claw3
+```
+
+Optional experimental spectrogram vision transcription:
+
+```bash
+export VOXTERM_SPECTROGRAM_MODEL=qwen2.5-vl-3b
+export VOXTERM_SPECTROGRAM_SERVER_URL=http://localhost:8080
+voxterm -m spec-vl
+```
+
+This converts each audio chunk to a mel-spectrogram PNG and sends it to an OpenAI-compatible local vision server. Leave `VOXTERM_SPECTROGRAM_MODEL` unset to keep the backend hidden from the model picker.
 
 <details>
 <summary>Manual setup (for developers)</summary>
@@ -53,13 +85,50 @@ python3 -m tui.app
 | `N` | Party mode — join or leave P2P sessions |
 | `T` | Tag/name speakers |
 | `P` | Speaker profiles |
+| `G` | Launch web GUI |
+| `Shift+G` | Open ShaderClaw display mode |
 | `M` | Switch transcription model |
 | `L` | Switch language |
 | `S` | Save/export transcript |
+| `Y` | Final transcript upload settings |
 | `C` | Clear transcript |
 | `D` | Toggle debug mode |
 | `?` | Help |
 | `Q` | Quit |
+
+## Batch transcription and Rode import
+
+Transcribe existing WAV files without opening the live mic UI:
+
+```bash
+voxterm-batch meeting.wav interview.wav --out-dir ~/Documents/voxterm-transcripts
+```
+
+The batch path reuses VoxTerm's headless transcription engine, VAD, diarization,
+event log, and Markdown transcript writer.
+
+For Rode Wireless GO-style USB recorders, plug in the device so its mass-storage
+volume mounts, then run:
+
+```bash
+voxterm-batch --rode
+```
+
+VoxTerm scans mounted volumes for `*_Wireless_GO.WAV`, copies new recordings
+into its local data directory, deduplicates by SHA-256 content hash, and writes
+a local manifest so later runs skip already imported recordings. The device is
+treated as read-only: import means copy-down, not delete-or-move sync. Use
+`--no-transcribe` to copy only and transcribe on a later run.
+
+For plug-in auto-sync, keep a watcher running:
+
+```bash
+voxterm-batch --rode --watch --watch-interval 10
+```
+
+The watcher polls the same macOS/Linux mount roots, imports only new hashes, and
+prints each copy/transcribe action. Run it from a shell, launchd, or a systemd
+user service when you want recordings to sync as soon as the recorder mounts.
 
 ## Party Mode (P2P)
 
@@ -74,6 +143,23 @@ Multiple people in the same room can share transcripts over the local network. E
 - Everyone sees who joins and leaves — no silent surveillance
 
 See [docs/party-mode-design.md](docs/party-mode-design.md) for the full design.
+
+## Finalized transcript upload
+
+Press `Y` to configure what happens when you save/export a finalized transcript:
+
+- **Local only** (default): write the transcript file and do not upload.
+- **Local + Remote**: write the local file, queue a remote upload, and retry failures later.
+- **Remote only**: queue the remote upload without writing a transcript into the sessions folder.
+
+The upload endpoint is configurable in the same screen. Enter an auth token there to store it in VoxTerm's private secret store; leave the field blank to keep the existing token, or type `CLEAR` to remove it. Audio upload is opt-in and only attaches retained audio when a retained audio file exists.
+
+Remote failures never block the local save path. VoxTerm stores pending uploads in a private local retry queue and flushes that queue whenever a transcript export runs.
+
+## Room rollout
+
+For hardware sourcing, see
+[docs/hardware-procurement.md](docs/hardware-procurement.md).
 
 ## Always-on room devices
 
@@ -143,6 +229,13 @@ CPU-only, Linux/macOS-arm64/Windows) with two model keys — `sherpa-stream-en` 
 ultra-fast) and `sherpa-nemotron-en` (NeMo 0.6B, accurate). Fully opt-in: absent, nothing
 changes. See [docs/streaming-asr.md](docs/streaming-asr.md) and the
 [benchmark](docs/streaming-asr-benchmark.md).
+
+### Diarization attribution benchmark
+
+Field validation for multi-speaker diarization uses saved `*-events.jsonl` logs plus
+human reference labels. See [docs/diarization-benchmark.md](docs/diarization-benchmark.md)
+and run `python scripts/score_diarization.py <manifest.json> --strict` for the
+issue #87 corpus shape and 90% segment-attribution target.
 
 ### Android: the same GUI, on-device (offline)
 

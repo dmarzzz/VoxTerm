@@ -21,6 +21,8 @@ Kinds emitted by VoxTerm today (see call sites in tui/app.py):
     recording  — recording toggle             fields: on (bool)
     party      — party-session join/leave     fields: on (bool)
     session    — session start/end            fields: phase ("start"|"end")
+    upload     — transcript upload state      fields: phase, sent, pending, error
+    upload_settings — upload config changed   fields: mode, endpoint_set, include_audio
 """
 from __future__ import annotations
 

@@ -32,7 +32,7 @@ from audio.mix import mix_chunks  # noqa: E402
 from gui._timefmt import fmt_hms  # noqa: E402
 from gui import transcribe, export  # noqa: E402
 
-OUT_DIR = Path.home() / "voxterm-live"
+OUT_DIR = Path(os.environ.get("VOXTERM_GUI_OUT_DIR") or (Path.home() / "voxterm-live"))
 SR = config.SAMPLE_RATE
 
 

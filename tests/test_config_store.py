@@ -1,12 +1,14 @@
 """Tests for ConfigStore — typed settings persistence with merge semantics."""
 
 import json
+import os
+import stat
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from config import ConfigStore
+from config import ConfigStore, SecretStore
 
 
 @pytest.fixture
@@ -25,6 +27,9 @@ class TestDefaults:
         assert cs.get("summarization_strength") == "medium"
         assert cs.get("summarization_template") == "tldr"
         assert cs.get("summarization_custom_prompt") == ""
+        assert cs.get("upload_mode") == "local"
+        assert cs.get("upload_endpoint") == ""
+        assert cs.get("upload_include_audio") is False
 
     def test_unknown_key_returns_none(self, tmp_path_file):
         cs = ConfigStore(tmp_path_file)
@@ -190,3 +195,50 @@ class TestDataSnapshot:
         snapshot = cs.data
         snapshot["last_model"] = "tampered"
         assert cs.get("last_model") == "turbo"  # not affected
+
+
+class TestUploadSettings:
+    def test_upload_settings_persist(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        cs.update(
+            {
+                "upload_mode": "local_remote",
+                "upload_endpoint": "https://example.test/upload",
+                "upload_include_audio": True,
+            }
+        )
+
+        cs2 = ConfigStore(tmp_path_file)
+        assert cs2.get("upload_mode") == "local_remote"
+        assert cs2.get("upload_endpoint") == "https://example.test/upload"
+        assert cs2.get("upload_include_audio") is True
+
+    def test_upload_include_audio_wrong_type_rejected(self, tmp_path_file):
+        cs = ConfigStore(tmp_path_file)
+        with pytest.raises(TypeError, match="expected bool"):
+            cs.set("upload_include_audio", "yes")
+
+
+class TestSecretStore:
+    def test_secret_store_round_trip(self, tmp_path):
+        path = tmp_path / "secrets.json"
+        ss = SecretStore(path)
+        ss.set("upload_auth_token", "abc123")
+
+        assert SecretStore(path).get("upload_auth_token") == "abc123"
+
+    def test_secret_store_delete(self, tmp_path):
+        path = tmp_path / "secrets.json"
+        ss = SecretStore(path)
+        ss.set("upload_auth_token", "abc123")
+        ss.delete("upload_auth_token")
+
+        assert SecretStore(path).get("upload_auth_token") == ""
+
+    def test_secret_store_file_is_private(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("chmod mode bits are not portable on Windows")
+        path = tmp_path / "secrets.json"
+        SecretStore(path).set("upload_auth_token", "abc123")
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
