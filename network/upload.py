@@ -84,6 +84,15 @@ class FlushResult:
         return self.pending == 0 and not self.last_error
 
 
+@dataclass(frozen=True)
+class QueueStatus:
+    """User-facing summary of the durable retry queue."""
+
+    pending: int
+    attempted: int
+    last_error: str = ""
+
+
 def default_queue_path() -> Path:
     try:
         from config import DATA_DIR  # type: ignore
@@ -161,6 +170,16 @@ class UploadQueue:
     def replace(self, records: list[dict[str, Any]]) -> None:
         with self._lock:
             self._replace_unlocked(records)
+
+    def status(self) -> QueueStatus:
+        records = self.load()
+        attempted = sum(1 for record in records if int(record.get("attempts") or 0) > 0)
+        last_error = ""
+        for record in reversed(records):
+            last_error = str(record.get("last_error") or "")
+            if last_error:
+                break
+        return QueueStatus(pending=len(records), attempted=attempted, last_error=last_error)
 
     def _load_unlocked(self) -> list[dict[str, Any]]:
         try:

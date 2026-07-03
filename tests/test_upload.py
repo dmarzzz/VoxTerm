@@ -9,6 +9,8 @@ from network.upload import (
     UploadQueue,
     build_upload_record,
 )
+import tui.app as tui_app
+from tui.app import UploadSettingsScreen, VoxTerm
 
 
 def test_upload_mode_parse_and_flags():
@@ -110,6 +112,22 @@ def test_missing_endpoint_leaves_queue_unattempted(tmp_path):
     assert record["attempts"] == 0
 
 
+def test_queue_status_reports_pending_attempted_and_last_error(tmp_path):
+    queue = UploadQueue(tmp_path / "queue.jsonl")
+    queue.replace(
+        [
+            {"id": "a", "attempts": 0, "last_error": ""},
+            {"id": "b", "attempts": 2, "last_error": "timeout"},
+        ]
+    )
+
+    status = queue.status()
+
+    assert status.pending == 2
+    assert status.attempted == 1
+    assert status.last_error == "timeout"
+
+
 def test_include_audio_embeds_retained_audio(tmp_path):
     wav = tmp_path / "take.wav"
     wav.write_bytes(b"RIFFfake")
@@ -133,3 +151,63 @@ def test_include_audio_without_file_marks_unavailable():
     assert record["audio"] is None
     assert record["metadata"]["audio_included"] is False
     assert "no retained audio" in record["metadata"]["audio_note"]
+
+
+def test_upload_settings_status_includes_queue_state():
+    screen = UploadSettingsScreen(
+        mode="local_remote",
+        endpoint="https://example.test/upload",
+        include_audio=False,
+        has_token=True,
+        queue_pending=3,
+        queue_last_error="temporary upstream outage with a verbose message",
+    )
+
+    status = screen._status_text()
+
+    assert "Local + Remote" in status
+    assert "token saved" in status
+    assert "queue 3 pending" in status
+    assert "last error" in status
+
+
+def test_manual_upload_flush_uses_current_config(monkeypatch):
+    app = object.__new__(VoxTerm)
+    messages = []
+    flushes = []
+
+    class _Config:
+        def get(self, key):
+            return {"upload_endpoint": "https://upload.test"}[key]
+
+    class _Secrets:
+        def get(self, key):
+            assert key == "upload_auth_token"
+            return "token"
+
+    class _Status:
+        pending = 2
+        last_error = ""
+
+    class _Queue:
+        def status(self):
+            return _Status()
+
+    class _Transcript:
+        def system_message(self, message, *args, **kwargs):
+            messages.append(message)
+
+    monkeypatch.setattr(tui_app, "_get_config", lambda: _Config())
+    monkeypatch.setattr(tui_app, "SecretStore", _Secrets)
+    monkeypatch.setattr(tui_app, "UploadQueue", _Queue)
+    monkeypatch.setattr(app, "query_one", lambda _cls: _Transcript())
+    monkeypatch.setattr(
+        app,
+        "_flush_upload_queue",
+        lambda endpoint, token: flushes.append((endpoint, token)),
+    )
+
+    app._flush_upload_queue_from_config()
+
+    assert messages == ["remote upload flush requested (2 pending)"]
+    assert flushes == [("https://upload.test", "token")]

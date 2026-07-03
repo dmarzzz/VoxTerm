@@ -58,6 +58,7 @@ from textual.widgets.option_list import Option
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual import work
+from rich.markup import escape
 
 from tui.widgets.header import CyberHeader
 from tui.widgets.waveform import WaveformWidget, _make_style
@@ -106,10 +107,16 @@ def _clipboard_cmd() -> list[str] | None:
     return None
 
 
+def _ellipsize(text: str, width: int = 48) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
 from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILABLE
 
 from config import ConfigStore, SecretStore
-from network.upload import TranscriptUploadClient, UploadMode
+from network.upload import TranscriptUploadClient, UploadMode, UploadQueue
+
 
 def _setup_file_logging() -> None:
     """Best-effort file logging setup that never prevents module import."""
@@ -539,7 +546,7 @@ class UploadSettingsScreen(ModalScreen):
     #upload-dialog {
         width: 72;
         height: auto;
-        max-height: 22;
+        max-height: 24;
         border: heavy #4488cc;
         border-title-color: #66bbff;
         border-title-style: bold;
@@ -547,7 +554,7 @@ class UploadSettingsScreen(ModalScreen):
         padding: 1 2;
     }
     #upload-list {
-        height: 5;
+        height: 6;
         background: #0a0e14;
         color: #c0c0c0;
     }
@@ -559,7 +566,7 @@ class UploadSettingsScreen(ModalScreen):
         margin-top: 1;
     }
     #upload-status {
-        height: 1;
+        height: auto;
         color: #607080;
         margin-top: 1;
     }
@@ -572,6 +579,7 @@ class UploadSettingsScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("f", "flush", "Flush"),
         Binding("ctrl+s", "save", "Save"),
     ]
 
@@ -582,12 +590,16 @@ class UploadSettingsScreen(ModalScreen):
         endpoint: str,
         include_audio: bool,
         has_token: bool,
+        queue_pending: int = 0,
+        queue_last_error: str = "",
     ) -> None:
         super().__init__()
         self._mode = UploadMode.parse(mode)
         self._endpoint = endpoint
         self._include_audio = include_audio
         self._has_token = has_token
+        self._queue_pending = int(queue_pending)
+        self._queue_last_error = queue_last_error
 
     def compose(self) -> ComposeResult:
         with Vertical(id="upload-dialog") as dialog:
@@ -604,7 +616,8 @@ class UploadSettingsScreen(ModalScreen):
             )
             yield Static(self._status_text(), id="upload-status", markup=True)
             yield Static(
-                " [#607080]ENTER[/] choose/toggle  [#607080]CTRL+S[/] save  "
+                " [#607080]ENTER[/] choose/toggle  [#607080]F[/] flush  "
+                "[#607080]CTRL+S[/] save  "
                 "[#607080]ESC[/] cancel",
                 id="upload-hint",
                 markup=True,
@@ -623,11 +636,15 @@ class UploadSettingsScreen(ModalScreen):
             ),
             Option(f"  {mark(UploadMode.REMOTE_ONLY)} Remote only", id="mode:remote"),
             Option(f"  include retained audio: {audio}", id="audio"),
+            Option("  Flush queued uploads now", id="flush"),
         ]
 
     def _status_text(self) -> str:
         token = "token saved" if self._has_token else "no token saved"
-        return f"[#607080]{self._mode.label}; {token}[/]"
+        queue = f"{self._queue_pending} pending"
+        if self._queue_last_error:
+            queue += f"; last error: {_ellipsize(self._queue_last_error, 42)}"
+        return f"[#607080]{self._mode.label}; {token}; queue {escape(queue)}[/]"
 
     def _refresh(self) -> None:
         self.query_one("#upload-list", OptionList).set_options(self._options())
@@ -639,6 +656,9 @@ class UploadSettingsScreen(ModalScreen):
             self._mode = UploadMode.parse(choice.split(":", 1)[1])
         elif choice == "audio":
             self._include_audio = not self._include_audio
+        elif choice == "flush":
+            self.action_flush()
+            return
         self._refresh()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -649,12 +669,16 @@ class UploadSettingsScreen(ModalScreen):
         self.dismiss(
             {
                 "mode": self._mode.value,
+                "action": "save",
                 "endpoint": self.query_one("#upload-endpoint", Input).value.strip(),
                 "include_audio": self._include_audio,
                 "token": "" if token.upper() == "CLEAR" else token,
                 "clear_token": token.upper() == "CLEAR",
             }
         )
+
+    def action_flush(self) -> None:
+        self.dismiss({"action": "flush"})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -2075,6 +2099,9 @@ class VoxTerm(App):
         def on_result(result):
             if result is None:
                 return
+            if result.get("action") == "flush":
+                self._flush_upload_queue_from_config()
+                return
             mode = UploadMode.parse(result["mode"])
             endpoint = result["endpoint"]
             include_audio = bool(result["include_audio"])
@@ -2101,14 +2128,34 @@ class VoxTerm(App):
             )
             self._update_telemetry()
 
+        queue_status = UploadQueue().status()
         self.push_screen(
             UploadSettingsScreen(
                 mode=cfg.get("upload_mode") or "local",
                 endpoint=cfg.get("upload_endpoint") or "",
                 include_audio=bool(cfg.get("upload_include_audio")),
                 has_token=bool(secrets.get("upload_auth_token")),
+                queue_pending=queue_status.pending,
+                queue_last_error=queue_status.last_error,
             ),
             on_result,
+        )
+
+    def _flush_upload_queue_from_config(self) -> None:
+        cfg = _get_config()
+        secrets = SecretStore()
+        status = UploadQueue().status()
+        if status.pending == 0:
+            self.query_one(TranscriptPanel).system_message(
+                "remote upload queue is empty", Log.REC
+            )
+            return
+        self.query_one(TranscriptPanel).system_message(
+            f"remote upload flush requested ({status.pending} pending)", Log.REC
+        )
+        self._flush_upload_queue(
+            cfg.get("upload_endpoint") or "",
+            secrets.get("upload_auth_token"),
         )
 
     def _swap_model(self, model_key: str):
