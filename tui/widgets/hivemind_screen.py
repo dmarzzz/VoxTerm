@@ -216,9 +216,15 @@ class HivemindScreen(ModalScreen):
         except Exception:
             pass
         try:
+            refresh_header = getattr(self.app, "_refresh_hivemind_header", None)
+            if callable(refresh_header):
+                refresh_header()
+        except Exception:
+            pass
+        try:
             from tui.widgets.transcript import Log, TranscriptPanel
             tp = self.app.query_one(TranscriptPanel)
-            tp.system_message(msg, Log.SYS)
+            tp.system_message(msg, Log.HIVE)
         except Exception:
             # Screen can be used in tests / without a TranscriptPanel
             # parent (e.g., the dictation app); best-effort.
