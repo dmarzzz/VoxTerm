@@ -14,6 +14,7 @@ import config
 from audio.transcriber import (
     FasterWhisperTranscriber,
     Qwen3Transcriber,
+    SpectrogramTranscriber,
     WhisperTranscriber,
     get_transcriber,
 )
@@ -51,3 +52,16 @@ def test_factory_unknown_model_raises_keyerror():
     # Same failure mode as the inline AVAILABLE_MODELS[...] lookups it replaced.
     with pytest.raises(KeyError):
         get_transcriber("definitely-not-a-real-model")
+
+
+def test_factory_dispatches_spectrogram_models(monkeypatch):
+    monkeypatch.setitem(config.AVAILABLE_MODELS, "spec-test", "qwen2.5-vl")
+    monkeypatch.setattr(config, "SPECTROGRAM_MODELS", {"spec-test"})
+    monkeypatch.setattr(config, "SPECTROGRAM_SERVER_URL", "http://vision.local")
+
+    tr = get_transcriber("spec-test", language="fr")
+
+    assert isinstance(tr, SpectrogramTranscriber)
+    assert tr.server_url == "http://vision.local"
+    assert tr.model == "qwen2.5-vl"
+    assert tr._language == "fr"

@@ -81,7 +81,7 @@ from config import (
     SILENCE_THRESHOLD, SILENCE_TRIGGER_SECONDS,
     MAX_BUFFER_SECONDS, MIN_BUFFER_SECONDS,
     DEFAULT_MODEL, AVAILABLE_MODELS, QWEN3_MODELS, FASTER_WHISPER_MODELS,
-    PARAKEET_MODELS, SHERPA_MODELS,
+    PARAKEET_MODELS, SHERPA_MODELS, SPECTROGRAM_MODELS,
     DEFAULT_LANGUAGE, AVAILABLE_LANGUAGES,
     LIVE_DIR,
     EVENTS_ENABLED,
@@ -2632,6 +2632,8 @@ def main():
                 backend = " [faster-whisper]"
             elif name in SHERPA_MODELS:
                 backend = " [sherpa-onnx]"
+            elif name in SPECTROGRAM_MODELS:
+                backend = " [spectrogram-vl]"
             else:
                 backend = " [whisper]"
             print(f"  {name:20s} → {repo}{backend}{tag}")

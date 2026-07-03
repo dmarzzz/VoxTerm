@@ -3,6 +3,7 @@
 VERSION = "0.3.0"
 
 import importlib.util
+import os
 import sys
 import platform
 
@@ -90,6 +91,19 @@ elif sys.platform == "win32":
     FASTER_WHISPER_MODELS = {"fw-tiny", "fw-base", "fw-small", "fw-medium", "fw-large-v3", "fw-distil-large-v3"}
 else:
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+# Optional experimental spectrogram -> vision-model backend. Hidden unless
+# explicitly configured so normal model pickers do not surface a remote backend
+# that cannot work without a local OpenAI-compatible vision server.
+SPECTROGRAM_SERVER_URL = (
+    os.environ.get("VOXTERM_SPECTROGRAM_SERVER_URL") or "http://localhost:8080"
+).strip().rstrip("/")
+_SPECTROGRAM_MODEL = os.environ.get("VOXTERM_SPECTROGRAM_MODEL", "").strip()
+_SPECTROGRAM_KEY = os.environ.get("VOXTERM_SPECTROGRAM_KEY", "spec-vl").strip() or "spec-vl"
+SPECTROGRAM_MODELS: set[str] = set()
+if _SPECTROGRAM_MODEL and _SPECTROGRAM_KEY not in AVAILABLE_MODELS:
+    AVAILABLE_MODELS[_SPECTROGRAM_KEY] = _SPECTROGRAM_MODEL
+    SPECTROGRAM_MODELS.add(_SPECTROGRAM_KEY)
 
 # Optional cross-platform streaming backend (sherpa-onnx). Surfaced ONLY when the package is
 # installed AND a wheel exists for this platform (there is no Intel-macOS wheel). 100% additive:
