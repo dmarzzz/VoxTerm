@@ -93,6 +93,15 @@ voxterm-react question "source?"
 voxterm-react idea "save this" --author macro-pad
 ```
 
+For a persistent USB/HID/serial bridge, stream one reaction per line:
+
+```bash
+some-pad-bridge | voxterm-react --stdin --author macro-pad
+```
+
+Lines can be simple commands like `clap` or `question "source?"`, or the same
+JSONL reaction objects used by the inbox.
+
 Set `VOXTERM_REACTION_INBOX=/path/to/reactions.jsonl` to point hardware or
 automation at a custom inbox file.
 

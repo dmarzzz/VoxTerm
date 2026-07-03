@@ -27,12 +27,33 @@ non-speech reactions to the live transcript.
 The running TUI polls the inbox and folds each event into the transcript
 timeline, live markdown, exports, and the JSONL event stream.
 
+For pads that expose one persistent serial/HID stream instead of launching a
+command per button, run one bridge process and pipe line commands into
+`voxterm-react --stdin`:
+
+```bash
+pad-serial-bridge /dev/tty.usbmodem123 | voxterm-react --stdin --author front-pad
+```
+
+Accepted line formats:
+
+```text
+clap
+question "source?"
+idea save this
+{"kind":"reaction","emoji":"plus","text":"agree","author":"front-pad"}
+```
+
+Blank or malformed lines are ignored, so a noisy bridge does not crash the
+running transcript.
+
 ## Device Options
 
 - Stream Deck, X-keys, Touch Portal, BetterTouchTool, Karabiner, or any macro
   keyboard: configure each button to run one command above.
 - QMK/VIA keyboard or DIY USB HID pad: map each key to a host-side automation
-  shortcut, then have that automation run `voxterm-react`.
+  shortcut, then have that automation run `voxterm-react`, or use a small
+  serial bridge with `voxterm-react --stdin`.
 - Custom bridge process: write one JSON object per line to the inbox:
 
   ```json
@@ -63,6 +84,15 @@ VOXTERM_REACTION_INBOX="$tmp/reactions.jsonl" voxterm-react question "source?" -
 cat "$tmp/reactions.jsonl"
 ```
 
-The file should contain one `kind: "reaction"` JSONL row. When VoxTerm is
-running with the same `VOXTERM_REACTION_INBOX`, the transcript should show the
-reaction as a timeline row and include it in saved Markdown.
+For a persistent bridge:
+
+```bash
+tmp="$(mktemp -d)"
+printf 'clap\nquestion "source?"\n' | \
+  voxterm-react --stdin --author macro-pad --inbox "$tmp/reactions.jsonl"
+cat "$tmp/reactions.jsonl"
+```
+
+The file should contain one `kind: "reaction"` JSONL row per input reaction.
+When VoxTerm is running with the same `VOXTERM_REACTION_INBOX`, the transcript
+should show each reaction as a timeline row and include it in saved Markdown.

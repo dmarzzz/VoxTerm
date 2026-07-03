@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import sys
 import time
 from pathlib import Path
+from typing import Iterable, TextIO
 
 from config import LIVE_DIR
 
@@ -74,6 +77,43 @@ def parse_reaction_line(line: str) -> dict[str, str] | None:
         return None
 
 
+def parse_reaction_command(line: str, author: str = "external") -> dict[str, str] | None:
+    """Parse one stdin bridge line.
+
+    Accepts either the JSONL inbox shape or a shell-like command form:
+    ``clap``, ``question source?``, ``idea "save this"``.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    if line.startswith("{"):
+        return parse_reaction_line(line)
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    try:
+        return normalize_reaction(parts[0], " ".join(parts[1:]), author)
+    except ValueError:
+        return None
+
+
+def append_reaction_payload(path: Path, payload: dict[str, str]) -> dict[str, str]:
+    """Append an already-normalized reaction payload to the inbox."""
+    clean = normalize_reaction(
+        payload.get("emoji", ""),
+        payload.get("text", ""),
+        payload.get("author", "external"),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"t": round(time.time(), 4), "kind": "reaction", **clean}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return clean
+
+
 def append_reaction_event(
     path: Path,
     emoji: str,
@@ -81,12 +121,27 @@ def append_reaction_event(
     author: str = "external",
 ) -> dict[str, str]:
     """Append one reaction JSON object for a running VoxTerm instance to ingest."""
-    payload = normalize_reaction(emoji, text, author)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {"t": round(time.time(), 4), "kind": "reaction", **payload}
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-    return payload
+    return append_reaction_payload(path, normalize_reaction(emoji, text, author))
+
+
+def append_reaction_stream(
+    path: Path,
+    lines: Iterable[str],
+    author: str = "external",
+    *,
+    stderr: TextIO | None = None,
+) -> int:
+    """Append reactions from simple line commands or JSONL records."""
+    count = 0
+    for line_no, line in enumerate(lines, start=1):
+        payload = parse_reaction_command(line, author=author)
+        if payload is None:
+            if line.strip() and stderr is not None:
+                print(f"ignored malformed reaction line {line_no}", file=stderr)
+            continue
+        append_reaction_payload(path, payload)
+        count += 1
+    return count
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,12 +150,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "emoji",
+        nargs="?",
         help="Emoji or alias: " + ", ".join(f"{name}={emoji}" for name, emoji in REACTION_PRESETS),
     )
     parser.add_argument("text", nargs="*", help="Optional short text to include with the reaction")
     parser.add_argument("--author", default="external", help="Display name for the input source")
     parser.add_argument("--inbox", type=Path, default=reaction_inbox_path())
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read newline-delimited reactions from stdin for a persistent device bridge",
+    )
     args = parser.parse_args(argv)
+
+    if args.stdin:
+        count = append_reaction_stream(
+            args.inbox,
+            sys.stdin,
+            author=args.author,
+            stderr=sys.stderr,
+        )
+        print(f"sent {count} reactions to {args.inbox}")
+        return 0
+
+    if not args.emoji:
+        parser.error("provide an emoji/alias or use --stdin")
 
     payload = append_reaction_event(args.inbox, args.emoji, " ".join(args.text), args.author)
     print(f"sent reaction: {reaction_label(payload['emoji'], payload['text'])} ({payload['author']})")
