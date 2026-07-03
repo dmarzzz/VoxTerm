@@ -12,6 +12,7 @@ from .engine import (
     drop_allowed,
     get_redactor,
     overwrite_and_delete,
+    redact_live_egress_text,
     verify_redaction_coverage,
 )
 from .prompts import (
@@ -50,6 +51,7 @@ __all__ = [
     "get_redactor",
     "next_tier",
     "overwrite_and_delete",
+    "redact_live_egress_text",
     "resolve_profile",
     "resolve_tier",
     "tier_masks",

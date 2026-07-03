@@ -78,6 +78,7 @@ from redaction import (
     get_redactor,
     next_tier,
     overwrite_and_delete,
+    redact_live_egress_text,
     resolve_tier,
     verify_redaction_coverage,
 )
@@ -118,6 +119,13 @@ def _clipboard_cmd() -> list[str] | None:
     if shutil.which("wl-copy"):
         return ["wl-copy"]
     return None
+
+
+def _egress_tier_id_for_destination(current_id: str, default_id: str) -> str:
+    """Use the destination default unless the ambient tier is stricter."""
+    current = resolve_tier(current_id or default_id)
+    default = resolve_tier(default_id)
+    return current.id if current.rank >= default.rank else default.id
 
 
 from network.party import PartyManager, PartyState, P2P_AVAILABLE as _P2P_AVAILABLE
@@ -3010,6 +3018,18 @@ def main():
             except Exception:
                 log.warning("hivemind state persist failed", exc_info=True)
 
+        def _hivemind_segment_filter(value: str) -> str:
+            tier_id = _egress_tier_id_for_destination(
+                _cfg.get("redaction_tier") or "room",
+                "room",
+            )
+            return redact_live_egress_text(
+                str(value or ""),
+                tier_id,
+                _cfg.get("redaction_always_censor") or [],
+                _cfg.get("redaction_always_allow") or [],
+            )
+
         hivemind_client = _hivemind_configure(
             mode=_hm_mode,
             sink_url=args.hivemind_sink_url,
@@ -3017,6 +3037,7 @@ def main():
             push_enabled=_persisted_push_enabled,
             pinned_sink_pubkey=_persisted_pinned_pubkey,
             on_state_change=_on_hivemind_state_change,
+            segment_filter=_hivemind_segment_filter,
         )
         if hivemind_client is not None:
             sink = hivemind_client.active_sink()

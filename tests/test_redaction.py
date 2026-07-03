@@ -26,11 +26,13 @@ from redaction.engine import (
     get_redactor,
     overwrite_and_delete,
     parse_spans,
+    redact_live_egress_text,
     regex_spans,
     verify_redaction_coverage,
 )
 from redaction.prompts import resolve_profile
 from tui.app import VoxTerm
+from tui.app import _egress_tier_id_for_destination
 from tui.widgets.header import CyberHeader
 from tui.widgets.redaction_screen import RedactionReviewScreen
 from tui.widgets.transcript import TranscriptPanel
@@ -175,6 +177,55 @@ def test_coverage_signal_off_for_raw():
     signal = verify_redaction_coverage("Alice jane@example.com", "raw")
     assert signal.status == "off"
     assert signal.total == 0
+
+
+def test_live_egress_redacts_structured_pii_at_room_tier():
+    redacted = redact_live_egress_text(
+        "Reth notes: email alice@example.com and call 415-555-0199",
+        "room",
+    )
+    assert "Reth" in redacted
+    assert "alice@example.com" not in redacted
+    assert "415-555-0199" not in redacted
+    assert "[EMAIL]" in redacted
+    assert "[PHONE]" in redacted
+
+
+def test_live_egress_redacts_standalone_speaker_labels_at_room_tier():
+    assert redact_live_egress_text("Alice", "room") == "[NAME]"
+    assert redact_live_egress_text("Speaker 1", "room") == "Speaker 1"
+
+
+def test_live_egress_uses_word_lists_and_allow_list():
+    redacted = redact_live_egress_text(
+        "Bluebird and Acme should travel together.",
+        "room",
+        always_censor=["bluebird"],
+        always_allow=["Acme"],
+    )
+    assert "[CUSTOM]" in redacted
+    assert "Bluebird" not in redacted
+    assert "Acme" in redacted
+
+
+def test_live_egress_world_masks_proper_noun_candidates():
+    redacted = redact_live_egress_text(
+        "Alice discussed Reth with Anthropic.",
+        "world",
+        always_censor=["Alice"],
+    )
+    assert "Alice" not in redacted
+    assert "Reth" not in redacted
+    assert "Anthropic" not in redacted
+    assert "[CUSTOM]" in redacted
+    assert "[ORG]" in redacted
+
+
+def test_egress_destination_default_is_room_or_stricter():
+    assert _egress_tier_id_for_destination("raw", "room") == "room"
+    assert _egress_tier_id_for_destination("inner", "room") == "room"
+    assert _egress_tier_id_for_destination("room", "room") == "room"
+    assert _egress_tier_id_for_destination("world", "room") == "world"
 
 
 # --- chunk_text ----------------------------------------------------------

@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .prompts import CATEGORIES, RedactionProfile
+from .tiers import filter_spans, resolve_tier, tier_masks
 
 _VALID_TYPES = frozenset(CATEGORIES)
 
@@ -355,6 +356,44 @@ def verify_redaction_coverage(redacted_text: str, tier_id: str) -> CoverageSigna
         total=total,
         summary=f"coverage check: review {total} possible leftover {span_word} ({kinds})",
     )
+
+
+def redact_live_egress_text(
+    text: str,
+    tier_id: str,
+    always_censor: list[str] | None = None,
+    always_allow: list[str] | None = None,
+) -> str:
+    """Fast deterministic masking for live outbound transcript surfaces.
+
+    Live egress cannot block on a full LLM pass for every segment, so this
+    applies the local regex backstop plus user word lists, filtered through the
+    destination tier. WORLD also masks conservative proper-noun candidates.
+    A full-context LLM review still belongs on save/export.
+    """
+
+    tier = resolve_tier(tier_id)
+    spans = apply_word_lists(
+        text,
+        regex_spans(text),
+        always_censor or [],
+        always_allow or [],
+    )
+    spans = filter_spans(tier, spans)
+    label = text.strip()
+    if tier_masks(tier, "NAME") and _WORLD_PROPER_NOUN_RE.fullmatch(label or ""):
+        if label not in _WORLD_PROPER_NOUN_IGNORE and not label.isupper():
+            spans.append((label, "NAME"))
+    if tier.id == "world":
+        plain = _PLACEHOLDER_RE.sub(" ", text)
+        for match in _WORLD_PROPER_NOUN_RE.finditer(plain):
+            candidate = match.group(0).strip()
+            if candidate in _WORLD_PROPER_NOUN_IGNORE:
+                continue
+            if candidate.isupper() or candidate.isdigit():
+                continue
+            spans.append((candidate, "ORG"))
+    return apply_redactions(text, spans).redacted_text
 
 
 def overwrite_and_delete(path) -> None:
