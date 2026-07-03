@@ -96,6 +96,9 @@ voxterm-react idea "save this" --author macro-pad
 Set `VOXTERM_REACTION_INBOX=/path/to/reactions.jsonl` to point hardware or
 automation at a custom inbox file.
 
+See [docs/reaction-pad.md](docs/reaction-pad.md) for physical button-pad setup
+patterns.
+
 ## Hivemind mode (transcript streaming to swf-node)
 
 Voxterm can stream transcript batches to a "convent box" running
