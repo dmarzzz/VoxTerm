@@ -39,6 +39,10 @@ private const val SAMPLE_RATE = 16000
 private const val WHISPER_WINDOW = 29 * SAMPLE_RATE   // just under Whisper's 30 s cap (it truncates >30 s)
 private const val MAX_REPEAT_PHRASE = 12              // longest word-run de-looping scans for (see collapseRepeats)
 private const val DIAR_THRESHOLD = 0.5f               // FastClustering cosine threshold; lower = more speakers
+private const val DIAR_MERGE_GAP_SEC = 0.75           // adjacent same-speaker segments closer than this become one utterance
+// Diarization needs the WHOLE take in RAM as floats (4 bytes × 16 kHz ≈ 3.8 MB/min) — now that it's
+// on by default, cap the take length it will attempt instead of risking an OOM kill on long sessions.
+private const val DIAR_MAX_SEC = 30 * 60
 
 /**
  * On-device speech-to-text. Records the mic with AudioRecord (16 kHz mono PCM16) into a buffer and,
@@ -99,6 +103,11 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
     @Volatile private var diarizer: OfflineSpeakerDiarization? = null
     @Volatile private var diarizeEnabled = false       // set per-take from stop_transcribe's `diarize` arg
     @Volatile private var diarStatus = ""              // "" | "diarizing" — surfaced in the progress msg
+    // Set when requested diarization couldn't run — the GUI surfaces it. Tagged with the take's
+    // generation so a late write from an old take's decode thread (which outlives stop and isn't
+    // joined by beginCapture) can never taint the NEXT take's toast: pollTranscript only reports a
+    // warning whose tag matches the current generation.
+    @Volatile private var diarWarning: Pair<Int, String>? = null
     @Volatile private var speakerCount = 0
     private val diarFiles = listOf("segmentation.onnx", "embedding.onnx")
     // Speaker-attributed utterances built at stop (empty unless diarization ran). text/start/end seconds,
@@ -324,7 +333,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         synchronized(segments) { segments.clear() }
         synchronized(liveSegments) { liveSegments.clear() }
         synchronized(utterances) { utterances.clear() }
-        speakerCount = 0; diarStatus = ""
+        speakerCount = 0; diarStatus = ""; diarWarning = null
         livePartialText = ""; livePartialStart = 0.0
         phase = "recording"; elapsedSec = 0.0; levelRms = 0.0; durationSec = 0.0; errorMsg = null
         worker = thread(start = true) {
@@ -445,10 +454,20 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
             }
             // Persist the audio for this session (replay / re-diarize) before we drop the spilled PCM.
             takeStem?.let { stem -> try { savePcmAsWav(file, audioFile(stem)) } catch (e: Exception) { Log.w("voxasr", "audio save failed: ${e.message}") } }
-            // Speaker diarization (opt-in) — failures fall back to the single-speaker window transcript.
+            // Speaker diarization — failures fall back to the single-speaker window transcript, but are
+            // SURFACED (diarWarning → the GUI's done toast), not swallowed: a user who asked for speakers
+            // and silently got one would reasonably conclude the feature is broken.
             if (diarizeEnabled && generation == gen) {
-                try { diarize(file, total, tokTimes ?: emptyList(), gen) }
-                catch (e: Exception) { Log.w("voxasr", "diarization failed (using single-speaker): ${e.message}") }
+                if (durationSec > DIAR_MAX_SEC) {
+                    // The whole-clip float buffer for a take this long risks an OOM kill — skip loudly.
+                    diarWarning = gen to "take too long for on-device speaker detection (max ${DIAR_MAX_SEC / 60} min), showing one speaker"
+                } else {
+                    try { diarize(file, total, tokTimes ?: emptyList(), gen) }
+                    catch (e: Exception) {
+                        Log.w("voxasr", "diarization failed (using single-speaker): ${e.message}")
+                        diarWarning = gen to "speaker detection failed, showing one speaker (${e.message ?: "unknown error"})"
+                    }
+                }
             }
             if (generation == gen) { decodeProgress = 1.0; diarStatus = ""; phase = "done" }
         } catch (e: Exception) {
@@ -479,19 +498,59 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         val segs = diar.processWithCallback(samples, { done, totalc, _ ->
             if (generation == gen && totalc > 0) decodeProgress = (0.5 + 0.5 * done.toDouble() / totalc).coerceIn(0.0, 1.0)
             0   // 0 = keep going
-        })
+        }).sortedBy { it.start }
+
+        // Assign each Whisper token to exactly ONE segment: the one containing its timestamp, else the
+        // nearest by boundary distance. The old contains-only filter DROPPED tokens landing in the
+        // gaps pyannote calls silence (lost words) and DUPLICATED tokens inside overlapping segments
+        // into both speakers' turns. NOT a monotonic sweep: with overlap-aware diarization a long
+        // segment stays "open" while shorter ones start and end inside it, so boundary distance is not
+        // unimodal over the start-sorted order (a sweep gets trapped in the interjection and steals the
+        // enclosing turn's tail). Segments are at most a few hundred and tokens a few thousand per
+        // take, so a full scan per token is cheap and correct. A token inside two overlapping segments
+        // (distance 0 to both) goes to the one whose midpoint is closer — a short interjection claims
+        // only the tokens near it, not the long turn it sits inside.
+        val texts = Array(segs.size) { StringBuilder() }
+        if (segs.isNotEmpty()) {
+            for ((t, tok) in tokTimes) {
+                var best = 0
+                var bestDist = Double.MAX_VALUE
+                var bestMid = Double.MAX_VALUE
+                for (i in segs.indices) {
+                    val s = segs[i]
+                    val d = when { t < s.start -> s.start - t; t > s.end -> t - s.end; else -> 0.0 }
+                    val m = kotlin.math.abs(t - (s.start + s.end) / 2.0)
+                    if (d < bestDist || (d == bestDist && m < bestMid)) { best = i; bestDist = d; bestMid = m }
+                }
+                texts[best].append(tok)
+            }
+        }
+
+        // Segment texts → utterances, folding adjacent same-speaker segments separated by a small gap
+        // into one turn: clustering can split one continuous thought into confetti, which fragments the
+        // graph cards and inflates false "rapid switch" counts downstream.
+        data class Raw(val text: String, val start: Double, val end: Double, val speaker: Int)
+        val merged = ArrayList<Raw>()
+        for ((i, s) in segs.withIndex()) {
+            val clean = collapseRepeats(texts[i].toString().replace(Regex("\\s+"), " ").trim())
+            if (clean.isEmpty()) continue
+            val last = merged.lastOrNull()
+            if (last != null && last.speaker == s.speaker && s.start - last.end <= DIAR_MERGE_GAP_SEC) {
+                merged[merged.size - 1] = Raw(last.text + " " + clean, last.start, maxOf(last.end, s.end.toDouble()), last.speaker)
+            } else {
+                merged.add(Raw(clean, s.start.toDouble(), s.end.toDouble(), s.speaker))
+            }
+        }
+
         var spkMax = -1
         var prevEnd: Double? = null
         synchronized(utterances) {
             utterances.clear()
-            for (s in segs.sortedBy { it.start }) {
-                val txt = tokTimes.filter { it.first >= s.start && it.first < s.end }.joinToString("") { it.second }
-                val clean = collapseRepeats(txt.replace(Regex("\\s+"), " ").trim())
-                if (clean.isEmpty()) continue
-                val gap = prevEnd?.let { (s.start - it).coerceAtLeast(0.0) }
-                utterances.add(Utt(clean, s.start.toDouble(), s.end.toDouble(), s.speaker, gap))
-                if (s.speaker > spkMax) spkMax = s.speaker
-                prevEnd = s.end.toDouble()
+            for (r in merged) {
+                val gap = prevEnd?.let { (r.start - it).coerceAtLeast(0.0) }
+                utterances.add(Utt(r.text, r.start, r.end, r.speaker, gap))
+                if (r.speaker > spkMax) spkMax = r.speaker
+                prevEnd = r.end
             }
         }
         speakerCount = spkMax + 1
@@ -603,6 +662,7 @@ class VoxasrPlugin(private val activity: Activity) : Plugin(activity) {
         res.put("durationSec", durationSec)
         res.put("progress", decodeProgress)
         if (diarStatus.isNotEmpty()) res.put("stage", diarStatus)   // "diarizing" → the GUI shows it in the bar msg
+        diarWarning?.let { if (it.first == generation) res.put("diarWarning", it.second) }   // requested diarization failed → GUI toast (current take only)
         errorMsg?.let { res.put("error", it) }
         val arr = org.json.JSONArray()
         synchronized(segments) {

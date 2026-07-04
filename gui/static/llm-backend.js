@@ -92,15 +92,18 @@
   }
 
   // A focused, single-shot insight about ONE topic — plain text, one short generation, far cheaper than
-  // the multi-chunk Sharpen. Backs the graph's tap-to-insight (💡).
+  // the multi-chunk Sharpen. Backs the graph's tap-to-insight (💡). Graph node labels now carry the FULL
+  // utterance text, so each point is clipped HERE — the model's total window is ~1280 tokens and 12
+  // unclipped turns would blow straight through it.
   function insightPrompt(payload) {
+    const clip = (s, n) => { s = String(s || "").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
     const pts = (payload.points || []).slice(0, 12)
-      .map((p) => `- ${p.speaker ? p.speaker + ": " : ""}${(p.text || "").trim()}`).join("\n");
+      .map((p) => `- ${p.speaker ? p.speaker + ": " : ""}${clip(p.text, 160)}`).join("\n");
     return [
       "You are a sharp conversation analyst. In 1-2 sentences, explain what this part of the conversation",
       "is about and why it matters — be concrete and specific to the content, do not restate it verbatim,",
       "and do not add facts that aren't here. You may end with one short follow-up question.",
-      payload.focus ? `Pay particular attention to this point: "${payload.focus}".` : "",
+      payload.focus ? `Pay particular attention to this point: "${clip(payload.focus, 200)}".` : "",
       "",
       `Topic: ${payload.label || "(topic)"}`,
       `Points:\n${pts || "(none)"}`,

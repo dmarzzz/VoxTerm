@@ -376,7 +376,8 @@ html.on-device #summaryBlock { display: none !important; }
 .gtopic-head { display: flex; align-items: center; gap: var(--sp-2); position: sticky; top: 0; z-index: 1;
   padding: var(--sp-2) var(--sp-1) var(--sp-1); background: var(--bg); }
 .gtopic-label { flex: 1; min-width: 0; margin: 0; font: 600 var(--fs-headline)/1.3 var(--font);
-  color: var(--text); letter-spacing: -0.012em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  color: var(--text); letter-spacing: -0.012em; overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }  /* wrap to 2 lines instead of one ellipsized line */
 
 /* a turn — a transcript-like line with a quiet type rule on the left */
 .gutter { display: flex; align-items: flex-start; gap: var(--sp-1); flex-wrap: wrap; }

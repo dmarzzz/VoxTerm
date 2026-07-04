@@ -45,9 +45,12 @@ interruptions: {
   "actually", "however", …) makes a **`counter`** (different speaker) or self-**`retort`** and a
   `rebuts` edge; a different-speaker reply with no cue is a `retort`. Questions also catch short
   wh-initial turns, since ASR usually drops the "?".
-- **Interruptions** — *overlap*: next turn starts before the previous turn's estimated end (estimated
-  from word count × speaking rate), gated on a real speaker change or, single-speaker, a strict
-  trailing-dash cut-off cue. *rapidSwitch*: a speaker change within `rapidGapSec`.
+- **Interruptions** — *overlap*: a turn starts before the **floor-holding** turn (the prior turn with
+  the latest known end — the diarizer's real `t_end` when present, else word count × speaking rate)
+  plausibly finished, gated on a real speaker change or, single-speaker, a strict trailing-dash cut-off
+  cue. Tracking the latest end (not just the immediately-previous turn) catches an interjection that
+  starts while a turn from two entries back is still going. *rapidSwitch*: a speaker change within
+  `rapidGapSec` (preferring the diarizer's `gap_before` silence measure).
 
 ### Rendering — top-down, mobile-first
 
@@ -57,12 +60,19 @@ relationships show inline as an indent + `↳ rebuts` / `↳ supports` rather th
 reads cleanly on a phone in portrait (vertical scroll only, no horizontal pan). A filter row offers
 **All · Arguments · by-speaker**. Tapping a card seeks the audio (`data-seek` → `VOX_SEEK`).
 
-### Honest limits on mobile (single-speaker on-device ASR)
+### Speaker turns on mobile: the "Speakers" toggle (default ON)
 
-Whisper on-device produces one speaker, so `rapidSwitch` is always empty and `overlap` only fires on
-explicit dash cut-offs — the Interruptions view mostly shows 0 and says so in its caption. This is by
-design: real interruption detection needs speaker inference, which is what the Phase 2 LLM provides.
-The Graph still works on-device (topic tree), just without true retort/counter typing.
+Interruptions only mean something with real speaker turns, so the on-device **Speakers** toggle
+(diarization-at-stop: pyannote segmentation + speaker embeddings via sherpa-onnx, in
+`tauri-plugin-voxasr`) now defaults **ON** — with it off, every take is single-speaker and the
+counter can never move (`rapidSwitch` needs a speaker change; `overlap` falls back to a strict
+trailing-dash cue Whisper essentially never emits). Turning it off is a persisted opt-out for users
+who want the fastest possible stop. If diarization was requested but fails, the plugin surfaces a
+`diarWarning` that the GUI shows in the done toast instead of silently reporting one speaker.
+Utterance text is built by assigning each Whisper token to its **nearest** diarization segment (no
+dropped words in "silence" gaps, no duplicated words across overlapping segments), and adjacent
+same-speaker segments under `DIAR_MERGE_GAP_SEC` apart merge into one turn. Live (mid-recording) the
+doc is still single-speaker; counts appear when the take is transcribed at stop.
 
 ## Phase 2 — on-device LLM backend (BUILT)
 

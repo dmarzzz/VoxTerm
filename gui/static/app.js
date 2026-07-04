@@ -157,10 +157,12 @@ async function init() {
   dSel.addEventListener("change", () => lsSet(LS_MIC, dSel.value));
   if (lsGet(LS_DIARIZE) === "0") $("diarize").checked = false;
   $("diarize").addEventListener("change", () => lsSet(LS_DIARIZE, $("diarize").checked ? "1" : "0"));
-  // On-device speaker-diarization opt-in (default OFF — it adds a slow pass at stop).
+  // On-device speaker diarization: default ON — the Graph and Interruptions modes are built on real
+  // speaker turns, and with it off the interruption counter can never move. It adds a slower pass at
+  // stop; turning it off is a persisted opt-out.
   const dOd = $("diarizeOndevice");
   if (dOd) {
-    if (lsGet(LS_DIARIZE_OD) === "1") dOd.checked = true;
+    dOd.checked = lsGet(LS_DIARIZE_OD) !== "0";
     dOd.addEventListener("change", () => lsSet(LS_DIARIZE_OD, dOd.checked ? "1" : "0"));
   }
   const savedSource = lsGet(LS_SOURCE);
@@ -267,7 +269,7 @@ function applyStatus(s) {
     $("recState").textContent = "Ready";
     $("recBtn").disabled = false;
     if (!job.n_turns) { toast("No speech detected — check your mic level or speak closer."); showNoSpeech(); }
-    else { toast(`Done — ${job.n_turns} turns, ${job.n_speakers} speaker(s)`); if (job.stem) loadSession(job.stem); }
+    else { toast(`Done — ${job.n_turns} turns, ${job.n_speakers} speaker(s)` + (job.warning ? ` · ${job.warning}` : "")); if (job.stem) loadSession(job.stem); }
     loadSessions();
   }
   if (job.state === "error" && lastJobState !== "error") {

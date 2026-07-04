@@ -174,7 +174,7 @@
         if (agree && !disagree && prevUtterId) edgeKind = "supports";
         nodes.push({
           id: uid, type, turnIdx: idx, speaker_id: t.speaker_id, t_offset: t.t_offset,
-          label: snippet(t.text),
+          label: fullText(t.text),
         });
         edges.push({ from: tid, to: uid, kind: "contains" });
         if (prevUtterId) edges.push({ from: prevUtterId, to: uid, kind: edgeKind });
@@ -184,37 +184,45 @@
     return { nodes, edges, topicCount: topics.length };
   }
 
-  function snippet(s, n = 96) {
-    s = String(s || "").replace(/\s+/g, " ").trim();
-    if (s.length <= n) return s;
-    // cut on a word boundary near the limit so cards never end mid-word ("on-devic…")
-    const cut = s.slice(0, n);
-    const sp = cut.lastIndexOf(" ");
-    return (sp > n * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + "…";
-  }
+  // Cards show the WHOLE utterance (whitespace-normalized) — truncating it hid what was actually
+  // said, which defeats the point of a topic map you read instead of the transcript.
+  const fullText = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
   function detectInterruptions(turns, durationSec, multiSpeaker) {
     const overlap = [], rapidSwitch = [];
+    // The turn "holding the floor" so far: the prior turn with the LATEST end. Comparing only against
+    // the immediately-previous turn missed real overlaps — with diarized (possibly overlapping)
+    // segments, an interjection can start while a turn from two entries back is still going. The
+    // cross-turn floor is built ONLY from the diarizer's real t_end: carrying word-count ESTIMATES
+    // forward would let one over-estimated turn (long text, fast speech) flag every speaker change in
+    // its inflated window as an overlap. Estimate-only docs keep the old previous-turn-only check.
+    let floor = null;   // { end, speaker, speaker_id } — latest REAL t_end among prior turns
     for (let i = 1; i < turns.length; i++) {
       const prev = turns[i - 1], cur = turns[i];
+      if (typeof prev.t_end === "number" && (!floor || prev.t_end >= floor.end)) {
+        floor = { end: prev.t_end, speaker: prev.speaker, speaker_id: prev.speaker_id };
+      }
+      // Fallback when prev has no real end (and outlasts any real floor): estimate from word count.
       const ps = typeof prev.t_offset === "number" ? prev.t_offset : null;
+      const prevEst = (typeof prev.t_end !== "number" && ps != null)
+        ? ps + Math.max(CFG.minEndSec, words(prev.text).length / CFG.wordsPerSec) : null;
+      const holder = (prevEst != null && (!floor || prevEst > floor.end))
+        ? { end: prevEst, speaker: prev.speaker, speaker_id: prev.speaker_id }
+        : floor;
       const cs = typeof cur.t_offset === "number" ? cur.t_offset : null;
-      const changed = multiSpeaker && cur.speaker_id !== prev.speaker_id;
-      // Prefer the diarizer's REAL end time + silence gap (t_end / gap_before) when present; fall back
-      // to the word-count estimate for docs without them (desktop, or single-speaker on-device).
-      const realEnd = typeof prev.t_end === "number" ? prev.t_end : null;
+      const changed = multiSpeaker && holder && cur.speaker_id !== holder.speaker_id;
+      // Prefer the diarizer's silence gap (gap_before) when present; fall back to start-to-start.
       const gap = typeof cur.gap_before === "number" ? cur.gap_before
                 : (ps != null && cs != null) ? cs - ps : null;
 
-      // OVERLAP — someone began before the previous turn plausibly finished.
-      if (ps != null && cs != null) {
-        const estEnd = realEnd != null ? realEnd : ps + Math.max(CFG.minEndSec, words(prev.text).length / CFG.wordsPerSec);
-        const overlapped = cs < estEnd - CFG.overlapSlackSec;
+      // OVERLAP — someone began before the floor-holding turn plausibly finished.
+      if (cs != null && holder) {
+        const overlapped = cs < holder.end - CFG.overlapSlackSec;
         const marked = /\b(overlap|crosstalk)\b/i.test((prev.markers || []).concat(cur.markers || []).join(" "));
         if (marked || (overlapped && (changed || (!multiSpeaker && looksCutOff(prev.text))))) {
           overlap.push({
             turnIdx: i, t_offset: cs, t_hms: cur.t_offset_hms || hms(cs),
-            by: cur.speaker, of: prev.speaker,
+            by: cur.speaker, of: changed ? holder.speaker : prev.speaker,
             note: marked ? "marked overlap" : (changed ? "spoke over" : "cut off mid-line"),
           });
           continue;   // an overlap already implies a fast handoff; don't double-count as rapid
@@ -224,7 +232,7 @@
       // RAPID SWITCH — a quick handoff: a speaker change within the gap window. Requires real
       // speakers, so this stays empty for single-speaker on-device docs (a speaker-inferring LLM
       // backend, or a diarized recording, is what populates it there).
-      if (changed && gap != null && gap >= 0 && gap < CFG.rapidGapSec) {
+      if (multiSpeaker && cur.speaker_id !== prev.speaker_id && gap != null && gap >= 0 && gap < CFG.rapidGapSec) {
         rapidSwitch.push({
           turnIdx: i, t_offset: cs, t_hms: cur.t_offset_hms || hms(cs),
           gapSec: Math.round(gap * 100) / 100, by: cur.speaker, from: prev.speaker,

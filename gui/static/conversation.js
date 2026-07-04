@@ -148,9 +148,22 @@
     }
   }
 
+  // Is the on-device "Speakers" (diarization-at-stop) toggle available + on? null off-device.
+  function speakersToggle() {
+    if (!window.VOX_ONDEVICE) return null;
+    const t = document.getElementById("diarizeOndevice");
+    return t ? { on: t.checked } : null;
+  }
+
   function renderEmpty() {
     if (mode === "graph") $("graphPanel").innerHTML = `<p class="conv-empty">No conversation yet — the topic map appears as people talk.</p>`;
-    if (mode === "interruptions") $("interruptPanel").innerHTML = `<p class="conv-empty">No interruptions yet — the counter updates live as people talk over each other.</p>`;
+    if (mode === "interruptions") {
+      const st = speakersToggle();
+      const msg = st && !st.on
+        ? "No interruptions yet. Turn on “Speakers” next to Record so the take is split by who spoke — that's what interruptions are counted from."
+        : "No interruptions yet — they're counted from speaker turns once people talk.";
+      $("interruptPanel").innerHTML = `<p class="conv-empty">${msg}</p>`;
+    }
   }
   function renderError(msg) {
     const html = `<p class="conv-empty">Couldn't analyze this conversation: ${esc(msg)}</p>`;
@@ -278,11 +291,22 @@
   // ---- INTERRUPTIONS: counters + timeline + list -----------------------------
   function renderInterruptions(ir, source) {
     const dur = ir.durationSec || 0;
+    const st = speakersToggle();
+    // Whether THIS doc was speaker-attributed (set by the on-device backend) — the toggle's current
+    // state says nothing about a take recorded before it was flipped.
+    const doc = api.getDoc && api.getDoc();
+    const diarized = !!(doc && doc.session && doc.session.diarized);
     const cap = source === "llm"
       ? `Speakers + interruptions inferred on-device by the LLM.`
       : ir.multiSpeaker
         ? `Detected from speaker changes + timing across multiple speakers.`
-        : `Single-speaker transcription — the quick estimate can't tell speakers apart, so it finds few interruptions. Tap “Sharpen” to let the on-device LLM infer speakers.`;
+        : st
+          ? (diarized
+              ? `Only one speaker was heard in this take — interruptions need at least two.`
+              : st.on
+                ? `This take has no speaker labels (recorded before “Speakers” was on, or while live — counts appear after Stop). Or tap “Sharpen” to infer speakers now.`
+                : `This take has no speaker labels. Turn on “Speakers” next to Record, then record — interruptions are counted from who actually spoke. Or tap “Sharpen” to infer speakers now.`)
+          : `Single-speaker transcription — the quick estimate can't tell speakers apart, so it finds few interruptions. Tap “Sharpen” to let the on-device LLM infer speakers.`;
 
     const stat = (n, label, cls) => `<div class="stat ${cls}"><div class="stat-n">${n}</div><div class="stat-l">${label}</div></div>`;
     const head = toolbar(esc(cap), source)

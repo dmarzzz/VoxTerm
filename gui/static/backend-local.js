@@ -40,8 +40,9 @@
   // utterances (text, start, end, speaker, gapBefore) → a real multi-speaker doc that lights up the
   // interruptions/graph heuristics. `utterances` (when present + non-empty) takes precedence.
   function buildDoc(stem, segments, durationSec, utterances) {
-    let turns, speakers;
+    let turns, speakers, diarized = false;
     if (utterances && utterances.length) {
+      diarized = true;   // marks the doc as speaker-attributed, so the UI can caption it honestly
       turns = utterances.filter((u) => u && u.text).map((u) => ({
         speaker: `Speaker ${(u.speaker || 0) + 1}`,
         speaker_id: u.speaker || 0,
@@ -64,7 +65,7 @@
       }));
       speakers = [{ id: 0, label: "Speaker 1" }];
     }
-    return { session: { id: stem, duration_hms: hms(durationSec), model: MODEL_LABEL }, turns, speakers };
+    return { session: { id: stem, duration_hms: hms(durationSec), model: MODEL_LABEL, diarized }, turns, speakers };
   }
 
   // ---- export formatters (client-side; the phone has no Python export) ----
@@ -258,12 +259,13 @@
         this._done = true;
         const doc = buildDoc(this._stem, st.segments, st.durationSec, st.utterances);
         const nSpk = doc.speakers.length;
+        const warning = st.diarWarning || undefined;   // e.g. speaker detection failed → say so, don't fake "1 speaker"
         if (doc.turns.length === 0) {
-          frame = { recording: false, job: { state: "done", n_turns: 0, n_speakers: nSpk, stem: this._stem } };  // no-speech: nothing to persist
+          frame = { recording: false, job: { state: "done", n_turns: 0, n_speakers: nSpk, stem: this._stem, warning } };  // no-speech: nothing to persist
         } else {
           try {
             localStorage.setItem(LS_PREFIX + this._stem, JSON.stringify(doc));
-            frame = { recording: false, job: { state: "done", n_turns: doc.turns.length, n_speakers: nSpk, stem: this._stem } };
+            frame = { recording: false, job: { state: "done", n_turns: doc.turns.length, n_speakers: nSpk, stem: this._stem, warning } };
           } catch (_) {
             frame = { recording: false, job: { state: "error", error: "storage full — delete old sessions to free space" } };
           }
