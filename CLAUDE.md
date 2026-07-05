@@ -2,9 +2,9 @@
 
 ## What is this project?
 
-VoxTerm is a local, offline voice transcription TUI for macOS Apple Silicon. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions.
+VoxTerm is a local, offline voice transcription TUI. It captures mic + system audio, transcribes speech in real-time, identifies speakers, and remembers voices across sessions. It is **cross-platform**: macOS (Apple Silicon uses MLX; Intel uses faster-whisper), Linux, and Windows (both use faster-whisper / Qwen3-ASR on CPU/CUDA).
 
-**Stack**: MLX (Qwen3-ASR transcription on Metal GPU) · 3D-Speaker ERes2Net (512-dim speaker embeddings via ONNX) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (speaker profiles) · sounddevice (mic) · Swift/ScreenCaptureKit (system audio) · 3D-Speaker LID (language identification)
+**Stack**: transcription backends via `audio/transcriber.py` `get_transcriber()` — MLX Qwen3-ASR (macOS arm64, Metal), faster-whisper / CTranslate2 (Linux/Windows/macOS-Intel, CPU int8 or CUDA), and optional sherpa-onnx streaming · 3D-Speaker ERes2Net (512-dim speaker embeddings via ONNX) · Silero VAD (ONNX, speech detection) · Textual (TUI) · SQLite (encrypted speaker profiles) · sounddevice (mic) · ScreenCaptureKit (macOS) / `parec` (Linux) system audio · 3D-Speaker LID (language identification)
 
 ## Architecture
 
@@ -47,9 +47,9 @@ SUBPROCESSES (fallback only — not used when ONNX models available)
 
 | File | Description |
 |------|-------------|
-| `app.py` | Main Textual app — audio loop, transcription pipeline, session management, modals |
-| `config.py` | Constants: sample rate, models, colors, paths, thresholds |
-| `cyberpunk.tcss` | Textual CSS theme |
+| `tui/app.py` | Main Textual app — audio loop, transcription pipeline, session management, modals |
+| `config.py` | Constants: sample rate, models, colors, paths, thresholds; cross-platform model registry + CPU-aware default |
+| `tui/widgets/cyberpunk.tcss` | Textual CSS theme |
 | `diagnostics.py` | Crash reporting: faulthandler, signal handlers, crash dumps, log rotation |
 | `audio/capture.py` | Mic input via sounddevice callback → queue |
 | `audio/system_capture.py` | System audio via Swift subprocess + pipe reader threads |
@@ -59,25 +59,30 @@ SUBPROCESSES (fallback only — not used when ONNX models available)
 | `audio/blackhole.py` | BlackHole virtual device integration for Bluetooth routing |
 | `audio/_macos_sck.swift` | ScreenCaptureKit Swift helper source |
 | `audio/_macos_aggregate.swift` | Multi-output device Swift helper source |
-| `transcriber/engine.py` | Qwen3-ASR (primary) + mlx-whisper (fallback), hallucination filter, dedup |
-| `diarization/fbank.py` | Pure-numpy Mel filterbank (Kaldi-compatible, no PyTorch) |
-| `diarization/onnx_embedder.py` | ONNX-based speaker embedding extraction (3D-Speaker models) |
-| `diarization/campplus.py` | CAM++ model architecture (legacy, vendored from WeSpeaker) |
-| `diarization/cluster.py` | 3D-Speaker clustering algorithms: spectral (p-value pruning), AHC, auto-select |
-| `diarization/engine.py` | Online speaker clustering with ONNX/PyTorch backend dispatch |
-| `diarization/proxy.py` | DiarizationProxy — direct (ONNX), subprocess, or inprocess modes |
-| `diarization/subprocess_worker.py` | Subprocess entry point: loads model, read-process-write loop |
-| `diarization/ipc.py` | Binary IPC protocol for main↔subprocess communication |
-| `lid/engine.py` | Language identification using 3D-Speaker LID models (ONNX) |
-| `scripts/export_onnx.py` | Export 3D-Speaker models to ONNX format |
-| `speakers/models.py` | SpeakerProfile, SpeakerMeta dataclasses, multi-centroid matching |
-| `speakers/store.py` | SQLite persistence, cross-session matching, backup/restore |
-| `widgets/waveform.py` | FFT pixel-shader oscilloscope with pitch-mapped color |
-| `widgets/transcript.py` | RichLog transcript with speaker labels + confidence indicators |
-| `widgets/header.py` | Recording indicator header bar |
-| `widgets/tag_screen.py` | Speaker tagging modal (T key) |
-| `widgets/profile_screen.py` | Speaker profile management modal (P key) |
+| `audio/transcriber.py` | `get_transcriber()` factory + backends: MLX Qwen3-ASR (macOS arm64), faster-whisper/CTranslate2 (Linux/Win/macOS-Intel), sherpa-onnx streaming; hallucination filter, dedup |
+| `audio/diarization/fbank.py` | Pure-numpy Mel filterbank (Kaldi-compatible, no PyTorch) |
+| `audio/diarization/onnx_embedder.py` | ONNX-based speaker embedding extraction (3D-Speaker models) |
+| `audio/diarization/campplus.py` | CAM++ model architecture (legacy, vendored from WeSpeaker) |
+| `audio/diarization/cluster.py` | 3D-Speaker clustering algorithms: spectral (p-value pruning), AHC, auto-select |
+| `audio/diarization/engine.py` | Online speaker clustering with ONNX/PyTorch backend dispatch |
+| `audio/diarization/proxy.py` | DiarizationProxy — direct (ONNX), subprocess, or inprocess modes |
+| `audio/diarization/subprocess_worker.py` | Subprocess entry point: loads model, read-process-write loop |
+| `audio/diarization/ipc.py` | Binary IPC protocol for main↔subprocess communication |
+| `audio/diarization/lid.py` | Language identification using 3D-Speaker LID models (ONNX) |
+| `audio/diarization/export_onnx.py` | Export 3D-Speaker models to ONNX format |
+| `audio/speakers/models.py` | SpeakerProfile, SpeakerMeta dataclasses, multi-centroid matching |
+| `audio/speakers/store.py` | SQLite persistence, cross-session matching, backup/restore |
+| `tui/widgets/waveform.py` | FFT pixel-shader oscilloscope with pitch-mapped color |
+| `tui/widgets/transcript.py` | RichLog transcript with speaker labels + confidence indicators |
+| `tui/widgets/header.py` | Recording indicator header bar |
+| `tui/widgets/tag_screen.py` | Speaker tagging modal (T key) |
+| `tui/widgets/profile_screen.py` | Speaker profile management modal (P key) |
 | `tui/events.py` | Optional JSONL event stream for out-of-process consumers (gated by `VOXTERM_EVENTS=1`) |
+| `audio/noise_filter.py` | Background-noise high-pass filter applied to the mic |
+| `audio/merger.py` | Mic + system audio merge helpers |
+| `dictation/app.py` | Dictation mode — global hotkey + system-wide voice-to-text injection |
+| `network/` | P2P party mode: mDNS discovery, encrypted TCP/UDP session mesh, transcript exchange |
+| `summarizer/engine.py` | Local-LLM transcript summarization (MLX on macOS, Ollama elsewhere) |
 
 ## Data and debug paths
 
