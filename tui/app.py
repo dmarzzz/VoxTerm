@@ -2584,16 +2584,22 @@ class VoxTerm(App):
                     summarizer.summarize, body, template, custom_prompt
                 ).result()
         except SummarizerError as e:
+            # bind the message to a local: `e` is auto-unbound when the except block
+            # exits. call_from_thread runs the lambda synchronously today, but closing
+            # over a deleted `except ... as e` is fragile — bind to a plain local so it
+            # stays correct regardless of when the lambda runs.
+            msg = str(e)
             self.call_from_thread(
                 lambda: transcript.system_message(
-                    f"summary failed: {e}", Log.REC
+                    f"summary failed: {msg}", Log.REC
                 )
             )
             return
         except Exception as e:
+            msg = str(e)
             self.call_from_thread(
                 lambda: transcript.system_message(
-                    f"summary error: {e}", Log.REC
+                    f"summary error: {msg}", Log.REC
                 )
             )
             return
