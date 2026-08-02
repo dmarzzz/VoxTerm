@@ -162,8 +162,8 @@ def main() -> None:
     parser.add_argument(
         "--hivemind",
         choices=["auto", "on", "off"],
-        default="auto",
-        help="Hivemind transcript-sink mode (default: auto).",
+        default="off",
+        help="Hivemind transcript-sink mode (default: off).",
     )
     parser.add_argument(
         "--hivemind-sink-url",

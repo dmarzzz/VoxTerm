@@ -343,12 +343,15 @@ _DEFAULTS: dict[str, Any] = {
     # Hivemind transcript-sink (spec §4.3 of SHAPE-ROTATOR-OS-SPEC.md).
     # `hivemind_mode` is one of "auto" | "on" | "off"; when set on the
     # CLI it persists so the next launch picks the same default.
-    "hivemind_mode": "auto",
+    # Default "off": off-device behaviour (including mDNS sink discovery) is
+    # opt-in, matching the "nothing leaves your machine" promise. Choose
+    # `auto` to discover sinks (and, with hivemind_push_enabled, push to them).
+    "hivemind_mode": "off",
     "hivemind_sink_url": "",
     "hivemind_location": "",
     # User opt-in to actually push transcripts to a discovered sink.
-    # Default False: voxterm always discovers but never pushes until
-    # the user enables it from the `h` hivemind menu. Once enabled,
+    # Default False: even when discovery is enabled (mode=auto/on) voxterm
+    # never pushes until the user enables it from the `h` hivemind menu. Once enabled,
     # this flips to True and persists so subsequent launches push
     # silently. `--hivemind on` overrides this (force push regardless).
     "hivemind_push_enabled": False,

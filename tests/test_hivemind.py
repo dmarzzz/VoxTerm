@@ -499,6 +499,14 @@ def test_hivemind_mode_parse():
         HivemindMode.parse("noisy")
 
 
+def test_default_hivemind_mode_is_off():
+    # Off-device behaviour (incl. mDNS sink discovery) must be opt-in: the
+    # shipped default must be "off", not "auto". Guards the privacy posture.
+    import config
+
+    assert config._DEFAULTS["hivemind_mode"] == "off"
+
+
 def test_configure_off_returns_none(tmp_path):
     client = configure(
         mode=HivemindMode.OFF,
