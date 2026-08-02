@@ -13,6 +13,57 @@ CHUNK_SIZE = 1024
 CHANNELS = 1
 DTYPE = "float32"
 
+
+def _nvidia_driver_present() -> bool:
+    """True if an NVIDIA driver looks present, without importing torch.
+
+    The driver exposes ``/dev/nvidiactl`` + ``/dev/nvidia*`` device nodes and
+    ships ``nvidia-smi`` on PATH. A few ``stat()`` calls, no heavy import.
+    (Heuristic: ``nvidia-smi`` can also appear in containers/WSL/stale installs
+    without a usable device — see ``_has_nvidia_gpu``.)
+    """
+    import glob
+    import os
+    import shutil
+
+    if sys.platform.startswith("linux") and (
+        os.path.exists("/dev/nvidiactl") or glob.glob("/dev/nvidia[0-9]*")
+    ):
+        return True
+    return shutil.which("nvidia-smi") is not None
+
+
+def _torch_is_cpu_only() -> bool:
+    """True if the installed torch is a CPU-only wheel (local version ``+cpu``).
+
+    Read from package *metadata*, so torch is never imported here. CUDA wheels
+    are tagged ``+cuXXX`` and the default PyPI wheel has no local tag — both can
+    use a GPU; only the ``+cpu`` wheel cannot. Match the whole ``cpu`` segment,
+    not a literal ``+cpu`` suffix, so CXX11-ABI wheels (``+cpu.cxx11.abi``) and
+    other ``+cpu.*`` variants are caught too. Unknown ⇒ don't suppress.
+    """
+    try:
+        import importlib.metadata as _md
+        local = _md.version("torch").partition("+")[2]   # after '+', '' if untagged
+        return local.split(".")[0] == "cpu"
+    except Exception:
+        return False
+
+
+def _has_nvidia_gpu() -> bool:
+    """Cheap, torch-free heuristic: is the GPU model default actually viable?
+
+    The transcriber selects CUDA via ``torch.cuda.is_available()``
+    (audio/transcriber.py); importing torch *here* would slow every
+    ``import config`` (incl. ``--list-models`` and the test suite). So we
+    approximate it: an NVIDIA driver must be present AND torch must not be a
+    CPU-only wheel (a ``+cpu`` build can't use the GPU even with a driver, which
+    would otherwise mis-default to the slow qwen3-on-CPU path). It's a heuristic
+    — if it ever mis-detects, pin a model with ``-m fw-base``.
+    """
+    return _nvidia_driver_present() and not _torch_is_cpu_only()
+
+
 # Transcription — platform-aware model registry
 if sys.platform == "darwin" and platform.machine() == "arm64":
     # macOS: Qwen3-ASR (primary, MLX) + mlx-whisper (fallback)
@@ -70,11 +121,17 @@ elif sys.platform.startswith("linux"):
         AVAILABLE_MODELS["qwen3-1.7b"] = "Qwen/Qwen3-ASR-1.7B"
     QWEN3_MODELS = set(AVAILABLE_MODELS) - FASTER_WHISPER_MODELS
     PARAKEET_MODELS: set[str] = set()
-    DEFAULT_MODEL = "qwen3-0.6b" if _HAS_QWEN_ASR else "fw-small"
+    # qwen3-0.6b (PyTorch) is fast on CUDA but effectively unusable on CPU
+    # (minutes to load, sub-realtime decode), so default to it only when a GPU
+    # is present; otherwise fw-base (~4.5x realtime on CPU) is the better
+    # out-of-box choice. qwen3 stays available for explicit selection.
+    DEFAULT_MODEL = "qwen3-0.6b" if (_HAS_QWEN_ASR and _has_nvidia_gpu()) else "fw-base"
     WHISPER_MODEL = None
 elif sys.platform == "win32":
     # Windows: Qwen3-ASR (primary, via qwen-asr/PyTorch) + faster-whisper (fallback)
-    DEFAULT_MODEL = "qwen3-0.6b"
+    # GPU-gate the heavy PyTorch default (see the Linux note); fall back to the
+    # CPU-friendly faster-whisper otherwise.
+    DEFAULT_MODEL = "qwen3-0.6b" if _has_nvidia_gpu() else "fw-base"
     AVAILABLE_MODELS = {
         "qwen3-0.6b":  "Qwen/Qwen3-ASR-0.6B",
         "qwen3-1.7b":  "Qwen/Qwen3-ASR-1.7B",

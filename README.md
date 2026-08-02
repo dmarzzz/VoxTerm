@@ -215,12 +215,18 @@ Press `P` to manage your speaker profile library (rename, delete, wipe all data)
 
 ## Models
 
-- **qwen3-0.6b** — fast, good for most use
-- **qwen3-1.7b** — more accurate, larger
-- **fw-small** (Intel Mac default) — CPU-compatible faster-whisper backend
-- Whisper variants (tiny through large-v3) available via `M` menu
+- **qwen3-0.6b** — Qwen3-ASR. Fast on a GPU (Apple Silicon / CUDA); slow on CPU
+  (loads in minutes, decodes below real time). Default **only when a GPU is
+  detected**.
+- **qwen3-1.7b** — more accurate, larger; GPU recommended.
+- **fw-base / fw-small** — CPU-friendly faster-whisper. **fw-base is the default
+  on CPU-only machines** (~4.5× real time, a good speed/accuracy balance).
+- Whisper variants (tiny through large-v3) available via the `M` menu.
 
-Models download automatically on first use.
+Models download automatically on first use. GPU detection is a lightweight
+heuristic (NVIDIA driver present + a CUDA-capable torch build); if it ever picks
+the wrong default on your box, pin one explicitly with `-m fw-base` (or
+`-m qwen3-0.6b`).
 
 ### Optional: streaming ASR (cross-platform, CPU)
 
