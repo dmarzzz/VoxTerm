@@ -1,0 +1,7 @@
+node_modules/
+.env
+creds/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
